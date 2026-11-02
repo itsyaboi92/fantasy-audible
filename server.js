@@ -4,10 +4,11 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const ROOT = __dirname;
-const DB = path.join(ROOT, 'league.json');
-const AUTH = path.join(ROOT, 'accounts.json');
 const PORT = process.env.PORT || 3000;
+const DB = path.join(__dirname, 'league.json');
+const AUTH = path.join(__dirname, 'accounts.json');
+
+const SESSION_DAYS = 30;
 
 const initial = {
   version: 1,
@@ -40,48 +41,99 @@ const initial = {
   transactions: []
 };
 
-let state;
-try {
-  state = JSON.parse(fs.readFileSync(DB, 'utf8'));
-} catch {
-  state = initial;
-  fs.writeFileSync(DB, JSON.stringify(state, null, 2));
+function load(file, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    return fallback;
+  }
 }
 
-let accounts = [];
-try {
-  accounts = JSON.parse(fs.readFileSync(AUTH, 'utf8'));
-} catch {}
+function save(file, value) {
+  const temp = file + '.tmp';
+  fs.writeFileSync(temp, JSON.stringify(value, null, 2), {
+    mode: 0o600
+  });
+  fs.renameSync(temp, file);
+}
 
-const sessions = new Map();
+let state = load(DB, initial);
+let accounts = load(AUTH, []);
+
+if (!Array.isArray(accounts)) {
+  throw new Error('Invalid accounts database');
+}
+
+save(DB, state);
+
 const clients = new Map();
 
-function saveAccounts() {
-  fs.writeFileSync(AUTH, JSON.stringify(accounts, null, 2));
-}
-
-function hash(password, salt) {
+function hashPassword(password, salt) {
   return crypto.scryptSync(password, salt, 64).toString('hex');
 }
 
-function tokenUser(req) {
-  const token = (req.headers.authorization || '')
-    .replace(/^Bearer /, '') ||
-    new URL(req.url, 'http://localhost').searchParams.get('token') ||
-    '';
+function tokenHash(token) {
+  return crypto.createHash('sha256')
+    .update(token)
+    .digest('hex');
+}
 
-  const session = sessions.get(token);
-  if (!session || session.expires < Date.now()) return null;
+function issueToken(account) {
+  const token = crypto.randomBytes(32).toString('hex');
 
-  return accounts.find(a => a.id === session.id) || null;
+  if (!Array.isArray(account.sessions)) {
+    account.sessions = [];
+  }
+
+  account.sessions = account.sessions.filter(
+    s => s.expires > Date.now()
+  );
+
+  account.sessions.push({
+    hash: tokenHash(token),
+    expires: Date.now() + SESSION_DAYS * 86400000
+  });
+
+  save(AUTH, accounts);
+  return token;
+}
+
+function getUser(req) {
+  const url = new URL(req.url, 'http://localhost');
+
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ')
+    ? header.slice(7)
+    : url.searchParams.get('token') || '';
+
+  if (!/^[a-f0-9]{64}$/.test(token)) return null;
+
+  const hashed = tokenHash(token);
+
+  return accounts.find(account =>
+    Array.isArray(account.sessions) &&
+    account.sessions.some(session =>
+      session.hash === hashed &&
+      session.expires > Date.now()
+    )
+  ) || null;
+}
+
+function send(res, status, data) {
+  res.writeHead(status, {
+    'Content-Type': 'application/json',
+    'Cache-Control': 'no-store'
+  });
+  res.end(JSON.stringify(data));
 }
 
 function safeState(user) {
   return {
     ...state,
-    managers: state.managers.map(m => ({
-      ...m,
-      claimed: accounts.some(a => a.manager === m.id)
+    managers: state.managers.map(team => ({
+      ...team,
+      claimed: accounts.some(a => a.manager === team.id)
     })),
     viewer: {
       manager: user.manager,
@@ -91,21 +143,19 @@ function safeState(user) {
   };
 }
 
-function send(res, status, data) {
-  res.writeHead(status, {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*'
-  });
-  res.end(JSON.stringify(data));
-}
-
 function pushState() {
-  for (const [res, userId] of clients) {
-    const user = accounts.find(a => a.id === userId);
-    if (!user) continue;
+  for (const [res, accountId] of clients) {
+    const account = accounts.find(a => a.id === accountId);
+
+    if (!account) {
+      clients.delete(res);
+      continue;
+    }
 
     try {
-      res.write(`data: ${JSON.stringify(safeState(user))}\n\n`);
+      res.write(
+        'data: ' + JSON.stringify(safeState(account)) + '\n\n'
+      );
     } catch {
       clients.delete(res);
     }
@@ -113,73 +163,133 @@ function pushState() {
 }
 
 function broadcast() {
-  state.version++;
-  fs.writeFileSync(DB, JSON.stringify(state, null, 2));
+  state.version = (state.version || 0) + 1;
+  save(DB, state);
   pushState();
 }
 
-function eligibility(starter, bench) {
+function validTeamName(value) {
+  if (typeof value !== 'string') return null;
+
+  const name = value.trim().replace(/\s+/g, ' ');
+
+  if (
+    name.length < 3 ||
+    name.length > 40 ||
+    /[<>\x00-\x1f]/.test(name)
+  ) return null;
+
+  return name;
+}
+
+function nameTaken(name, exceptId) {
+  return state.managers.some(team =>
+    team.id !== exceptId &&
+    team.team.toLowerCase() === name.toLowerCase()
+  );
+}
+
+function eligible(starter, bench) {
   if (!starter || !bench) return null;
   if (starter.owner !== bench.owner) return null;
   if (starter.slot === 'BENCH') return null;
   if (bench.slot !== 'BENCH') return null;
   if (starter.pos !== bench.pos) return null;
 
-  if (bench.team === starter.team && bench.kickoff <= state.phase) {
-    return 'handcuff';
-  }
+  if (
+    starter.team === bench.team &&
+    bench.kickoff <= state.phase
+  ) return 'handcuff';
 
-  if (bench.kickoff > state.phase) {
-    return 'later';
-  }
+  if (bench.kickoff > state.phase) return 'later';
 
   return null;
 }
 
+function readBody(req, res, callback) {
+  let raw = '';
+  let tooLarge = false;
+
+  req.on('data', chunk => {
+    raw += chunk;
+
+    if (raw.length > 20000) {
+      tooLarge = true;
+      req.destroy();
+    }
+  });
+
+  req.on('end', () => {
+    if (tooLarge) return;
+
+    try {
+      const body = JSON.parse(raw || '{}');
+      callback(body);
+    } catch {
+      send(res, 400, { error: 'Invalid JSON' });
+    }
+  });
+}
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
+  const route = url.pathname;
 
-  // ACCOUNT REGISTRATION AND LOGIN
+  if (req.method === 'GET' && route === '/api/teams') {
+    return send(res, 200, state.managers.map(team => ({
+      id: team.id,
+      team: team.team,
+      claimed: accounts.some(a => a.manager === team.id)
+    })));
+  }
+
   if (
     req.method === 'POST' &&
-    (url.pathname === '/api/register' || url.pathname === '/api/login')
+    (route === '/api/register' || route === '/api/login')
   ) {
-    let raw = '';
-
-    req.on('data', chunk => {
-      raw += chunk;
-      if (raw.length > 10000) req.destroy();
-    });
-
-    req.on('end', () => {
-      let body;
-      try {
-        body = JSON.parse(raw);
-      } catch {
-        return send(res, 400, { error: 'Invalid request' });
-      }
-
+    return readBody(req, res, body => {
       const email = String(body.email || '').trim().toLowerCase();
       const password = String(body.password || '');
 
       if (!email.includes('@') || password.length < 10) {
         return send(res, 400, {
-          error: 'Valid email and 10-character password required'
+          error: 'Valid email and password of 10+ characters required'
         });
       }
 
       let account;
 
-      if (url.pathname === '/api/register') {
-        const manager = state.managers.find(m => m.id === body.manager);
+      if (route === '/api/register') {
+        const team = state.managers.find(
+          t => t.id === body.manager
+        );
+
+        if (!team) {
+          return send(res, 400, { error: 'Invalid team slot' });
+        }
 
         if (
-          !manager ||
-          accounts.some(a => a.manager === manager.id) ||
-          accounts.some(a => a.email === email)
+          accounts.some(a => a.email === email) ||
+          accounts.some(a => a.manager === team.id)
         ) {
           return send(res, 409, {
             error: 'Email or team already claimed'
+          });
+        }
+
+        const customName = body.teamName
+          ? validTeamName(body.teamName)
+          : team.team;
+
+        if (!customName) {
+          return send(res, 400, {
+            error: 'Team name must be 3–40 valid characters'
+          });
+        }
+
+        if (nameTaken(customName, team.id)) {
+          return send(res, 409, {
+            error: 'Another team already uses that name'
           });
         }
 
@@ -189,130 +299,117 @@ const server = http.createServer((req, res) => {
           id: crypto.randomUUID(),
           email,
           name: email.split('@')[0],
-          manager: manager.id,
+          manager: team.id,
           commissioner: accounts.length === 0,
           salt,
-          passwordHash: hash(password, salt)
+          passwordHash: hashPassword(password, salt),
+          sessions: []
         };
 
         accounts.push(account);
-        saveAccounts();
+        save(AUTH, accounts);
+
+        const oldName = team.team;
+        team.team = customName;
+
+        state.transactions.unshift({
+          id: crypto.randomUUID(),
+          at: new Date().toISOString(),
+          type: 'REGISTRATION',
+          manager: team.id,
+          details: `${oldName} claimed as ${customName}`
+        });
+
+        broadcast();
       } else {
         account = accounts.find(a => a.email === email);
 
         if (!account) {
-          return send(res, 401, { error: 'Incorrect credentials' });
+          return send(res, 401, {
+            error: 'Incorrect credentials'
+          });
         }
 
-        const candidate = hash(password, account.salt);
+        const candidate = hashPassword(password, account.salt);
+        const stored = account.passwordHash;
 
-        if (!crypto.timingSafeEqual(
-          Buffer.from(candidate, 'hex'),
-          Buffer.from(account.passwordHash, 'hex')
-        )) {
-          return send(res, 401, { error: 'Incorrect credentials' });
+        if (
+          !/^[a-f0-9]{128}$/.test(stored) ||
+          !crypto.timingSafeEqual(
+            Buffer.from(candidate, 'hex'),
+            Buffer.from(stored, 'hex')
+          )
+        ) {
+          return send(res, 401, {
+            error: 'Incorrect credentials'
+          });
         }
       }
 
-      const token = crypto.randomBytes(32).toString('hex');
-
-      sessions.set(token, {
-        id: account.id,
-        expires: Date.now() + 7 * 86400000
-      });
-
-      return send(res, 200, { token });
+      const token = issueToken(account);
+      send(res, 200, { token });
     });
-
-    return;
   }
 
-  // AVAILABLE TEAMS
-  if (req.method === 'GET' && url.pathname === '/api/teams') {
-    return send(res, 200, state.managers.map(m => ({
-      id: m.id,
-      team: m.team,
-      claimed: accounts.some(a => a.manager === m.id)
-    })));
-  }
-
-  const user = url.pathname.startsWith('/api/')
-    ? tokenUser(req)
+  const user = route.startsWith('/api/')
+    ? getUser(req)
     : null;
 
-  if (url.pathname.startsWith('/api/') && !user) {
-    return send(res, 401, { error: 'Please sign in' });
+  if (route.startsWith('/api/') && !user) {
+    return send(res, 401, {
+      error: 'Please sign in'
+    });
   }
 
-  // LEAGUE STATE
-  if (req.method === 'GET' && url.pathname === '/api/state') {
+  if (req.method === 'GET' && route === '/api/state') {
     return send(res, 200, safeState(user));
   }
 
-  // REAL-TIME MULTIPLAYER EVENTS
-  if (req.method === 'GET' && url.pathname === '/api/events') {
+  if (req.method === 'GET' && route === '/api/events') {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive'
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive'
     });
 
-    res.write(`data: ${JSON.stringify(safeState(user))}\n\n`);
-    clients.set(res, user.id);
+    res.write(
+      'data: ' + JSON.stringify(safeState(user)) + '\n\n'
+    );
 
+    clients.set(res, user.id);
     req.on('close', () => clients.delete(res));
     return;
   }
 
-  // AUTHENTICATED ACTIONS
-  if (req.method === 'POST' && url.pathname.startsWith('/api/')) {
-    let raw = '';
+  if (req.method === 'POST' && route.startsWith('/api/')) {
+    return readBody(req, res, body => {
 
-    req.on('data', chunk => raw += chunk);
+      if (route === '/api/team-name') {
+        const name = validTeamName(body.name);
 
-    req.on('end', () => {
-      let body;
-
-      try {
-        body = JSON.parse(raw || '{}');
-      } catch {
-        return send(res, 400, { error: 'Invalid JSON' });
-      }
-
-      // CUSTOM TEAM NAME
-      if (url.pathname === '/api/team-name') {
-        const name = String(body.name || '')
-          .trim()
-          .replace(/\s+/g, ' ');
-
-        if (
-          name.length < 3 ||
-          name.length > 40 ||
-          /[<>\x00-\x1f]/.test(name)
-        ) {
+        if (!name) {
           return send(res, 400, {
-            error: 'Team name must contain 3–40 valid characters'
+            error: 'Team name must be 3–40 valid characters'
           });
         }
 
         const team = state.managers.find(
-          m => m.id === user.manager
+          t => t.id === user.manager
         );
 
         if (!team) {
-          return send(res, 403, { error: 'Team not found' });
+          return send(res, 403, {
+            error: 'Team not found'
+          });
         }
 
-        if (state.managers.some(
-          m => m.id !== team.id &&
-          m.team.toLowerCase() === name.toLowerCase()
-        )) {
+        if (nameTaken(name, team.id)) {
           return send(res, 409, {
             error: 'Another team already uses that name'
           });
         }
 
-        const oldName = team.team;
+        const previous = team.team;
         team.team = name;
 
         state.transactions.unshift({
@@ -320,29 +417,24 @@ const server = http.createServer((req, res) => {
           at: new Date().toISOString(),
           type: 'RENAME',
           manager: team.id,
-          details: `${oldName} renamed to ${name}`
+          details: `${previous} renamed to ${name}`
         });
 
         broadcast();
-
-        return send(res, 200, {
-          ok: true,
-          team: name
-        });
+        return send(res, 200, { ok: true, team: name });
       }
 
-      // INJURY SUBSTITUTION
-      if (url.pathname === '/api/substitute') {
+      if (route === '/api/substitute') {
         const injury = state.injuries.find(
           i => i.id === body.injury && i.active
         );
 
         const starter = state.players.find(
-          p => p.id === injury?.player
+          x => x.id === injury?.player
         );
 
         const bench = state.players.find(
-          p => p.id === body.bench
+          x => x.id === body.bench
         );
 
         if (!starter || starter.owner !== user.manager) {
@@ -351,7 +443,7 @@ const server = http.createServer((req, res) => {
           });
         }
 
-        const mode = eligibility(starter, bench);
+        const mode = eligible(starter, bench);
 
         if (!mode) {
           return send(res, 409, {
@@ -360,10 +452,11 @@ const server = http.createServer((req, res) => {
         }
 
         const oldSlot = starter.slot;
-        const previous = starter.points;
+        const oldPoints = starter.points;
 
         starter.slot = 'BENCH';
         bench.slot = oldSlot;
+
         bench.scoringMode = mode;
         bench.scoreAtSwap = mode === 'handcuff'
           ? bench.points
@@ -380,16 +473,14 @@ const server = http.createServer((req, res) => {
           at: new Date().toISOString(),
           type: 'SUBSTITUTION',
           manager: starter.owner,
-          details: `${starter.name} (${previous.toFixed(1)} pts) replaced by ${bench.name} (${mode})`
+          details: `${starter.name} (${oldPoints.toFixed(1)} pts) replaced by ${bench.name} (${mode})`
         });
 
         broadcast();
-
         return send(res, 200, { ok: true, mode });
       }
 
-      // KEEP INJURED STARTER
-      if (url.pathname === '/api/keep') {
+      if (route === '/api/keep') {
         const injury = state.injuries.find(
           i => i.id === body.injury && i.active
         );
@@ -401,7 +492,7 @@ const server = http.createServer((req, res) => {
         }
 
         const starter = state.players.find(
-          p => p.id === injury.player
+          x => x.id === injury.player
         );
 
         if (starter?.owner !== user.manager) {
@@ -421,12 +512,10 @@ const server = http.createServer((req, res) => {
         });
 
         broadcast();
-
         return send(res, 200, { ok: true });
       }
 
-      // COMMISSIONER DEMO CONTROLS
-      if (url.pathname === '/api/demo') {
+      if (route === '/api/demo') {
         if (!user.commissioner) {
           return send(res, 403, {
             error: 'Commissioner only'
@@ -436,14 +525,18 @@ const server = http.createServer((req, res) => {
         if (body.action === 'advance') {
           state.phase = Math.min(4, state.phase + 1);
 
-          state.players.forEach(p => {
-            if (p.kickoff <= state.phase && p.status === 'upcoming') {
-              p.status = 'playing';
+          state.players.forEach(player => {
+            if (
+              player.kickoff <= state.phase &&
+              player.status === 'upcoming'
+            ) {
+              player.status = 'playing';
             }
           });
         } else if (body.action === 'injure') {
           const player = state.players.find(
-            p => p.id === body.player && p.slot !== 'BENCH'
+            x => x.id === body.player &&
+            x.slot !== 'BENCH'
           );
 
           if (!player) {
@@ -462,7 +555,7 @@ const server = http.createServer((req, res) => {
           });
         } else if (body.action === 'points') {
           const player = state.players.find(
-            p => p.id === body.player
+            x => x.id === body.player
           );
 
           if (!player) {
@@ -471,7 +564,15 @@ const server = http.createServer((req, res) => {
             });
           }
 
-          player.points += Number(body.amount) || 0;
+          const amount = Number(body.amount);
+
+          if (!Number.isFinite(amount) || Math.abs(amount) > 100) {
+            return send(res, 400, {
+              error: 'Invalid points amount'
+            });
+          }
+
+          player.points += amount;
 
           if (player.scoringMode === 'handcuff') {
             player.credited = Math.max(
@@ -481,7 +582,7 @@ const server = http.createServer((req, res) => {
           }
         } else {
           return send(res, 400, {
-            error: 'Unknown action'
+            error: 'Unknown demo action'
           });
         }
 
@@ -491,15 +592,26 @@ const server = http.createServer((req, res) => {
 
       return send(res, 404, { error: 'Not found' });
     });
-
-    return;
   }
 
-  // SERVE WEBSITE
-  const publicRoot = path.join(ROOT, 'public');
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.writeHead(405);
+    return res.end();
+  }
+
+  const publicRoot = path.resolve(__dirname, 'public');
+
+  let decodedPath;
+  try {
+    decodedPath = decodeURIComponent(route);
+  } catch {
+    res.writeHead(400);
+    return res.end();
+  }
+
   const requested = path.resolve(
     publicRoot,
-    '.' + (url.pathname === '/' ? '/index.html' : url.pathname)
+    '.' + (decodedPath === '/' ? '/index.html' : decodedPath)
   );
 
   if (
@@ -510,20 +622,26 @@ const server = http.createServer((req, res) => {
     return res.end();
   }
 
-  fs.readFile(requested, (err, data) => {
-    if (err) {
+  fs.readFile(requested, (error, data) => {
+    if (error) {
       res.writeHead(404);
       return res.end();
     }
 
     const type = requested.endsWith('.html')
-      ? 'text/html'
+      ? 'text/html; charset=utf-8'
       : requested.endsWith('.js')
-      ? 'application/javascript'
-      : 'text/css';
+        ? 'application/javascript; charset=utf-8'
+        : requested.endsWith('.css')
+          ? 'text/css; charset=utf-8'
+          : 'application/octet-stream';
 
-    res.writeHead(200, { 'Content-Type': type });
-    res.end(data);
+    res.writeHead(200, {
+      'Content-Type': type,
+      'X-Content-Type-Options': 'nosniff'
+    });
+
+    res.end(req.method === 'HEAD' ? undefined : data);
   });
 });
 
