@@ -1,13 +1,17 @@
+
 {
   "name": "fantasy-audible",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Fantasy Audible multiplayer prototype",
+  "description": "Fantasy Audible multiplayer fantasy football application",
   "scripts": {
     "start": "node server.js",
     "test": "node --check server.js && node --check public/app.js"
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
   }
 }
