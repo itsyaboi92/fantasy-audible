@@ -3,26 +3,13 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { Pool } = require('pg');
 
 const PORT = process.env.PORT || 3000;
-const DB = path.join(__dirname, 'league.json');
-const AUTH = path.join(__dirname, 'accounts.json');
 const MAX_TEAMS = 12;
-
-function load(file, fallback) {
-  try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch (e) {
-    if (e.code !== 'ENOENT') throw e;
-    return fallback;
-  }
-}
-
-function save(file, value) {
-  const temp = file + '.tmp';
-  fs.writeFileSync(temp, JSON.stringify(value, null, 2), {mode:0o600});
-  fs.renameSync(temp, file);
-}
+if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const clients = new Map();
 
 const demoPlayers = [
   ['p1','Joe Burrow','CIN','QB',1,'injured',8.6,'QB','m1'],
@@ -37,435 +24,321 @@ const demoPlayers = [
   ['p10','Derrick Henry','BAL','RB',1,'playing',17.5,'RB','m2'],
   ['p11','Zay Flowers','BAL','WR',1,'playing',11.1,'WR','m2'],
   ['p12','Mark Andrews','BAL','TE',1,'playing',6.3,'TE','m2']
-].map(x => {
-  const [id,name,team,pos,kickoff,status,points,slot,owner] = x;
-  return {id,name,team,pos,kickoff,status,points,slot,owner};
-});
+].map(([id,name,team,pos,kickoff,status,points,slot,owner]) =>
+  ({id,name,team,pos,kickoff,status,points,slot,owner}));
 
-const initial = {
-  version:1,
-  league:'Fantasy Audible League',
-  week:9,
-  phase:2,
-  managers:[
-    {id:'m1',name:'Manager 1',team:'Fourth Down Rebels'},
-    {id:'m2',name:'Manager 2',team:'Red Zone Raiders'},
-    {id:'m3',name:'Manager 3',team:'Sunday Legends'},
-    {id:'m4',name:'Manager 4',team:'Gridiron Kings'}
-  ],
-  players:demoPlayers,
-  injuries:[{id:'i1',player:'p1',active:true,description:'Demo injury'}],
-  transactions:[]
-};
-
-let state = load(DB, initial);
-let accounts = load(AUTH, []);
-
-if (!Array.isArray(accounts)) throw Error('Invalid accounts file');
-
-state.managers ||= [];
-state.players ||= [];
-state.injuries ||= [];
-state.transactions ||= [];
-
-const clients = new Map();
-
-function hashPassword(password,salt) {
-  return crypto.scryptSync(password,salt,64).toString('hex');
-}
-
-function tokenHash(token) {
-  return crypto.createHash('sha256').update(token).digest('hex');
-}
-
-function issueToken(account) {
-  const token = crypto.randomBytes(32).toString('hex');
-  account.sessions ||= [];
-  account.sessions = account.sessions.filter(s=>s.expires>Date.now());
-  account.sessions.push({
-    hash:tokenHash(token),
-    expires:Date.now()+30*86400000
-  });
-  save(AUTH,accounts);
-  return token;
-}
-
-function getUser(req) {
-  const url = new URL(req.url,'http://localhost');
-  const auth = req.headers.authorization || '';
-  const token = auth.startsWith('Bearer ')
-    ? auth.slice(7)
-    : url.searchParams.get('token') || '';
-
-  if (!/^[a-f0-9]{64}$/.test(token)) return null;
-  const hashed = tokenHash(token);
-
-  return accounts.find(a =>
-    Array.isArray(a.sessions) &&
-    a.sessions.some(s=>s.hash===hashed&&s.expires>Date.now())
-  ) || null;
-}
-
-function send(res,status,data) {
-  res.writeHead(status,{
-    'Content-Type':'application/json',
-    'Cache-Control':'no-store'
-  });
-  res.end(JSON.stringify(data));
-}
-
-function safeState(user) {
+function initialState() {
   return {
-    ...state,
-    managers:state.managers.map(m=>({
-      ...m,
-      claimed:accounts.some(a=>a.manager===m.id)
-    })),
-    viewer:{
-      manager:user.manager,
-      commissioner:user.commissioner,
-      name:user.name
-    }
+    version:1, league:'Fantasy Audible League', week:9, phase:2,
+    managers:[], players:demoPlayers,
+    injuries:[{id:'i1',player:'p1',active:true,description:'Demo injury'}],
+    transactions:[]
   };
 }
 
-function pushState() {
-  for (const [res,id] of clients) {
-    const account = accounts.find(a=>a.id===id);
-    if (!account) {
-      clients.delete(res);
-      continue;
-    }
-    try {
-      res.write('data: '+JSON.stringify(safeState(account))+'\n\n');
-    } catch {
-      clients.delete(res);
-    }
-  }
-}
-
-function broadcast() {
-  state.version=(state.version||0)+1;
-  save(DB,state);
-  pushState();
-}
-
-function teamName(value) {
-  if (typeof value!=='string') return null;
-  const name=value.trim().replace(/\s+/g,' ');
-  if (name.length<3||name.length>40||/[<>\x00-\x1f]/.test(name))
-    return null;
-  return name;
-}
-
-function taken(name,except) {
-  return state.managers.some(m=>
-    m.id!==except && m.team.toLowerCase()===name.toLowerCase()
+async function init() {
+  await pool.query(`CREATE TABLE IF NOT EXISTS fantasy_audible_store (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    state JSONB NOT NULL,
+    accounts JSONB NOT NULL
+  )`);
+  await pool.query(
+    'INSERT INTO fantasy_audible_store (id,state,accounts) VALUES (1,$1,$2) ON CONFLICT (id) DO NOTHING',
+    [JSON.stringify(initialState()), JSON.stringify([])]
   );
 }
 
-function availableSlot() {
-  for (const team of state.managers) {
-    if (!accounts.some(a=>a.manager===team.id)) return team;
-  }
-  if (state.managers.length>=MAX_TEAMS) return null;
-  const used=new Set(state.managers.map(m=>m.id));
-  let number=1;
-  while(used.has('m'+number)) number++;
-  const team={
-    id:'m'+number,
-    name:'Manager '+number,
-    team:'Team '+number
-  };
-  state.managers.push(team);
-  return team;
+async function snapshot() {
+  const result = await pool.query('SELECT state,accounts FROM fantasy_audible_store WHERE id=1');
+  if (!result.rows.length) throw new Error('Database not initialized');
+  return result.rows[0];
 }
 
-function eligibility(starter,bench) {
-  if (!starter||!bench) return null;
-  if (starter.owner!==bench.owner) return null;
-  if (starter.slot==='BENCH'||bench.slot!=='BENCH') return null;
-  if (starter.pos!==bench.pos) return null;
+// All changes to accounts and league state happen in one locked transaction.
+async function change(fn) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query('SELECT state,accounts FROM fantasy_audible_store WHERE id=1 FOR UPDATE');
+    const {state,accounts} = result.rows[0];
+    const output = await fn(state,accounts);
+    if (output && output.error) {
+      await client.query('ROLLBACK');
+      return output;
+    }
+    state.version = (state.version || 0) + 1;
+    await client.query('UPDATE fantasy_audible_store SET state=$1, accounts=$2 WHERE id=1',
+      [JSON.stringify(state),JSON.stringify(accounts)]);
+    await client.query('COMMIT');
+    pushState(state,accounts);
+    return output;
+  } catch(e) {
+    try { await client.query('ROLLBACK'); } catch {}
+    throw e;
+  } finally {
+    client.release();
+  }
+}
 
-  if (starter.team===bench.team&&bench.kickoff<=state.phase)
-    return 'handcuff';
-
+function failure(status,error) { return {error,status}; }
+function hashPassword(password,salt) {
+  return crypto.scryptSync(password,salt,64).toString('hex');
+}
+function tokenHash(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+function findUser(req,accounts) {
+  const url = new URL(req.url,'http://localhost');
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : url.searchParams.get('token') || '';
+  if (!/^[a-f0-9]{64}$/.test(token)) return null;
+  const hashed = tokenHash(token);
+  return accounts.find(a => Array.isArray(a.sessions) &&
+    a.sessions.some(s => s.hash === hashed && s.expires > Date.now())) || null;
+}
+function safeState(state,accounts,user) {
+  return {...state,
+    managers:state.managers.map(m=>({...m,claimed:accounts.some(a=>a.manager===m.id)})),
+    viewer:{manager:user.manager,commissioner:user.commissioner,name:user.name}
+  };
+}
+function pushState(state,accounts) {
+  for (const [res,id] of clients) {
+    const account=accounts.find(a=>a.id===id);
+    if (!account) { clients.delete(res); continue; }
+    try { res.write('data: '+JSON.stringify(safeState(state,accounts,account))+'\n\n'); }
+    catch { clients.delete(res); }
+  }
+}
+function send(res,status,data) {
+  res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});
+  res.end(JSON.stringify(data));
+}
+function teamName(value) {
+  if (typeof value !== 'string') return null;
+  const name=value.trim().replace(/\s+/g,' ');
+  if (name.length<3 || name.length>40 || /[<>\x00-\x1f]/.test(name)) return null;
+  return name;
+}
+function taken(state,name,except) {
+  return state.managers.some(m=>m.id!==except && m.team.toLowerCase()===name.toLowerCase());
+}
+function availableSlot(state,accounts) {
+  const existing=state.managers.find(m=>!accounts.some(a=>a.manager===m.id));
+  if (existing) return existing;
+  if (state.managers.length>=MAX_TEAMS) return null;
+  const used=new Set(state.managers.map(m=>m.id));
+  let n=1; while (used.has('m'+n)) n++;
+  const slot={id:'m'+n,name:'Manager '+n,team:'Team '+n};
+  state.managers.push(slot);
+  return slot;
+}
+function eligibility(state,starter,bench) {
+  if (!starter || !bench || starter.owner!==bench.owner ||
+      starter.slot==='BENCH' || bench.slot!=='BENCH' || starter.pos!==bench.pos) return null;
+  if (starter.team===bench.team && bench.kickoff<=state.phase) return 'handcuff';
   if (bench.kickoff>state.phase) return 'later';
   return null;
 }
-
-function readBody(req,res,callback) {
-  let raw='';
-  req.on('data',chunk=>{
-    raw+=chunk;
-    if(raw.length>20000) req.destroy();
-  });
-  req.on('end',()=>{
-    try {
-      callback(JSON.parse(raw||'{}'));
-    } catch {
-      if (!res.headersSent) send(res,400,{error:'Invalid request'});
-    }
+function bodyOf(req) {
+  return new Promise((resolve,reject)=>{
+    let raw='';
+    req.on('data',chunk=>{
+      raw+=chunk;
+      if (raw.length>20000) reject(new Error('Request too large'));
+    });
+    req.on('end',()=>{
+      try { resolve(JSON.parse(raw||'{}')); }
+      catch { reject(new Error('Invalid JSON')); }
+    });
+    req.on('error',reject);
   });
 }
+function audit(state,type,manager,details) {
+  state.transactions.unshift({id:crypto.randomUUID(),at:new Date().toISOString(),type,manager,details});
+}
 
-const server=http.createServer((req,res)=>{
-  const url=new URL(req.url,'http://localhost');
-  const route=url.pathname;
-
-  if(req.method==='GET'&&route==='/api/teams') {
-    return send(res,200,state.managers.map(m=>({
-      id:m.id,team:m.team,
-      claimed:accounts.some(a=>a.manager===m.id)
-    })));
+async function api(req,res,route) {
+  if (req.method==='GET' && route==='/api/teams') {
+    const {state,accounts}=await snapshot();
+    return send(res,200,state.managers.map(m=>({id:m.id,team:m.team,claimed:accounts.some(a=>a.manager===m.id)})));
   }
 
-  if(req.method==='POST'&&
-    (route==='/api/register'||route==='/api/login')) {
-    return readBody(req,res,body=>{
-      const email=String(body.email||'').trim().toLowerCase();
-      const password=String(body.password||'');
-
-      if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||password.length<10)
-        return send(res,400,{error:'Valid email and 10-character password required'});
-
-      let account;
-
-      if(route==='/api/register') {
-        const name=teamName(body.teamName);
-        if(!name)
-          return send(res,400,{error:'Team name must be 3–40 valid characters'});
-
-        if(accounts.some(a=>a.email===email))
-          return send(res,409,{error:'Email already registered'});
-
-        if(taken(name))
-          return send(res,409,{error:'Team name already taken'});
-
-        const slot=availableSlot();
-        if(!slot)
-          return send(res,409,{error:'League is full (12 teams)'});
-
-        const salt=crypto.randomBytes(16).toString('hex');
-
-        account={
-          id:crypto.randomUUID(),
-          email,
-          name:email.split('@')[0],
-          manager:slot.id,
-          commissioner:accounts.length===0,
-          salt,
-          passwordHash:hashPassword(password,salt),
-          sessions:[]
-        };
-
-        slot.team=name;
-        accounts.push(account);
-        save(AUTH,accounts);
-
-        state.transactions.unshift({
-          id:crypto.randomUUID(),
-          at:new Date().toISOString(),
-          type:'REGISTRATION',
-          manager:slot.id,
-          details:name+' joined the league'
-        });
-        broadcast();
-      } else {
-        account=accounts.find(a=>a.email===email);
-        if(!account)
-          return send(res,401,{error:'Incorrect credentials'});
-
-        const candidate=hashPassword(password,account.salt);
-        if(
-          !/^[a-f0-9]{128}$/.test(account.passwordHash)||
-          !crypto.timingSafeEqual(
-            Buffer.from(candidate,'hex'),
-            Buffer.from(account.passwordHash,'hex')
-          )
-        ) return send(res,401,{error:'Incorrect credentials'});
-      }
-
-      return send(res,200,{token:issueToken(account)});
+  if (req.method==='POST' && route==='/api/register') {
+    const body=await bodyOf(req);
+    const email=String(body.email||'').trim().toLowerCase();
+    const password=String(body.password||'');
+    const name=teamName(body.teamName);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || password.length<10)
+      return send(res,400,{error:'Valid email and 10-character password required'});
+    if (!name) return send(res,400,{error:'Team name must be 3–40 valid characters'});
+    const result=await change((state,accounts)=>{
+      if (accounts.some(a=>a.email===email)) return failure(409,'Email already registered');
+      if (taken(state,name)) return failure(409,'Team name already taken');
+      const slot=availableSlot(state,accounts);
+      if (!slot) return failure(409,'League is full (12 teams)');
+      const salt=crypto.randomBytes(16).toString('hex');
+      const token=crypto.randomBytes(32).toString('hex');
+      const account={id:crypto.randomUUID(),email,name:email.split('@')[0],
+        manager:slot.id,commissioner:accounts.length===0,salt,
+        passwordHash:hashPassword(password,salt),
+        sessions:[{hash:tokenHash(token),expires:Date.now()+30*86400000}]};
+      slot.team=name;
+      accounts.push(account);
+      audit(state,'REGISTRATION',slot.id,name+' joined the league');
+      return {token};
     });
+    return send(res,result.status||200,result);
   }
 
-  const user=route.startsWith('/api/')?getUser(req):null;
-  if(route.startsWith('/api/')&&!user)
-    return send(res,401,{error:'Please sign in'});
-
-  if(req.method==='GET'&&route==='/api/state')
-    return send(res,200,safeState(user));
-
-  if(req.method==='GET'&&route==='/api/events') {
-    res.writeHead(200,{
-      'Content-Type':'text/event-stream',
-      'Cache-Control':'no-cache, no-transform',
-      Connection:'keep-alive'
+  if (req.method==='POST' && route==='/api/login') {
+    const body=await bodyOf(req);
+    const email=String(body.email||'').trim().toLowerCase();
+    const password=String(body.password||'');
+    const result=await change((state,accounts)=>{
+      const account=accounts.find(a=>a.email===email);
+      if (!account || !/^[a-f0-9]{128}$/.test(account.passwordHash))
+        return failure(401,'Incorrect credentials');
+      const candidate=hashPassword(password,account.salt);
+      if (!crypto.timingSafeEqual(Buffer.from(candidate,'hex'),Buffer.from(account.passwordHash,'hex')))
+        return failure(401,'Incorrect credentials');
+      const token=crypto.randomBytes(32).toString('hex');
+      account.sessions=(account.sessions||[]).filter(s=>s.expires>Date.now());
+      account.sessions.push({hash:tokenHash(token),expires:Date.now()+30*86400000});
+      return {token};
     });
-    res.write('data: '+JSON.stringify(safeState(user))+'\n\n');
+    return send(res,result.status||200,result);
+  }
+
+  const current=await snapshot();
+  const user=findUser(req,current.accounts);
+  if (!user) return send(res,401,{error:'Please sign in'});
+
+  if (req.method==='GET' && route==='/api/state')
+    return send(res,200,safeState(current.state,current.accounts,user));
+
+  if (req.method==='GET' && route==='/api/events') {
+    res.writeHead(200,{'Content-Type':'text/event-stream',
+      'Cache-Control':'no-cache, no-transform',Connection:'keep-alive'});
+    res.write('data: '+JSON.stringify(safeState(current.state,current.accounts,user))+'\n\n');
     clients.set(res,user.id);
     req.on('close',()=>clients.delete(res));
     return;
   }
 
-  if(req.method==='POST'&&route.startsWith('/api/')) {
-    return readBody(req,res,body=>{
-      if(route==='/api/team-name') {
-        const name=teamName(body.name);
-        const team=state.managers.find(m=>m.id===user.manager);
-        if(!team) return send(res,403,{error:'Team not found'});
-        if(!name) return send(res,400,{error:'Invalid team name'});
-        if(taken(name,team.id))
-          return send(res,409,{error:'Team name already taken'});
+  if (req.method!=='POST') return send(res,405,{error:'Method not allowed'});
+  const body=await bodyOf(req);
+  const result=await change((state,accounts)=>{
+    // Check authorization again while the transaction is locked.
+    const actor=findUser(req,accounts);
+    if (!actor) return failure(401,'Session expired');
 
-        const old=team.team;
-        team.team=name;
-        state.transactions.unshift({
-          id:crypto.randomUUID(),
-          at:new Date().toISOString(),
-          type:'RENAME',
-          manager:team.id,
-          details:old+' renamed to '+name
+    if (route==='/api/team-name') {
+      const name=teamName(body.name);
+      const team=state.managers.find(m=>m.id===actor.manager);
+      if (!team) return failure(403,'Team not found');
+      if (!name) return failure(400,'Invalid team name');
+      if (taken(state,name,team.id)) return failure(409,'Team name already taken');
+      const old=team.team;
+      team.team=name;
+      audit(state,'RENAME',team.id,old+' renamed to '+name);
+      return {ok:true,team:name};
+    }
+
+    if (route==='/api/substitute') {
+      const injury=state.injuries.find(i=>i.id===body.injury && i.active);
+      const starter=state.players.find(p=>p.id===injury?.player);
+      const bench=state.players.find(p=>p.id===body.bench);
+      if (!starter || starter.owner!==actor.manager) return failure(403,'Not your team or injury unavailable');
+      const mode=eligibility(state,starter,bench);
+      if (!mode) return failure(409,'Replacement not eligible');
+      const slot=starter.slot;
+      const previous=starter.points;
+      starter.slot='BENCH';
+      bench.slot=slot;
+      bench.scoringMode=mode;
+      bench.scoreAtSwap=mode==='handcuff'?bench.points:0;
+      bench.credited=mode==='handcuff'?0:bench.points;
+      injury.active=false;
+      audit(state,'SUBSTITUTION',actor.manager,
+        starter.name+' ('+previous.toFixed(1)+' pts) replaced by '+bench.name+' ('+mode+')');
+      return {ok:true,mode};
+    }
+
+    if (route==='/api/keep') {
+      const injury=state.injuries.find(i=>i.id===body.injury && i.active);
+      if (!injury) return failure(409,'Injury already resolved');
+      const starter=state.players.find(p=>p.id===injury.player);
+      if (starter?.owner!==actor.manager) return failure(403,'Not your team');
+      injury.active=false;
+      audit(state,'KEEP',actor.manager,'Manager retained injured starter');
+      return {ok:true};
+    }
+
+    if (route==='/api/demo') {
+      if (!actor.commissioner) return failure(403,'Commissioner only');
+      if (body.action==='advance') {
+        state.phase=Math.min(4,state.phase+1);
+        state.players.forEach(p=>{
+          if (p.kickoff<=state.phase && p.status==='upcoming') p.status='playing';
         });
-        broadcast();
-        return send(res,200,{ok:true,team:name});
-      }
+      } else if (body.action==='injure') {
+        const player=state.players.find(p=>p.id===body.player && p.slot!=='BENCH');
+        if (!player) return failure(400,'Choose a starter');
+        if (state.injuries.some(i=>i.player===player.id && i.active))
+          return failure(409,'Injury already pending');
+        player.status='injured';
+        state.injuries.push({id:crypto.randomUUID(),player:player.id,active:true,description:'Demo injury event'});
+      } else if (body.action==='points') {
+        const player=state.players.find(p=>p.id===body.player);
+        const amount=Number(body.amount);
+        if (!player || !Number.isFinite(amount) || Math.abs(amount)>100)
+          return failure(400,'Invalid player or points');
+        player.points+=amount;
+        if (player.scoringMode==='handcuff')
+          player.credited=player.points-player.scoreAtSwap;
+      } else return failure(400,'Unknown action');
+      return {ok:true};
+    }
+    return failure(404,'Not found');
+  });
+  return send(res,result.status||200,result);
+}
 
-      if(route==='/api/substitute') {
-        const injury=state.injuries.find(i=>i.id===body.injury&&i.active);
-        const starter=state.players.find(p=>p.id===injury?.player);
-        const bench=state.players.find(p=>p.id===body.bench);
-
-        if(!starter||starter.owner!==user.manager)
-          return send(res,403,{error:'Not your team'});
-
-        const mode=eligibility(starter,bench);
-        if(!mode)
-          return send(res,409,{error:'Replacement not eligible'});
-
-        const slot=starter.slot;
-        const previous=starter.points;
-        starter.slot='BENCH';
-        bench.slot=slot;
-        bench.scoringMode=mode;
-        bench.scoreAtSwap=mode==='handcuff'?bench.points:0;
-        bench.credited=mode==='handcuff'?0:bench.points;
-        injury.active=false;
-
-        state.transactions.unshift({
-          id:crypto.randomUUID(),
-          at:new Date().toISOString(),
-          type:'SUBSTITUTION',
-          manager:user.manager,
-          details:starter.name+' ('+previous.toFixed(1)+
-            ' pts) replaced by '+bench.name+' ('+mode+')'
-        });
-        broadcast();
-        return send(res,200,{ok:true,mode});
-      }
-
-      if(route==='/api/keep') {
-        const injury=state.injuries.find(i=>i.id===body.injury&&i.active);
-        if(!injury)
-          return send(res,409,{error:'Injury already resolved'});
-        const starter=state.players.find(p=>p.id===injury.player);
-        if(starter?.owner!==user.manager)
-          return send(res,403,{error:'Not your team'});
-        injury.active=false;
-        state.transactions.unshift({
-          id:crypto.randomUUID(),
-          at:new Date().toISOString(),
-          type:'KEEP',
-          manager:user.manager,
-          details:'Manager retained injured starter'
-        });
-        broadcast();
-        return send(res,200,{ok:true});
-      }
-
-      if(route==='/api/demo') {
-        if(!user.commissioner)
-          return send(res,403,{error:'Commissioner only'});
-
-        if(body.action==='advance') {
-          state.phase=Math.min(4,state.phase+1);
-          state.players.forEach(p=>{
-            if(p.kickoff<=state.phase&&p.status==='upcoming')
-              p.status='playing';
-          });
-        } else if(body.action==='injure') {
-          const player=state.players.find(p=>
-            p.id===body.player&&p.slot!=='BENCH'
-          );
-          if(!player)
-            return send(res,400,{error:'Choose a starter'});
-          if(state.injuries.some(i=>i.player===player.id&&i.active))
-            return send(res,409,{error:'Injury already pending'});
-          player.status='injured';
-          state.injuries.push({
-            id:crypto.randomUUID(),
-            player:player.id,
-            active:true,
-            description:'Demo injury event'
-          });
-        } else if(body.action==='points') {
-          const player=state.players.find(p=>p.id===body.player);
-          const amount=Number(body.amount);
-          if(!player||!Number.isFinite(amount)||Math.abs(amount)>100)
-            return send(res,400,{error:'Invalid player or points'});
-          player.points+=amount;
-          if(player.scoringMode==='handcuff')
-            player.credited=Math.max(0,player.points-player.scoreAtSwap);
-        } else {
-          return send(res,400,{error:'Unknown action'});
-        }
-
-        broadcast();
-        return send(res,200,{ok:true});
-      }
-
-      return send(res,404,{error:'Not found'});
-    });
+function staticFile(req,res,route) {
+  if (req.method!=='GET' && req.method!=='HEAD') {
+    res.writeHead(405); return res.end();
   }
-
-  if(req.method!=='GET'&&req.method!=='HEAD') {
-    res.writeHead(405);
-    return res.end();
-  }
-
   const root=path.resolve(__dirname,'public');
   let decoded;
-  try {
-    decoded=decodeURIComponent(route);
-  } catch {
-    res.writeHead(400);
-    return res.end();
-  }
-
+  try { decoded=decodeURIComponent(route); }
+  catch { res.writeHead(400); return res.end(); }
   const file=path.resolve(root,'.'+(decoded==='/'?'/index.html':decoded));
-  if(file!==root&&!file.startsWith(root+path.sep)) {
-    res.writeHead(403);
-    return res.end();
+  if (file!==root && !file.startsWith(root+path.sep)) {
+    res.writeHead(403); return res.end();
   }
-
   fs.readFile(file,(err,data)=>{
-    if(err) {
-      res.writeHead(404);
-      return res.end();
-    }
+    if (err) { res.writeHead(404); return res.end(); }
     const type=file.endsWith('.html')?'text/html; charset=utf-8':
       file.endsWith('.js')?'application/javascript; charset=utf-8':
-      file.endsWith('.css')?'text/css; charset=utf-8':
-      'application/octet-stream';
-    res.writeHead(200,{
-      'Content-Type':type,
-      'X-Content-Type-Options':'nosniff'
-    });
+      file.endsWith('.css')?'text/css; charset=utf-8':'application/octet-stream';
+    res.writeHead(200,{'Content-Type':type,'X-Content-Type-Options':'nosniff',
+      'Cache-Control':'no-cache'});
     res.end(req.method==='HEAD'?undefined:data);
   });
+}
+
+const server=http.createServer((req,res)=>{
+  const route=new URL(req.url,'http://localhost').pathname;
+  if (route.startsWith('/api/')) {
+    api(req,res,route).catch(e=>{
+      console.error('API error:',e);
+      if (!res.headersSent) send(res,500,{error:'Server error'});
+      else res.end();
+    });
+  } else staticFile(req,res,route);
 });
 
-server.listen(PORT,()=>{
-  console.log('Fantasy Audible running on port '+PORT);
-});
+init().then(()=>server.listen(PORT,()=>
+  console.log('Fantasy Audible PostgreSQL server running on '+PORT)
+)).catch(e=>{console.error('Database startup failed:',e);process.exit(1)});
