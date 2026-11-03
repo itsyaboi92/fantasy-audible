@@ -1,5 +1,7 @@
 let state=null,manager=null,tab='Home',token=localStorage.getItem('audibleToken');
 let espn=null,espnError='',draftSearch='',draftPosition='ALL',loadingESPN=false;
+let weeklyDirectory={},weeklyUpdatedAt=null,weeklyLoading=false,weeklyLastFetch=0;
+let playerSort='rank';
 let transactionData=null,transactionError='',loadingTransactions=false,lastTransactionFetch=0;
 let serverOffsetMs=0,clockSynchronized=false,clockSyncInProgress=false,lastClockSync=0;
 let settingsDraft=null,prefsDraft=null,settingsDirty=false,prefsDirty=false;
@@ -81,6 +83,38 @@ async function loadESPN(force=false){if(loadingESPN||(espn&&!force))return;loadi
   try{const response=await fetch('/api/espn/players',{headers:{Authorization:'Bearer '+token}});
     const result=await response.json();if(!response.ok)throw Error(result.details||result.error);espn=result;}
   catch(e){espnError=e.message;}finally{loadingESPN=false;if(tab==='Draft'||tab==='Players')render();}}
+async function loadWeeklyDirectory(force=false){
+  if(weeklyLoading||(!force&&Date.now()-weeklyLastFetch<60000))return;
+  weeklyLoading=true;
+  try{
+    const response=await fetch('/api/players/weekly',{headers:{Authorization:'Bearer '+token}});
+    if(!response.ok)throw Error('Weekly scoring feed unavailable');
+    const data=await response.json();
+    weeklyDirectory=data.players||{};
+    weeklyUpdatedAt=data.updatedAt||null;
+    weeklyLastFetch=Date.now();
+  }catch(e){console.warn('Weekly player directory:',e.message);}
+  finally{weeklyLoading=false;if(tab==='Players')render();}
+}
+function weeklyCell(x){
+  const entry=weeklyDirectory[String(x.id)];
+  if(!entry)return {last:null,live:null};
+  if(entry.gameStatus==='final')return {last:entry.points,live:null};
+  if(entry.gameStatus==='playing')return {last:null,live:entry.points};
+  return {last:null,live:null};
+}
+function sortDirectory(players){
+  if(playerSort==='rank')return players;
+  return [...players].sort((a,b)=>{
+    const value=x=>playerSort==='last'?weeklyCell(x).last:
+      playerSort==='live'?weeklyCell(x).live:null;
+    const av=value(a),bv=value(b);
+    if(av==null&&bv==null)return (a.rank??99999)-(b.rank??99999);
+    if(av==null)return 1;if(bv==null)return -1;
+    return bv-av;
+  });
+}
+function updatePlayerSort(value){playerSort=value;render();}
 function injuryLabel(status){const v=String(status||'UNKNOWN').toUpperCase();
   if(['QUESTIONABLE','DOUBTFUL','OUT'].includes(v))return `<span class="pill warn">${esc(v)}</span>`;
   if(['ACTIVE','HEALTHY'].includes(v))return '<span class="pill">Healthy</span>';
@@ -209,7 +243,7 @@ async function refreshMyWaivers(){lastTransactionFetch=0;await loadTransactions(
 function playerTable(){if(!espn)return card('ESPN player data',`<p>${esc(espnError||'Loading ESPN rankings and projections...')}</p>
   <button onclick="loadESPN(true)">Retry ESPN feed</button>`);
   const d=draftData(),turn=currentTurn(),myTurn=d.status==='active'&&turn?.manager===manager;
-  const players=availablePlayers().slice(0,250);
+  const players=sortDirectory(availablePlayers()).slice(0,250);
   const transactionsOpen=tab==='Players'&&d.status==='completed';
   const updated=espn.updatedAt?new Date(espn.updatedAt).toLocaleString():'Not available';
   return card('ESPN player rankings',`<p class="muted small">Season ${esc(espn.season)} · ESPN PPR projections ·
@@ -217,7 +251,10 @@ function playerTable(){if(!espn)return card('ESPN player data',`<p>${esc(espnErr
     <div class="actions"><input id="draftSearch" placeholder="Search players" value="${esc(draftSearch)}"
       oninput="updateDraftSearch(this.value)"><select id="draftPosition" onchange="updateDraftPosition(this.value)">
       ${['ALL',...POSITIONS].map(pos=>`<option value="${pos}" ${draftPosition===pos?'selected':''}>${pos}</option>`).join('')}
-      </select><button onclick="loadESPN(true)">Refresh</button></div>
+      </select><select onchange="updatePlayerSort(this.value)">
+      ${[['rank','ESPN Rank'],['last','Last Game Points'],['live','Live Points']].map(([v,l])=>
+        `<option value="${v}" ${playerSort===v?'selected':''}>${l}</option>`).join('')}
+      </select><button onclick="loadESPN(true);loadWeeklyDirectory(true)">Refresh</button></div>
     <p class="muted small">Showing ${players.length} players. Missing ranks and projections show —.</p>
     ${transactionsOpen?(transactionError?`<p>${esc(transactionError)} <button onclick="loadTransactions()">Retry</button></p>`:
       `<p class="muted small">Free agents: Add immediately · Locked: game in progress · Waivers: claim after final. Waiver priority: ${esc((transactionData?.priority||[]).join(' → ')||'Not initialized')}</p>`):''}
@@ -225,7 +262,10 @@ function playerTable(){if(!espn)return card('ESPN player data',`<p>${esc(espnErr
       return `<div class="row"><div><b>${x.rank==null?'—':'#'+x.rank} ${esc(x.name)}</b>
         <div class="muted small">${esc(x.position)} · ESPN ADP ${x.averageDraftPosition==null?'—':fmt(x.averageDraftPosition)}</div>
         ${injuryLabel(x.injuryStatus)}</div><div style="text-align:right"><b>${x.projectedPoints==null?'—':fmt(x.projectedPoints)}</b>
-        <div class="muted small">Projected PPR</div>${myTurn?`<button ${legal?'':'disabled'}
+        <div class="muted small">Season projected PPR</div>
+        <div class="muted small">Last game: ${weeklyCell(x).last==null?'—':fmt(weeklyCell(x).last)+(weeklyDirectory[String(x.id)]?.provisional?'*':'')}</div>
+        <div class="muted small">Live: ${weeklyCell(x).live==null?'—':fmt(weeklyCell(x).live)+'*'}</div>
+        <div class="muted small">Next game projected: —</div>${myTurn?`<button ${legal?'':'disabled'}
           onclick="selectDraftPlayer('${esc(x.id)}')">${legal?'Draft':'Position locked'}</button>`:''}
         ${transactionsOpen?(()=>{const tx=transactionData?.byId.get(String(x.id));
           if(!tx)return '<span class="muted small">Checking status…</span>';
@@ -494,6 +534,7 @@ function leagueMembersUI(){
 }
 function changeTab(next){tab=next;render();if(tab==='Draft')syncServerClock();
   if(tab==='Draft'||tab==='Players')loadESPN();
+  if(tab==='Players')loadWeeklyDirectory();
   if(tab==='Players'||tab==='My Waivers')loadTransactions();}
 function logout(){localStorage.removeItem('audibleToken');location.reload();}
 function authForm(){$('tabs').innerHTML='';$('connection').textContent='● Sign in';
