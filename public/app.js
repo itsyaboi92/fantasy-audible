@@ -453,6 +453,7 @@ function render(){if(!state||!manager)return;const mine=state.players.filter(x=>
     ${card('Restart league',`<p><b>Destructive action:</b> clear the current draft order, all picks, draft history, drafted rosters, and injuries. Keep manager accounts, team names, commissioner scoring/roster rules, and each manager's draft preferences.</p>
       <p>The next draft will use your configured roster size (16 rounds by default).</p>
       <button onclick="restartLeague()" style="background:#a32121;color:white">Restart league / New draft</button>`)}
+    ${leagueMembersUI()}
     ${settingsUI()}
     ${card('Simulate injury',`<select id="injuryPlayer">${state.players.filter(x=>x.slot!=='BENCH').map(x=>
       `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('')}</select>
@@ -465,6 +466,32 @@ function render(){if(!state||!manager)return;const mine=state.players.filter(x=>
   $('app').innerHTML=`<div class="row"><span class="muted small">${esc(state.viewer.name)} · ${esc(myTeam.team)}</span>
     <div class="actions"><button onclick="renameTeam()">Rename Team</button><button onclick="logout()">Sign out</button></div></div>${content}`;
   updateDraftClock();}
+async function manageLeagueMember(managerId,terminate){
+  const team=state.managers.find(m=>m.id===managerId);
+  if(!team||managerId===manager)return;
+  const phrase=terminate?'TERMINATE ROSTER':'REMOVE MANAGER';
+  const explanation=terminate
+    ?'PERMANENT: remove '+team.team+' from the active league and release its entire roster to waivers. Historical draft records remain.'
+    :'Remove the registered manager from '+team.team+' while preserving the team, lineup, and roster for a replacement.';
+  const typed=prompt(explanation+'\n\nType '+phrase+' to continue:');
+  if(typed===null)return;
+  if(typed!==phrase){toast('Confirmation phrase did not match');return;}
+  if(!confirm('Final confirmation: '+(terminate?'TERMINATE roster':'REMOVE manager')+' for '+team.team+'?'))return;
+  try{
+    const result=await apiPost(terminate?'/api/league/member/terminate':'/api/league/member/remove',
+      {managerId,confirmation:phrase});
+    toast(result.action==='terminated'?'Roster terminated; '+result.playersReleased+' players released':'Manager removed; team preserved');
+  }catch(e){toast(e.message);}
+}
+function leagueMembersUI(){
+  const rows=state.managers.filter(x=>x.id!==manager).map(x=>{
+    const status=x.claimed?'Manager registered':'Vacant team — available for replacement';
+    return `<div class="row"><div><b>${esc(x.team)}</b><div class="muted small">${esc(status)}</div></div>
+      <div class="actions">${x.claimed?`<button onclick='manageLeagueMember(${jsAttr(x.id)},false)'>Remove Manager</button>`:''}
+      <button style="background:#a32121;color:white" onclick='manageLeagueMember(${jsAttr(x.id)},true)'>Terminate Roster</button></div></div>`;
+  }).join('');
+  return card('League Members',`<p class="muted small">Remove Manager revokes access but keeps the roster for a replacement. Terminate Roster removes the team and places its players on waivers. Both actions require two confirmations.</p>${rows||'<p>No other teams.</p>'}`);
+}
 function changeTab(next){tab=next;render();if(tab==='Draft')syncServerClock();
   if(tab==='Draft'||tab==='Players')loadESPN();
   if(tab==='Players'||tab==='My Waivers')loadTransactions();}
