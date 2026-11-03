@@ -1,7 +1,7 @@
 
 const { Pool } = require('pg');
 
-const SEASON = 2026;
+const SEASON = Number(process.env.ESPN_SEASON || 2026);
 
 const ESPN_URL =
   `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${SEASON}/players?scoringPeriodId=0&view=kona_player_info`;
@@ -20,46 +20,278 @@ const POSITIONS = {
 };
 
 const REFRESH_INTERVAL = 6 * 60 * 60 * 1000;
+const CACHE_SCHEMA_VERSION = 2;
 
-function finiteNumber(value) {
-  if (value === null || value === undefined || value === '') {
-    return null;
-  }
+// ESPN statistical identifiers used for offensive scoring.
+// These are separate from ESPN's fantasy-point totals.
+const STAT = {
+  PASS_YARDS: '3',
+  PASS_TD: '4',
+  INTERCEPTIONS: '20',
+  RUSH_YARDS: '24',
+  RUSH_TD: '25',
+  RECEIVE_YARDS: '42',
+  RECEIVE_TD: '43',
+  RECEPTIONS: '53',
+  FUMBLES_LOST: '72'
+};
 
-  const number = Number(value);
-  return Number.isFinite(number) ? number : null;
+const PPR_RULES = {
+  PASS_YARDS: 1 / 25,
+  PASS_TD: 4,
+  INTERCEPTIONS: -2,
+  RUSH_YARDS: 1 / 10,
+  RUSH_TD: 6,
+  RECEIVE_YARDS: 1 / 10,
+  RECEIVE_TD: 6,
+  RECEPTIONS: 1,
+  FUMBLES_LOST: -2
+};
+
+function numberOrNull(value) {
+  if (
+    value === null ||
+    value === undefined ||
+    value === ''
+  ) return null;
+
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
 }
 
-function getRank(player) {
-  const rankings = player.draftRanksByRankType || {};
+function round2(value) {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
 
-  const ppr = rankings.PPR;
+function positionOf(player) {
+  return POSITIONS[player.defaultPositionId] || null;
+}
 
-  if (ppr) {
-    const rank = finiteNumber(ppr.rank);
-    if (rank !== null && rank > 0) return rank;
+function getRank(player, entry) {
+  const sources = [
+    player.draftRanksByRankType,
+    entry.draftRanksByRankType
+  ];
+
+  for (const rankings of sources) {
+    if (!rankings || typeof rankings !== 'object') {
+      continue;
+    }
+
+    const ppr = rankings.PPR || rankings.ppr;
+
+    const rank = numberOrNull(
+      typeof ppr === 'object' ? ppr?.rank : ppr
+    );
+
+    if (rank !== null && rank > 0) {
+      return rank;
+    }
   }
 
   return null;
 }
 
-function getProjection(player) {
-  const stats = Array.isArray(player.stats)
-    ? player.stats
-    : [];
+function getADP(player, entry) {
+  const candidates = [
+    player.ownership?.averageDraftPosition,
+    entry.ownership?.averageDraftPosition,
+    player.averageDraftPosition,
+    entry.averageDraftPosition
+  ];
 
-  const projection = stats.find(s =>
-    s.seasonId === SEASON &&
-    s.scoringPeriodId === 0 &&
-    s.statSourceId === 1
+  for (const candidate of candidates) {
+    const value = numberOrNull(candidate);
+
+    if (value !== null && value >= 0) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function getStatsRecords(player, entry) {
+  const sources = [
+    player.stats,
+    entry.stats
+  ];
+
+  const records = [];
+
+  for (const source of sources) {
+    if (Array.isArray(source)) {
+      records.push(...source);
+    }
+  }
+
+  return records;
+}
+
+function isSeasonProjection(record) {
+  if (!record || typeof record !== 'object') {
+    return false;
+  }
+
+  const season = numberOrNull(record.seasonId);
+  const period = numberOrNull(record.scoringPeriodId);
+  const source = numberOrNull(record.statSourceId);
+
+  return (
+    season === SEASON &&
+    period === 0 &&
+    source === 1
+  );
+}
+
+function projectionRecords(player, entry) {
+  return getStatsRecords(player, entry)
+    .filter(isSeasonProjection);
+}
+
+function pprAppliedTotal(record) {
+  // appliedTotal is a fantasy-point total, but it is only
+  // safe to use if ESPN identifies the scoring context
+  // as full PPR.
+  //
+  // ESPN's public response does not consistently provide
+  // an explicit scoring-format label. Therefore, we do
+  // not automatically assume appliedTotal is full PPR.
+
+  const label = String(
+    record.scoringFormat ||
+    record.scoringType ||
+    record.scoringSettings?.name ||
+    ''
+  ).toUpperCase();
+
+  const explicitlyPPR = (
+    label === 'PPR' ||
+    label === 'FULL_PPR' ||
+    label === 'FULL PPR' ||
+    label === 'POINTS_PER_RECEPTION'
   );
 
-  if (!projection) return null;
+  if (!explicitlyPPR) return null;
 
-  // Some ESPN responses include an already-scored total.
-  // Others provide raw statistical projections only.
-  // Never mistake raw yardage for fantasy points.
-  return finiteNumber(projection.appliedTotal);
+  return numberOrNull(record.appliedTotal);
+}
+
+function statValue(stats, id) {
+  if (
+    !stats ||
+    typeof stats !== 'object' ||
+    !Object.prototype.hasOwnProperty.call(stats, id)
+  ) {
+    return null;
+  }
+
+  return numberOrNull(stats[id]);
+}
+
+function calculateOffensivePPR(record, position) {
+  if (!['QB', 'RB', 'WR', 'TE'].includes(position)) {
+    return null;
+  }
+
+  const stats = record.stats;
+
+  if (
+    !stats ||
+    typeof stats !== 'object' ||
+    Array.isArray(stats)
+  ) {
+    return null;
+  }
+
+  // Require meaningful projected statistics before
+  // calculating a total. A record with only a few stats
+  // cannot reliably represent a complete season projection.
+  //
+  // For quarterbacks, require passing yards and TDs.
+  // For skill players, require receiving/rushing volume
+  // appropriate to their position.
+
+  if (position === 'QB') {
+    if (
+      statValue(stats, STAT.PASS_YARDS) === null ||
+      statValue(stats, STAT.PASS_TD) === null ||
+      statValue(stats, STAT.INTERCEPTIONS) === null
+    ) {
+      return null;
+    }
+  }
+
+  if (position === 'RB') {
+    if (
+      statValue(stats, STAT.RUSH_YARDS) === null ||
+      statValue(stats, STAT.RUSH_TD) === null ||
+      statValue(stats, STAT.RECEPTIONS) === null ||
+      statValue(stats, STAT.RECEIVE_YARDS) === null
+    ) {
+      return null;
+    }
+  }
+
+  if (position === 'WR' || position === 'TE') {
+    if (
+      statValue(stats, STAT.RECEPTIONS) === null ||
+      statValue(stats, STAT.RECEIVE_YARDS) === null ||
+      statValue(stats, STAT.RECEIVE_TD) === null
+    ) {
+      return null;
+    }
+  }
+
+  let points = 0;
+  let fieldsUsed = 0;
+
+  for (const [key, statId] of Object.entries(STAT)) {
+    const value = statValue(stats, statId);
+
+    if (value === null) continue;
+
+    points += value * PPR_RULES[key];
+    fieldsUsed++;
+  }
+
+  if (fieldsUsed < 3) return null;
+
+  return round2(points);
+}
+
+function getProjection(player, entry, position) {
+  const records = projectionRecords(player, entry);
+
+  for (const record of records) {
+    const applied = pprAppliedTotal(record);
+
+    if (applied !== null) {
+      return {
+        points: round2(applied),
+        method: 'espn_explicit_ppr'
+      };
+    }
+  }
+
+  for (const record of records) {
+    const calculated = calculateOffensivePPR(
+      record,
+      position
+    );
+
+    if (calculated !== null) {
+      return {
+        points: calculated,
+        method: 'calculated_from_espn_stats'
+      };
+    }
+  }
+
+  return {
+    points: null,
+    method: 'unavailable'
+  };
 }
 
 function normalizePlayer(entry) {
@@ -69,24 +301,49 @@ function normalizePlayer(entry) {
     return null;
   }
 
-  const position = POSITIONS[player.defaultPositionId];
+  const position = positionOf(player);
 
   if (!position) return null;
+
+  const projection = getProjection(
+    player,
+    entry,
+    position
+  );
 
   return {
     id: String(player.id),
     name: player.fullName,
     position,
     nflTeamId: player.proTeamId ?? null,
-    rank: getRank(player),
-    projectedPoints: getProjection(player),
-    averageDraftPosition: finiteNumber(
-      player.ownership?.averageDraftPosition
-    ),
+    rank: getRank(player, entry),
+    projectedPoints: projection.points,
+    projectionMethod: projection.method,
+    averageDraftPosition: getADP(player, entry),
     injuryStatus: player.injuryStatus || 'UNKNOWN',
     source: 'ESPN',
     season: SEASON
   };
+}
+
+function sortPlayers(players) {
+  return players.sort((a, b) => {
+    const rankA = a.rank ?? Infinity;
+    const rankB = b.rank ?? Infinity;
+
+    if (rankA !== rankB) {
+      return rankA - rankB;
+    }
+
+    const adpA = a.averageDraftPosition ?? Infinity;
+    const adpB = b.averageDraftPosition ?? Infinity;
+
+    if (adpA !== adpB) {
+      return adpA - adpB;
+    }
+
+    return a.name.localeCompare(b.name);
+  });
 }
 
 async function initializeESPN() {
@@ -98,11 +355,21 @@ async function initializeESPN() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+
+  await pool.query(`
+    ALTER TABLE espn_player_cache
+    ADD COLUMN IF NOT EXISTS schema_version INTEGER
+    NOT NULL DEFAULT 1
+  `);
 }
 
 async function cachedESPN() {
   const result = await pool.query(`
-    SELECT season, players, updated_at
+    SELECT
+      season,
+      players,
+      updated_at,
+      schema_version
     FROM espn_player_cache
     WHERE id = 1
   `);
@@ -113,20 +380,27 @@ async function cachedESPN() {
       updatedAt: null,
       season: SEASON,
       source: 'ESPN',
-      stale: true
+      stale: true,
+      cacheVersion: 0
     };
   }
 
   const row = result.rows[0];
+
+  const age = Date.now() -
+    new Date(row.updated_at).getTime();
 
   return {
     players: row.players,
     updatedAt: row.updated_at,
     season: row.season,
     source: 'ESPN',
-    stale:
-      Date.now() - new Date(row.updated_at).getTime()
-      > REFRESH_INTERVAL
+    stale: (
+      age > REFRESH_INTERVAL ||
+      row.season !== SEASON ||
+      row.schema_version !== CACHE_SCHEMA_VERSION
+    ),
+    cacheVersion: row.schema_version
   };
 }
 
@@ -150,7 +424,9 @@ async function refreshESPN() {
   });
 
   if (!response.ok) {
-    throw new Error(`ESPN returned HTTP ${response.status}`);
+    throw new Error(
+      `ESPN returned HTTP ${response.status}`
+    );
   }
 
   const payload = await response.json();
@@ -158,23 +434,12 @@ async function refreshESPN() {
   const entries = Array.isArray(payload)
     ? payload
     : Array.isArray(payload.players)
-      ? payload.players
-      : [];
+    ? payload.players
+    : [];
 
-  const players = entries
-    .map(normalizePlayer)
-    .filter(Boolean)
-    .sort((a, b) => {
-      const rankA = a.rank ?? Infinity;
-      const rankB = b.rank ?? Infinity;
-
-      if (rankA !== rankB) return rankA - rankB;
-
-      return (
-        (a.averageDraftPosition ?? Infinity) -
-        (b.averageDraftPosition ?? Infinity)
-      );
-    });
+  const players = sortPlayers(
+    entries.map(normalizePlayer).filter(Boolean)
+  );
 
   if (players.length < 100) {
     throw new Error(
@@ -182,16 +447,41 @@ async function refreshESPN() {
     );
   }
 
+  const withProjections = players.filter(
+    p => p.projectedPoints !== null
+  ).length;
+
+  const withRanks = players.filter(
+    p => p.rank !== null
+  ).length;
+
+  console.log(
+    `ESPN season ${SEASON}: ` +
+    `${players.length} players, ` +
+    `${withRanks} ranked, ` +
+    `${withProjections} with calculated/verified PPR projections`
+  );
+
   await pool.query(`
-    INSERT INTO espn_player_cache
-      (id, season, players, updated_at)
-    VALUES (1, $1, $2::jsonb, NOW())
+    INSERT INTO espn_player_cache (
+      id,
+      season,
+      players,
+      updated_at,
+      schema_version
+    )
+    VALUES (1,$1,$2::jsonb,NOW(),$3)
     ON CONFLICT (id)
     DO UPDATE SET
       season = EXCLUDED.season,
       players = EXCLUDED.players,
-      updated_at = NOW()
-  `, [SEASON, JSON.stringify(players)]);
+      updated_at = NOW(),
+      schema_version = EXCLUDED.schema_version
+  `, [
+    SEASON,
+    JSON.stringify(players),
+    CACHE_SCHEMA_VERSION
+  ]);
 
   return cachedESPN();
 }
@@ -213,10 +503,18 @@ async function getESPNPlayers() {
   try {
     return await refreshInProgress;
   } catch (error) {
-    console.error('ESPN refresh failed:', error.message);
+    console.error(
+      'ESPN refresh failed:',
+      error.message
+    );
 
-    // Continue serving the last successful data.
-    if (cache.players.length) return cache;
+    if (cache.players.length) {
+      return {
+        ...cache,
+        stale: true,
+        refreshError: error.message
+      };
+    }
 
     throw error;
   }
