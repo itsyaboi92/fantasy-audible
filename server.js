@@ -260,6 +260,62 @@ function assignLineup(s,actor,body){
   audit(s,'LINEUP_CHANGE',actor.manager,player.name+' moved to '+target);
   return {ok:true};
 }
+// Save a complete starting lineup atomically. No partial moves are committed.
+function saveStartingLineup(s,actor,body){
+  const starters=settingsOf(s).roster.starters;
+  const slots=Object.entries(starters).flatMap(([position,count])=>
+    Array.from({length:count},(_,index)=>position+':'+index));
+  const requested=body.lineup;
+  if(!requested||typeof requested!=='object'||Array.isArray(requested)||
+    Object.keys(requested).length!==slots.length||
+    Object.keys(requested).some(key=>!slots.includes(key)))
+    return failure(400,'Submit every starting lineup position');
+  const mine=s.players.filter(p=>p.owner===actor.manager);
+  const byId=new Map(mine.map(p=>[p.id,p]));
+  const selected=new Set();
+  const proposed=new Map();
+  for(const key of slots){
+    const id=requested[key];
+    if(id!==null&&typeof id!=='string')return failure(400,'Invalid lineup selection');
+    if(id!==null){
+      if(!byId.has(id))return failure(403,'Player not on your roster');
+      if(selected.has(id))return failure(409,'A player cannot occupy two starting slots');
+      selected.add(id);
+      const player=byId.get(id),position=key.split(':')[0];
+      if(!slotEligible(player,position))return failure(409,player.name+' is not eligible at '+position);
+      if(player.slot==='IR')return failure(409,player.name+' must be moved off IR first');
+      proposed.set(id,position);
+    }
+  }
+  // Protect existing locked starters, including their exact numbered slot.
+  for(const [position,count] of Object.entries(starters)){
+    const existing=mine.filter(p=>p.slot===position);
+    for(let index=0;index<existing.length;index++){
+      const player=existing[index];
+      const key=position+':'+index;
+      if((lineupLocked(s,player)||player.scoringMode||
+        s.injuries?.some(i=>i.active&&i.player===player.id))&&requested[key]!==player.id)
+        return failure(409,player.name+' is locked in '+key);
+    }
+  }
+  for(const player of mine){
+    const target=proposed.get(player.id)||
+      (player.slot==='IR'?'IR':'BENCH');
+    if(target!==player.slot&&lineupLocked(s,player))
+      return failure(409,player.name+' is locked after kickoff');
+    if(target!==player.slot&&(player.scoringMode||player.scoreAtSwap!==undefined||
+      s.injuries?.some(i=>i.active&&i.player===player.id)))
+      return failure(409,player.name+' cannot be moved after an injury decision');
+  }
+  const benchCount=mine.filter(p=>!proposed.has(p.id)&&p.slot!=='IR').length;
+  if(benchCount>settingsOf(s).roster.bench)
+    return failure(409,'Bench capacity exceeded. Fill more starting positions.');
+  for(const player of mine){
+    player.slot=proposed.get(player.id)||(player.slot==='IR'?'IR':'BENCH');
+  }
+  audit(s,'LINEUP_SAVED',actor.manager,'Starting lineup saved');
+  return {ok:true};
+}
 function validateSettings(input){if(!input||typeof input!=='object'||Array.isArray(input))return null;
   const previous=DEFAULT_SETTINGS;
   const result=structuredClone(previous);
@@ -444,6 +500,7 @@ async function api(req,res,route){
       if(taken(s,name,team.id))return failure(409,'Team name already taken');
       const old=team.team;team.team=name;audit(s,'RENAME',team.id,old+' renamed to '+name);
       return {ok:true,team:name};}
+    if(route==='/api/lineup/save')return saveStartingLineup(s,actor,body);
     if(route==='/api/lineup/assign')return assignLineup(s,actor,body);
     if(route==='/api/substitute'){
       const injury=s.injuries.find(i=>i.id===body.injury&&i.active),starter=s.players.find(p=>p.id===injury?.player),
