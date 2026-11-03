@@ -244,6 +244,43 @@ function settingsUI(){const x=settingsDraft||state.settings;if(!x)return card('L
 async function saveSettings(){try{const result=await apiPost('/api/settings',{settings:settingsDraft||state.settings});
   settingsDraft=structuredClone(result.settings);settingsDirty=false;toast('Commissioner settings saved');}
   catch(e){toast(e.message);}}
+function lineupManager(mine){
+  const roster=state.settings?.roster||{starters:{QB:1,RB:2,WR:2,TE:1,FLEX:1,'D/ST':1,K:1},bench:7,ir:1};
+  const slots=[...Object.entries(roster.starters).flatMap(([slot,count])=>Array.from({length:count},()=>slot))];
+  const counts={};
+  const rows=slots.map(slot=>{
+    counts[slot]=(counts[slot]||0)+1;
+    const assigned=mine.filter(p=>p.slot===slot);
+    const current=assigned[counts[slot]-1];
+    const options=mine.filter(p=>p.id!==current?.id&&p.slot!=='IR'&&
+      (slot==='FLEX'?['RB','WR','TE'].includes(p.pos):p.pos===slot));
+    const choices=options.map(p=>`<option value="${esc(p.id)}">${esc(p.name)} (${esc(p.slot)})</option>`).join('');
+    return `<div class="row"><div><b>${esc(slot)} ${counts[slot]}</b>
+      <div class="muted small">${current?esc(current.name):'Empty starting slot'}</div></div>
+      <div><select id="lineup-${esc(slot.replace('/',''))}-${counts[slot]}">
+      <option value="">Select player</option>${choices}</select>
+      <button onclick="assignLineup('${esc(slot)}',
+      'lineup-${esc(slot.replace('/',''))}-${counts[slot]}',${JSON.stringify(current?.id||null)})">Set</button></div></div>`;
+  }).join('');
+  const bench=mine.filter(p=>p.slot==='BENCH');
+  const ir=mine.filter(p=>p.slot==='IR');
+  const benchRows=bench.map(p=>`<div class="row"><span>${esc(p.name)} · ${esc(p.pos)}</span>
+    <button onclick="moveToSection(${JSON.stringify(p.id)},'IR')">Move to IR</button></div>`).join('');
+  const irRows=ir.map(p=>`<div class="row"><span>${esc(p.name)} · ${esc(p.pos)}</span>
+    <button onclick="moveToSection(${JSON.stringify(p.id)},'BENCH')">Move to bench</button></div>`).join('');
+  return card('Set starting lineup',`<p class="muted small">Choose an eligible player for each slot. Replacing a starter swaps the two players. Game locks are enforced by the server.</p>
+    ${rows}`)+card('Bench ('+bench.length+'/'+roster.bench+')',benchRows||'<p>No bench players.</p>')+
+    card('IR ('+ir.length+'/'+roster.ir+')',irRows||'<p>No IR players.</p>');
+}
+async function assignLineup(slot,selectId,displacedId){
+  const playerId=$(selectId)?.value;if(!playerId)return toast('Select a player first');
+  try{await apiPost('/api/lineup/assign',{playerId,slot,displacedId});toast('Lineup updated');}
+  catch(e){toast(e.message);}
+}
+async function moveToSection(playerId,slot){
+  try{await apiPost('/api/lineup/assign',{playerId,slot});toast('Roster updated');}
+  catch(e){toast(e.message);}
+}
 function render(){if(!state||!manager)return;const mine=state.players.filter(x=>x.owner===manager),myTeam=m(manager);
   if(!myTeam)return;
   $('tabs').innerHTML=tabs.filter(t=>t!=='Commissioner'||state.viewer.commissioner)
@@ -261,8 +298,7 @@ function render(){if(!state||!manager)return;const mine=state.players.filter(x=>
       <div class="muted small">${esc(x.position)} · Pick ${x.overall}</div></div>
       <b>${x.projectedPoints==null?'—':fmt(x.projectedPoints)}</b></div>`).join('')||'<p>No draft picks yet.</p>')}
       ${state.injuries.filter(i=>i.active).map(injuryCard).join('')}
-      ${card('Starting lineup',mine.filter(x=>!['BENCH','IR'].includes(x.slot)).map(playerRow).join('')||'<p>No starters assigned.</p>')}
-      ${card('Bench',mine.filter(x=>x.slot==='BENCH').map(playerRow).join('')||'<p>No bench players assigned.</p>')}`;}
+      ${lineupManager(mine)}`;}
   if(tab==='Matchup'){const opponent=manager==='m1'?'m2':'m1';
     content=`<h1>Week ${state.week} Matchup</h1><div class="grid">${card(esc(myTeam.team),
       `<div class="stat">${fmt(total(manager))}</div>${mine.filter(x=>!['BENCH','IR'].includes(x.slot)).map(playerRow).join('')}`)}
