@@ -4,6 +4,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { Pool } = require('pg');
 const { initializeESPN, getESPNPlayers } = require('./espn');
+const liveNFL = require('./live-nfl');
 
 const PORT = process.env.PORT || 3000;
 const MAX_TEAMS = 12;
@@ -836,6 +837,53 @@ const server=http.createServer((req,res)=>{const route=new URL(req.url,'http://l
   if(route.startsWith('/api/'))api(req,res,route).catch(e=>{console.error('API error:',e);
     if(!res.headersSent)send(res,500,{error:'Server error'});else res.end();});
   else staticFile(req,res,route);});
+// Fetch outside the database transaction; apply one consistent snapshot atomically.
+let scoringSyncBusy=false;
+async function syncNFLScoring(){
+  if(scoringSyncBusy)return;scoringSyncBusy=true;
+  try{
+    const {state}=await snapshot();
+    const season=Number(process.env.NFL_SEASON||new Date().getUTCFullYear());
+    const week=Number(state.week);
+    if(!Number.isInteger(week)||week<1||week>18)return;
+    const games=await liveNFL.loadWeek(season,week);
+    const summaries=new Map(),failures=[];
+    await Promise.all(games.filter(g=>g.status!=='upcoming').map(async g=>{
+      try{summaries.set(g.id,liveNFL.playerStats(await liveNFL.fetchGame(g.id)));}
+      catch(e){failures.push(g.id+': '+e.message);}
+    }));
+    await change(s=>{
+      const ids=new Map();for(const game of games)for(const t of game.teams)ids.set(t.id,game);
+      let changed=0;
+      for(const player of s.players){
+        if(!player.espnId)continue; // Demo data must never be overwritten.
+        const game=ids.get(liveNFL.teamId(player));
+        if(!game)continue; // Bye week.
+        player.nflGame={id:game.id,kickoff:game.kickoff,status:game.status};
+        player.status=game.status;
+        if(game.status==='upcoming')continue;
+        const box=summaries.get(game.id);if(!box)continue;
+        const stats=box.get(String(player.espnId));
+        if(!stats){player.liveScoreStatus='NO_BOX_SCORE_ENTRY';continue;}
+        if(player.pos==='D/ST'){
+          player.liveScoreStatus='DEFENSE_SCORING_NOT_VERIFIED';continue;
+        }
+        const calculated=liveNFL.scorePlayer(stats,settingsOf(s).scoring);
+        if(player.pos==='K'&&calculated.fieldGoalsPending){player.liveScoreStatus='FIELD_GOAL_DISTANCES_PENDING';continue;}
+        // Do not overwrite an in-progress injury handcuff's credited points.
+        if(player.scoringMode){player.liveScoreStatus='INJURY_SUBSTITUTION_REQUIRES_EVENT_SCORING';continue;}
+        player.points=calculated.points;
+        player.liveScoreStatus=calculated.unsupported.length?'PARTIAL':'UPDATED';
+        player.liveScoreUpdatedAt=new Date().toISOString();changed++;
+      }
+      s.nflSync={season,week,at:new Date().toISOString(),games:games.map(g=>({id:g.id,status:g.status,kickoff:g.kickoff,teams:g.teams})),failures,updatedPlayers:changed,warning:'Provisional: play-level bonuses, D/ST, kicking distance, and injury substitutions require event attribution.'};
+      return {ok:true};
+    });
+  }catch(e){console.error('NFL scoring sync:',e.message);}
+  finally{scoringSyncBusy=false;}
+}
+setInterval(syncNFLScoring,60000);
+setTimeout(syncNFLScoring,6000);
 let checkingWaivers=false;setInterval(async()=>{if(checkingWaivers)return;checkingWaivers=true;
   try{await processWaivers();}catch(e){console.error('Waiver processing:',e.message);}finally{checkingWaivers=false;}},30000);
 let checkingTimer=false;setInterval(async()=>{if(checkingTimer)return;checkingTimer=true;
