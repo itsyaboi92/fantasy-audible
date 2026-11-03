@@ -329,6 +329,31 @@ async function api(req,res,route){
       const valid=validatePreferences(body);if(!valid)return failure(400,'Invalid draft preferences');
       s.draftPreferences ||= {};s.draftPreferences[actor.manager]=valid;
       audit(s,'DRAFT_PREFERENCES',actor.manager,'Updated personal auto-draft preferences');return {ok:true};}
+    if(route==='/api/league/restart'){
+      if(!actor.commissioner)return failure(403,'Commissioner only');
+      if(body.confirmation!=='RESTART LEAGUE')
+        return failure(400,'Type RESTART LEAGUE to confirm');
+      // Preserve manager accounts, sessions, team names, league rules,
+      // and personal draft preferences. Discard the current draft and
+      // its rosters, injuries, and simulated scoring data.
+      const priorPicks=d.picks.length;
+      s.draft={status:'waiting',rounds:DEFAULT_ROUNDS,
+        secondsPerPick:PICK_SECONDS,order:[],picks:[],
+        deadline:null,remainingSeconds:null};
+      s.players=[];
+      s.injuries=[];
+      s.phase=0;
+      s.week=1;
+      // Remove draft-specific history while retaining non-draft audits.
+      const draftEvents=new Set([
+        'DRAFT_PICK','AUTO_PICK','DRAFT_STARTED','DRAFT_PAUSED',
+        'DRAFT_RESUMED','DRAFT_COMPLETE'
+      ]);
+      s.transactions=s.transactions.filter(t=>!draftEvents.has(t.type));
+      audit(s,'LEAGUE_RESTART',actor.manager,
+        'Commissioner restarted league; cleared '+priorPicks+' draft picks');
+      return {ok:true,clearedPicks:priorPicks};
+    }
     if(route==='/api/draft/start'){
       if(!actor.commissioner)return failure(403,'Commissioner only');
       if(d.status!=='waiting')return failure(409,'Draft already started');
