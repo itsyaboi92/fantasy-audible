@@ -72,6 +72,8 @@ async function nflGames(){
     if(!response.ok)throw Error('NFL scoreboard HTTP '+response.status);
     const data=await response.json();
     let events=data.events||[];
+    // A team without a game in the active NFL week is on BYE, not postgame waivers.
+    const currentWeekTeams=new Set(events.flatMap(e=>(e.competitions?.[0]?.competitors||[]).map(c=>String(c.team?.id))));
     const week=Number(data.week?.number),year=Number(data.season?.year);
     if(week>1&&Number.isInteger(year)){
       try{const prior=await fetch(`https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=${year}&seasontype=2&week=${week-1}&limit=100`,
@@ -87,7 +89,7 @@ async function nflGames(){
         completed:Boolean(event.status?.type?.completed||competition?.status?.type?.completed)};
     }).filter(g=>g.teams.length===2&&Number.isFinite(Date.parse(g.kickoff)));
     if(!games.length)throw Error('NFL scoreboard contains no games');
-    nflSchedule={at:Date.now(),games,error:null};return games;
+    nflSchedule={at:Date.now(),games,error:null,currentWeekTeams};return games;
   }catch(e){nflSchedule.error=e.message;
     // Never use stale game data for new transactions.
     throw Error('Live NFL schedule unavailable; player transactions temporarily paused');}
@@ -127,7 +129,9 @@ function transactionStatus(player,gameMap,s,now=Date.now()){
   return {status:'FREE_AGENT'};
 }
 function gameMapFrom(games){const map=new Map();
+  const currentWeekTeams=nflSchedule.currentWeekTeams;
   for(const game of games)for(const id of game.teams){
+    if(currentWeekTeams && !currentWeekTeams.has(id))continue;
     const previous=map.get(id);
     if(!previous||Date.parse(game.kickoff)>Date.parse(previous.kickoff))map.set(id,game);
     // Until Wednesday's clearance, a finished prior-week game takes precedence.
