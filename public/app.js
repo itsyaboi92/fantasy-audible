@@ -152,17 +152,19 @@ async function loadTransactions(){
 }
 async function playerTransaction(id,action){
   const player=espn?.players.find(p=>String(p.id)===String(id));
-  if(!player)return;
+  if(!player){toast('Player not found in ESPN feed. Refresh the Players tab.');return;}
+  if(!state?.settings?.roster){toast('League roster settings unavailable. Refresh the page.');return;}
   const mine=state.players.filter(p=>p.owner===manager);
   const roster=state.settings.roster;
   const active=mine.filter(p=>p.slot!=='IR');
   const full=active.length>=Object.values(roster.starters).reduce((a,b)=>a+b,0)+roster.bench;
-  const maxed=active.filter(p=>p.pos===player.position).length>=roster.maximums[player.position];
+  const maxed=active.filter(p=>p.pos===player.position).length>=Number(roster.maximums?.[player.position]??Infinity);
   let dropId=null;
   if(full||maxed){
-    const options=mine.filter(p=>p.slot!=='IR');
+    const options=mine.filter(p=>p.slot==='BENCH');
+    if(!options.length)return toast('Roster full: no eligible bench player to drop.');
     const list=options.map((p,i)=>`${i+1}. ${p.name} (${p.pos})`).join('\n');
-    const response=prompt(`Select a player to drop (enter number):\n${list}`);
+    const response=prompt(`Roster full or position limit reached. Select a BENCH player to drop (enter number):\n${list}`);
     if(response===null)return;
     const index=Number(response)-1;
     if(!Number.isInteger(index)||!options[index])return toast('Invalid drop selection');
@@ -210,9 +212,9 @@ function playerTable(){if(!espn)return card('ESPN player data',`<p>${esc(espnErr
           if(tx.status==='LOCKED')return '<span class="muted small">Locked — game in progress</span>';
           const claimed=transactionData.claims?.some(c=>c.playerId==='espn-'+x.id);
           if(tx.status==='WAIVERS')return claimed?
-            `<button onclick="cancelWaiver('${esc(x.id)}')">Cancel claim</button>`:
-            `<button onclick="playerTransaction('${esc(x.id)}','claim')">Claim Player</button>`;
-          return `<button onclick="playerTransaction('${esc(x.id)}','add')">Add Player</button>`;
+            `<button type="button" onclick="cancelWaiver(${jsAttr(String(x.id))})">Cancel claim</button>`:
+            `<button type="button" onclick="playerTransaction(${jsAttr(String(x.id))},'claim').catch(e=>toast(e.message))">Claim Player</button>`;
+          return `<button type="button" onclick="playerTransaction(${jsAttr(String(x.id))},'add').catch(e=>toast(e.message))">Add Player</button>`;
         })():''}</div></div>`;}).join('')||'<p>No matching players.</p>'}</div>`);}
 function updateDraftSearch(v){draftSearch=v;const input=$('draftSearch'),start=input?.selectionStart??v.length;
   render();const replacement=$('draftSearch');replacement?.focus();try{replacement?.setSelectionRange(start,start);}catch{}}
