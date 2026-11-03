@@ -2,6 +2,7 @@ let state=null,manager=null,tab='Home',token=localStorage.getItem('audibleToken'
 let espn=null,espnError='',draftSearch='',draftPosition='ALL',loadingESPN=false;
 let weeklyDirectory={},weeklyUpdatedAt=null,weeklyLoading=false,weeklyLastFetch=0;
 let playerSort='rank';
+let breakdownPlayerId=null;
 let transactionData=null,transactionError='',loadingTransactions=false,lastTransactionFetch=0;
 let serverOffsetMs=0,clockSynchronized=false,clockSyncInProgress=false,lastClockSync=0;
 let settingsDraft=null,prefsDraft=null,settingsDirty=false,prefsDirty=false;
@@ -93,7 +94,7 @@ async function loadWeeklyDirectory(force=false){
     weeklyDirectory=data.players||{};
     weeklyUpdatedAt=data.updatedAt||null;
     weeklyLastFetch=Date.now();
-  }catch(e){console.warn('Weekly player directory:',e.message);}
+  }catch(e){weeklyLastFetch=Date.now();console.warn('Weekly player directory:',e.message);}
   finally{weeklyLoading=false;if(tab==='Players')render();}
 }
 function weeklyCell(x){
@@ -115,6 +116,22 @@ function sortDirectory(players){
   });
 }
 function updatePlayerSort(value){playerSort=value;render();}
+function showPlayerBreakdown(id){breakdownPlayerId=String(id);render();}
+function hidePlayerBreakdown(){breakdownPlayerId=null;render();}
+function breakdownCard(){
+  if(!breakdownPlayerId)return '';
+  const x=espn?.players?.find(p=>String(p.id)===breakdownPlayerId);
+  const d=weeklyDirectory[breakdownPlayerId];
+  if(!d)return card('Scoring breakdown','No verified game data for this player.');
+  const lines=(d.breakdown||[]).map(r=>`<div class="row"><span>${esc(r.label)} (${esc(r.quantity)} × ${esc(r.rate)})</span><b>${fmt(r.points)}</b></div>`).join('');
+  return card('Scoring breakdown — '+esc(x?.name||breakdownPlayerId),
+    `<p>Week ${esc(d.week)} · ${esc(d.opponent?'vs '+d.opponent:'Opponent unavailable')} · ${esc(d.gameStatus)} · ${esc(d.gameId)}</p>
+    ${lines||'<p>No supported scoring categories reported.</p>'}
+    <p><b>Provisional total: ${fmt(d.points)}</b></p>
+    <p class="muted small">* Incomplete: long-TD bonuses, kicking distance, D/ST, fumbles and return scores may be missing. This total is not certified.</p>
+    <button onclick="hidePlayerBreakdown()">Close</button>`);
+}
+
 function injuryLabel(status){const v=String(status||'UNKNOWN').toUpperCase();
   if(['QUESTIONABLE','DOUBTFUL','OUT'].includes(v))return `<span class="pill warn">${esc(v)}</span>`;
   if(['ACTIVE','HEALTHY'].includes(v))return '<span class="pill">Healthy</span>';
@@ -258,12 +275,13 @@ function playerTable(){if(!espn)return card('ESPN player data',`<p>${esc(espnErr
     <p class="muted small">Showing ${players.length} players. Missing ranks and projections show —.</p>
     ${transactionsOpen?(transactionError?`<p>${esc(transactionError)} <button onclick="loadTransactions()">Retry</button></p>`:
       `<p class="muted small">Free agents: Add immediately · Locked: game in progress · Waivers: claim after final. Waiver priority: ${esc((transactionData?.priority||[]).join(' → ')||'Not initialized')}</p>`):''}
-    <div id="draftPlayerRows">${players.map(x=>{const legal=canDraftPosition(x.position);
+    ${breakdownCard()}<div id="draftPlayerRows">${players.map(x=>{const legal=canDraftPosition(x.position);
       return `<div class="row"><div><b>${x.rank==null?'—':'#'+x.rank} ${esc(x.name)}</b>
         <div class="muted small">${esc(x.position)} · ESPN ADP ${x.averageDraftPosition==null?'—':fmt(x.averageDraftPosition)}</div>
         ${injuryLabel(x.injuryStatus)}</div><div style="text-align:right"><b>${x.projectedPoints==null?'—':fmt(x.projectedPoints)}</b>
         <div class="muted small">Season projected PPR</div>
-        <div class="muted small">Last game: ${weeklyCell(x).last==null?'—':fmt(weeklyCell(x).last)+(weeklyDirectory[String(x.id)]?.provisional?'*':'')}</div>
+        <div class="muted small">Last game: ${weeklyCell(x).last==null?'—':fmt(weeklyCell(x).last)+'*'} ${weeklyDirectory[String(x.id)]?.gameStatus==='final'?'(Wk '+esc(weeklyDirectory[String(x.id)].week)+(weeklyDirectory[String(x.id)].opponent?' vs '+esc(weeklyDirectory[String(x.id)].opponent):'')+')':''}</div>
+        ${weeklyDirectory[String(x.id)]?.breakdown?`<button type="button" onclick='showPlayerBreakdown(${jsAttr(String(x.id))})'>Scoring details</button>`:''}
         <div class="muted small">Live: ${weeklyCell(x).live==null?'—':fmt(weeklyCell(x).live)+'*'}</div>
         <div class="muted small">Next game projected: —</div>${myTurn?`<button ${legal?'':'disabled'}
           onclick="selectDraftPlayer('${esc(x.id)}')">${legal?'Draft':'Position locked'}</button>`:''}
