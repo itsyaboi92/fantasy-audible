@@ -244,38 +244,89 @@ function settingsUI(){const x=settingsDraft||state.settings;if(!x)return card('L
 async function saveSettings(){try{const result=await apiPost('/api/settings',{settings:settingsDraft||state.settings});
   settingsDraft=structuredClone(result.settings);settingsDirty=false;toast('Commissioner settings saved');}
   catch(e){toast(e.message);}}
+// Local form state survives live SSE refreshes while the manager edits.
+let lineupDraft=null;
+let lineupDraftSignature='';
+let lineupDirty=false;
+let lineupSaving=false;
+function lineupSlots(){
+  const starters=state.settings?.roster?.starters||
+    {QB:1,RB:2,WR:2,TE:1,FLEX:1,'D/ST':1,K:1};
+  return Object.entries(starters).flatMap(([position,count])=>
+    Array.from({length:count},(_,index)=>({key:position+':'+index,position,index})));
+}
+function currentLineup(mine){
+  const result={};
+  for(const {key,position,index} of lineupSlots()){
+    result[key]=mine.filter(p=>p.slot===position)[index]?.id||null;
+  }
+  return result;
+}
+function ensureLineupDraft(mine){
+  const current=currentLineup(mine);
+  const signature=JSON.stringify(current);
+  if(!lineupDraft||(!lineupDirty&&lineupDraftSignature!==signature)){
+    lineupDraft=current;
+    lineupDraftSignature=signature;
+    lineupDirty=false;
+  }
+}
+function updateLineupSelection(key,value){
+  if(!lineupDraft)return;
+  const id=value||null;
+  if(id){
+    for(const other of Object.keys(lineupDraft)){
+      if(other!==key&&lineupDraft[other]===id)lineupDraft[other]=null;
+    }
+  }
+  lineupDraft[key]=id;
+  lineupDirty=true;
+  render();
+}
+function discardLineupChanges(){
+  lineupDraft=null;lineupDirty=false;render();
+}
+async function saveLineup(){
+  if(!lineupDraft||lineupSaving)return;
+  lineupSaving=true;
+  try{
+    await apiPost('/api/lineup/save',{lineup:lineupDraft});
+    lineupDirty=false;
+    lineupDraftSignature=JSON.stringify(lineupDraft);
+    toast('Starting lineup saved');
+  }catch(e){toast(e.message);}
+  finally{lineupSaving=false;render();}
+}
 function lineupManager(mine){
-  const roster=state.settings?.roster||{starters:{QB:1,RB:2,WR:2,TE:1,FLEX:1,'D/ST':1,K:1},bench:7,ir:1};
-  const slots=[...Object.entries(roster.starters).flatMap(([slot,count])=>Array.from({length:count},()=>slot))];
-  const counts={};
-  const rows=slots.map(slot=>{
-    counts[slot]=(counts[slot]||0)+1;
-    const assigned=mine.filter(p=>p.slot===slot);
-    const current=assigned[counts[slot]-1];
-    const options=mine.filter(p=>p.id!==current?.id&&p.slot!=='IR'&&
-      (slot==='FLEX'?['RB','WR','TE'].includes(p.pos):p.pos===slot));
-    const choices=options.map(p=>`<option value="${esc(p.id)}">${esc(p.name)} (${esc(p.slot)})</option>`).join('');
-    return `<div class="row"><div><b>${esc(slot)} ${counts[slot]}</b>
-      <div class="muted small">${current?esc(current.name):'Empty starting slot'}</div></div>
-      <div><select id="lineup-${esc(slot.replace('/',''))}-${counts[slot]}">
-      <option value="">Select player</option>${choices}</select>
-      <button onclick="assignLineup('${esc(slot)}',
-      'lineup-${esc(slot.replace('/',''))}-${counts[slot]}',${JSON.stringify(current?.id||null)})">Set</button></div></div>`;
+  ensureLineupDraft(mine);
+  const roster=state.settings?.roster||{bench:7,ir:1};
+  const rows=lineupSlots().map(({key,position,index})=>{
+    const selected=lineupDraft[key];
+    const choices=mine.filter(p=>p.slot!=='IR'&&
+      (position==='FLEX'?['RB','WR','TE'].includes(p.pos):p.pos===position));
+    return `<div class="row"><div><b>${esc(position)} ${index+1}</b></div>
+      <select style="max-width:70%;min-width:170px" onchange="updateLineupSelection(${JSON.stringify(key)},this.value)">
+        <option value="" ${!selected?'selected':''}>Empty starting slot</option>
+        ${choices.map(p=>`<option value="${esc(p.id)}" ${selected===p.id?'selected':''}>
+          ${esc(p.name)} (${esc(p.pos)})</option>`).join('')}
+      </select></div>`;
   }).join('');
   const bench=mine.filter(p=>p.slot==='BENCH');
   const ir=mine.filter(p=>p.slot==='IR');
-  const benchRows=bench.map(p=>`<div class="row"><span>${esc(p.name)} · ${esc(p.pos)}</span>
-    <button onclick="moveToSection(${JSON.stringify(p.id)},'IR')">Move to IR</button></div>`).join('');
-  const irRows=ir.map(p=>`<div class="row"><span>${esc(p.name)} · ${esc(p.pos)}</span>
+  const benchRows=bench.map(p=>`<div class="row"><span>${esc(p.name)} · ${esc(p.pos)}
+    ${injuryLabel(p.injuryStatus)}</span>
+    ${['OUT','IR','INJURED_RESERVE','PUP','NFI'].includes(String(p.injuryStatus||'').toUpperCase())?
+      `<button onclick="moveToSection(${JSON.stringify(p.id)},'IR')">Move to IR</button>`:''}</div>`).join('');
+  const irRows=ir.map(p=>`<div class="row"><span>${esc(p.name)} · ${esc(p.pos)}
+    ${injuryLabel(p.injuryStatus)}</span>
     <button onclick="moveToSection(${JSON.stringify(p.id)},'BENCH')">Move to bench</button></div>`).join('');
-  return card('Set starting lineup',`<p class="muted small">Choose an eligible player for each slot. Replacing a starter swaps the two players. Game locks are enforced by the server.</p>
-    ${rows}`)+card('Bench ('+bench.length+'/'+roster.bench+')',benchRows||'<p>No bench players.</p>')+
+  return card('Set starting lineup',`<p class="muted small">Choose all your starters, then save once. Selecting a player in a different slot removes their earlier selection. Game locks are enforced by the server.</p>
+    ${rows}
+    <div class="actions"><button onclick="saveLineup()" ${!lineupDirty||lineupSaving?'disabled':''}>
+      ${lineupSaving?'Saving…':'Save Starting Lineup'+(lineupDirty?' *':'')}</button>
+      ${lineupDirty?'<button onclick="discardLineupChanges()">Discard changes</button>':''}</div>`)+
+    card('Bench ('+bench.length+'/'+roster.bench+')',benchRows||'<p>No bench players.</p>')+
     card('IR ('+ir.length+'/'+roster.ir+')',irRows||'<p>No IR players.</p>');
-}
-async function assignLineup(slot,selectId,displacedId){
-  const playerId=$(selectId)?.value;if(!playerId)return toast('Select a player first');
-  try{await apiPost('/api/lineup/assign',{playerId,slot,displacedId});toast('Lineup updated');}
-  catch(e){toast(e.message);}
 }
 async function moveToSection(playerId,slot){
   try{await apiPost('/api/lineup/assign',{playerId,slot});toast('Roster updated');}
