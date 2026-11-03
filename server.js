@@ -215,9 +215,18 @@ function initialState(){return {version:1,league:'Fantasy Audible League',week:9
   transactions:[],waiverHolds:{},waiverClaims:[],waiverPriority:[],settings:structuredClone(DEFAULT_SETTINGS),draft:{status:'waiting',rounds:DEFAULT_ROUNDS,
     secondsPerPick:PICK_SECONDS,order:[],picks:[],deadline:null,remainingSeconds:null}};}
 function ensureDraft(s){if(!s.draft)s.draft=initialState().draft;return s.draft;}
-function settingsOf(s){return s.settings || DEFAULT_SETTINGS;}
+function settingsOf(s){
+  const saved=s.settings||{};
+  return {
+    roster:{...DEFAULT_ROSTER,...(saved.roster||{}),
+      starters:{...DEFAULT_ROSTER.starters,...(saved.roster?.starters||{})},
+      maximums:{...DEFAULT_ROSTER.maximums,...(saved.roster?.maximums||{})}},
+    scoring:{...DEFAULT_SCORING,...(saved.scoring||{})},
+    transactions:{...DEFAULT_TRANSACTIONS,...(saved.transactions||{})}
+  };
+}
 function preferencesOf(s,id){return {...DEFAULT_PREFERENCES,...(s.draftPreferences?.[id]||{})};}
-function safeState(s,accounts,user){return {...s,managers:s.managers.map(m=>({...m,
+function safeState(s,accounts,user){return {...s,settings:settingsOf(s),managers:s.managers.map(m=>({...m,
   claimed:accounts.some(a=>a.manager===m.id)})),draftPreferences:{[user.manager]:preferencesOf(s,user.manager)},
   viewer:{manager:user.manager,commissioner:user.commissioner,name:user.name}};}
 function pushState(s,accounts){for(const [res,id] of clients){const a=accounts.find(x=>x.id===id);
@@ -243,7 +252,13 @@ function audit(s,type,manager,details){s.transactions.unshift({id:crypto.randomU
 async function init(){await pool.query(`CREATE TABLE IF NOT EXISTS fantasy_audible_store
   (id INTEGER PRIMARY KEY CHECK(id=1),state JSONB NOT NULL,accounts JSONB NOT NULL)`);
   await pool.query(`INSERT INTO fantasy_audible_store(id,state,accounts) VALUES(1,$1,$2)
-    ON CONFLICT(id) DO NOTHING`,[JSON.stringify(initialState()),'[]']);await initializeESPN();}
+    ON CONFLICT(id) DO NOTHING`,[JSON.stringify(initialState()),'[]']);
+  // Migrate legacy persisted league state without resetting managers or rosters.
+  await pool.query(`UPDATE fantasy_audible_store
+    SET state=jsonb_set(state,'{settings}', $1::jsonb || COALESCE(state->'settings','{}'::jsonb),true)
+    WHERE id=1 AND (NOT (state ? 'settings') OR NOT (state->'settings' ? 'roster'))`,
+    [JSON.stringify(DEFAULT_SETTINGS)]);
+  await initializeESPN();}
 async function snapshot(){const r=await pool.query('SELECT state,accounts FROM fantasy_audible_store WHERE id=1');
   if(!r.rows.length)throw Error('Database not initialized');return r.rows[0];}
 async function change(fn){const c=await pool.connect();try{await c.query('BEGIN');
