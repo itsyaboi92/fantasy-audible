@@ -871,7 +871,9 @@ async function syncNFLScoring(){
           const points=liveNFL.scorePlayer(stats,settingsOf(s).scoring);
           if(points.fieldGoalsPending)continue;
           directory[athleteId]={
-            points:points.points,gameId:game.id,gameStatus:game.status,
+            points:points.points,breakdown:points.breakdown,gameId:game.id,
+            opponent:game.teams.find(t=>t.id!==stats.teamId)?.abbreviation||null,
+            gameStatus:game.status,
             kickoff:game.kickoff,week,season,
             provisional:points.unsupported.length>0,
             updatedAt:new Date().toISOString()
