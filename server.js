@@ -239,7 +239,7 @@ function safeState(s,accounts,user){return {...s,settings:settingsOf(s),managers
   claimed:accounts.some(a=>a.manager===m.id)})),draftPreferences:{[user.manager]:preferencesOf(s,user.manager)},
   viewer:{manager:user.manager,commissioner:user.commissioner,name:user.name}};}
 function pushState(s,accounts){for(const [res,id] of clients){const a=accounts.find(x=>x.id===id);
-  if(!a){clients.delete(res);continue;}try{res.write('data: '+JSON.stringify(safeState(s,accounts,a))+'\n\n');}
+  if(!a){clients.delete(res);try{res.end();}catch{}continue;}try{res.write('data: '+JSON.stringify(safeState(s,accounts,a))+'\n\n');}
   catch{clients.delete(res);}}}
 function send(res,status,data){res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});
   res.end(JSON.stringify(data));}
@@ -255,7 +255,7 @@ function teamName(v){if(typeof v!=='string')return null;const name=v.trim().repl
 function taken(s,name,except){return s.managers.some(m=>m.id!==except&&m.team.toLowerCase()===name.toLowerCase());}
 function availableSlot(s,accounts){const existing=s.managers.find(m=>!accounts.some(a=>a.manager===m.id));
   if(existing)return existing;if(s.managers.length>=MAX_TEAMS)return null;
-  let n=1;while(s.managers.some(m=>m.id==='m'+n))n++;
+  let n=1;while(s.managers.some(m=>m.id==='m'+n)||(s.archivedTeams||[]).some(m=>m.id==='m'+n))n++;
   const slot={id:'m'+n,name:'Manager '+n,team:'Team '+n};s.managers.push(slot);return slot;}
 function audit(s,type,manager,details){s.transactions.unshift({id:crypto.randomUUID(),at:new Date().toISOString(),type,manager,details});}
 async function init(){await pool.query(`CREATE TABLE IF NOT EXISTS fantasy_audible_store
@@ -562,7 +562,8 @@ async function api(req,res,route){
       return send(res,400,{error:'Valid email and 10-character password required'});
     if(!name)return send(res,400,{error:'Team name must be 3–40 valid characters'});
     const result=await change((s,accounts)=>{const d=ensureDraft(s);
-      if(d.status!=='waiting')return failure(409,'Registration is closed after the draft starts');
+      if(d.status!=='waiting'&&!s.managers.some(m=>!accounts.some(a=>a.manager===m.id)))
+        return failure(409,'Registration is closed; no vacant team is available');
       if(accounts.some(a=>a.email===email))return failure(409,'Email already registered');
       if(taken(s,name))return failure(409,'Team name already taken');
       const slot=availableSlot(s,accounts);if(!slot)return failure(409,'League is full (12 teams)');
@@ -570,7 +571,8 @@ async function api(req,res,route){
       accounts.push({id:crypto.randomUUID(),email,name:email.split('@')[0],manager:slot.id,
         commissioner:accounts.length===0,salt,passwordHash:hashPassword(password,salt),
         sessions:[{hash:tokenHash(token),expires:Date.now()+30*86400000}]});
-      slot.team=name;audit(s,'REGISTRATION',slot.id,name+' joined the league');return {token};});
+      if(d.status==='waiting')slot.team=name;
+      audit(s,'REGISTRATION',slot.id,name+' joined the league'+(d.status==='waiting'?'':' as replacement manager'));return {token};});
     return send(res,result.status||200,result);}
   if(req.method==='POST'&&route==='/api/login'){
     const body=await bodyOf(req),email=String(body.email||'').trim().toLowerCase(),password=String(body.password||'');
@@ -630,6 +632,45 @@ async function api(req,res,route){
         return failure(409,'Roster settings are locked once the draft starts');
       s.settings=valid;audit(s,'SETTINGS_CHANGED',actor.manager,'Commissioner updated league settings');
       return {ok:true,settings:valid};}
+    if(route==='/api/league/member/remove'||route==='/api/league/member/terminate'){
+      if(!actor.commissioner)return failure(403,'Commissioner only');
+      const terminate=route.endsWith('/terminate');
+      if(body.confirmation!==(terminate?'TERMINATE ROSTER':'REMOVE MANAGER'))
+        return failure(400,'Incorrect confirmation phrase');
+      const id=String(body.managerId||'');
+      const team=s.managers.find(m=>m.id===id);
+      if(!team)return failure(404,'Team not found');
+      if(id===actor.manager)return failure(403,'Commissioner cannot remove their own team');
+      if(terminate&&['active','paused'].includes(d.status))
+        return failure(409,'Cannot terminate a roster during an active or paused draft');
+      const removed=accounts.filter(a=>a.manager===id);
+      if(!removed.length&&!terminate)return failure(409,'This team already has no manager');
+      for(let i=accounts.length-1;i>=0;i--)if(accounts[i].manager===id)accounts.splice(i,1);
+      ensureTransactions(s);
+      s.waiverClaims=s.waiverClaims.filter(c=>c.manager!==id);
+      if(terminate){
+        const now=Date.now(),days=settingsOf(s).transactions.waiverDays;
+        const rostered=s.players.filter(p=>p.owner===id);
+        for(const p of rostered){
+          p.owner=null;p.slot='BENCH';p.acquiredAt=null;p.acquisitionType=null;
+          s.waiverHolds[p.id]=new Date(now+days*86400000).toISOString();
+        }
+        s.injuries=(s.injuries||[]).filter(i=>!rostered.some(p=>p.id===i.player));
+        s.waiverPriority=(s.waiverPriority||[]).filter(x=>x!==id);
+        if(s.draftPreferences)delete s.draftPreferences[id];
+        s.archivedTeams||=[];
+        s.archivedTeams.push({id:team.id,team:team.team,terminatedAt:new Date().toISOString(),
+          draftedPicks:(d.picks||[]).filter(p=>p.manager===id).length});
+        s.managers=s.managers.filter(m=>m.id!==id);
+        // Historical draft picks and matchups are retained for audit purposes.
+        audit(s,'ROSTER_TERMINATED',actor.manager,
+          'Terminated '+team.team+'; '+rostered.length+' players released to waivers');
+        return {ok:true,action:'terminated',team:team.team,playersReleased:rostered.length};
+      }
+      audit(s,'MANAGER_REMOVED',actor.manager,
+        'Removed manager from '+team.team+'; roster retained for replacement');
+      return {ok:true,action:'removed',team:team.team};
+    }
     if(route==='/api/draft/preferences'){
       const valid=validatePreferences(body);if(!valid)return failure(400,'Invalid draft preferences');
       s.draftPreferences ||= {};s.draftPreferences[actor.manager]=valid;
