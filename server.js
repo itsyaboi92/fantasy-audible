@@ -879,14 +879,14 @@ async function syncNFLScoring(){
           player.liveScoreStatus='DEFENSE_SCORING_NOT_VERIFIED';continue;
         }
         const calculated=liveNFL.scorePlayer(stats,settingsOf(s).scoring);
-        if(player.pos==='K'&&calculated.fieldGoalsPending){player.liveScoreStatus='FIELD_GOAL_DISTANCES_PENDING';continue;}
+        // Preserve known kicker PAT points; mark unverified FG distance as partial.
         // Do not overwrite an in-progress injury handcuff's credited points.
         if(player.scoringMode){player.liveScoreStatus='INJURY_SUBSTITUTION_REQUIRES_EVENT_SCORING';continue;}
         player.points=calculated.points;
         player.liveScoreStatus=calculated.unsupported.length?'PARTIAL':'UPDATED';
         player.liveScoreUpdatedAt=new Date().toISOString();changed++;
       }
-      s.nflSync={season,week,at:new Date().toISOString(),games:games.map(g=>({id:g.id,status:g.status,kickoff:g.kickoff,teams:g.teams})),failures,updatedPlayers:changed,warning:'Provisional: play-level bonuses, D/ST, kicking distance, and injury substitutions require event attribution.'};
+      s.nflSync={season,week,at:new Date().toISOString(),games:games.map(g=>({id:g.id,status:g.status,kickoff:g.kickoff,teams:g.teams})),failures,updatedPlayers:changed,warning:'Provisional: D/ST, play-level bonuses, field-goal distances, and injury substitutions remain unverified.'};
       return {ok:true};
     });
   }catch(e){console.error('NFL scoring sync:',e.message);}
