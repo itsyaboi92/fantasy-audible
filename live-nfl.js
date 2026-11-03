@@ -12,12 +12,26 @@ function playerStats(summary){const out=new Map();for(const team of summary.boxs
 return out;}
 function scorePlayer(p,rules){const a=p.passing,b=p.rushing,c=p.receiving,k=p.kicking,m=p.misc;const pass=rules.passing||{},rush=rules.rushing||{},rec=rules.receiving||{},kick=rules.kicking||{},misc=rules.miscellaneous||{};
 const passY=get(a,'YDS'),rushY=get(b,'YDS'),recY=get(c,'YDS');
+const components=[];
+const add=(label,quantity,rate)=>{if(quantity&&rate)components.push({label,quantity,rate,points:Math.round(quantity*rate*100)/100});};
+
 const ptd=get(a,'TD'),rtd=get(b,'TD'),ctd=get(c,'TD');
+add('Passing yards',passY,pass.yards||0);
+add('Passing TD',ptd,pass.touchdowns||0);
+add('Interceptions thrown',get(a,'INT'),pass.interceptions||0);
+add('Passing 2PT',get(a,'2PT'),pass.twoPoint||0);
 let score=passY*(pass.yards||0)+ptd*(pass.touchdowns||0)+get(a,'INT')*(pass.interceptions||0)+get(a,'2PT')*(pass.twoPoint||0);
+add('Rushing yards',rushY,rush.yards||0);
+add('Rushing TD',rtd,rush.touchdowns||0);
+add('Rushing 2PT',get(b,'2PT'),rush.twoPoint||0);
 score+=rushY*(rush.yards||0)+rtd*(rush.touchdowns||0)+get(b,'2PT')*(rush.twoPoint||0);
+add('Receiving yards',recY,rec.yards||0);
+add('Receptions',get(c,'REC'),rec.receptions||0);
+add('Receiving TD',ctd,rec.touchdowns||0);
+add('Receiving 2PT',get(c,'2PT'),rec.twoPoint||0);
 score+=recY*(rec.yards||0)+get(c,'REC')*(rec.receptions||0)+ctd*(rec.touchdowns||0)+get(c,'2PT')*(rec.twoPoint||0);
-if(rushY>=100&&rushY<200)score+=rush.yards100to199||0;
-if(recY>=100&&recY<200)score+=rec.yards100to199||0;
+if(rushY>=100&&rushY<200){score+=rush.yards100to199||0;add('100–199 rush yards bonus',1,rush.yards100to199||0);}
+if(recY>=100&&recY<200){score+=rec.yards100to199||0;add('100–199 receiving yards bonus',1,rec.yards100to199||0);}
 // ESPN summary aggregates do not reliably contain each scoring play's length.
 // 40+ yard TD bonuses and return TDs are added only when event-level attribution is reliable.
 const fg=get(k,'FG'),fga=get(k,'FGA');const xp=get(k,'XP'),xpa=get(k,'XPA');
@@ -26,7 +40,7 @@ function madeAttempts(raw){const match=String(raw??'').match(/^(\d+)\s*\/\s*(\d+
 const fgPair=madeAttempts(k.FG),xpPair=madeAttempts(k.XP);
 score+=(xpPair?xpPair[0]:xp)*(kick.patMade||0)+(xpPair?xpPair[1]-xpPair[0]:Math.max(0,xpa-xp))*(kick.patMissed||0);
 // Field goal distance scoring requires play-level distance data; never assign a false 3-point default.
-return {points:Math.round(score*100)/100,fieldGoalsPending:!!(fgPair?.[0]||fg),unsupported:['field-goal distance','40+ yard TD bonuses','fumble lost','return touchdowns']};}
+return {points:Math.round(score*100)/100,breakdown:components,fieldGoalsPending:!!(fgPair?.[0]||fg),unsupported:['field-goal distance','40+ yard TD bonuses','fumble lost','return touchdowns']};}
 function teamId(player){const v=String(player.nflTeamId??player.team??'');return /^\d+$/.test(v)?v:TEAM_IDS[v.toUpperCase()]||null;}
 async function loadWeek(season,week){const board=await json(`${BASE}/scoreboard?season=${season}&seasontype=2&week=${week}&limit=100`);const games=eventGames(board);if(!games.length)throw Error('No NFL games returned for requested week');return games;}
 async function fetchGame(id){return json(`${BASE}/summary?event=${encodeURIComponent(id)}`);}
