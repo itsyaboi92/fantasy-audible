@@ -10,17 +10,18 @@ let draftSearch = '';
 let draftPosition = 'ALL';
 let loadingESPN = false;
 
+// Difference between server time and browser time.
+// Positive means the server clock is ahead.
+let serverOffsetMs = 0;
+let clockSynchronized = false;
+let clockSyncInProgress = false;
+let lastClockSync = 0;
+
 const $ = id => document.getElementById(id);
 
 const tabs = [
-  'Home',
-  'My Team',
-  'Matchup',
-  'League',
-  'Players',
-  'Draft',
-  'Notifications',
-  'Commissioner'
+  'Home', 'My Team', 'Matchup', 'League',
+  'Players', 'Draft', 'Notifications', 'Commissioner'
 ];
 
 function esc(value) {
@@ -159,7 +160,6 @@ function injuryCard(injury) {
         x.kickoff <= state.phase;
 
       const later = x.kickoff > state.phase;
-
       const eligible = sameTeam || later;
 
       const explanation = sameTeam
@@ -200,6 +200,157 @@ function injuryCard(injury) {
 }
 
 // ------------------------------------
+// SERVER CLOCK SYNCHRONIZATION
+// ------------------------------------
+
+// The server already sends a Date header in HTTP responses.
+// We use it to estimate the clock difference.
+//
+// HTTP Date headers have one-second precision, so this is
+// appropriate for a seconds-based draft display, not
+// millisecond-precision timing.
+//
+// The server remains authoritative for all actual picks.
+
+function serverNow() {
+  return Date.now() + serverOffsetMs;
+}
+
+async function syncServerClock() {
+  if (!token || clockSyncInProgress) return;
+
+  clockSyncInProgress = true;
+
+  try {
+    const started = Date.now();
+
+    const response = await fetch(
+      '/api/draft?clockSync=' + started,
+      {
+        headers: {
+          Authorization: 'Bearer ' + token,
+          'Cache-Control': 'no-cache'
+        },
+        cache: 'no-store'
+      }
+    );
+
+    const finished = Date.now();
+
+    if (!response.ok) {
+      throw Error('Clock synchronization failed');
+    }
+
+    const dateHeader = response.headers.get('Date');
+
+    if (!dateHeader) {
+      throw Error('Server Date header unavailable');
+    }
+
+    const serverTime = Date.parse(dateHeader);
+
+    if (!Number.isFinite(serverTime)) {
+      throw Error('Invalid server timestamp');
+    }
+
+    // The Date header is rounded to whole seconds.
+    // Estimate the midpoint of that second.
+    const estimatedServerTime = serverTime + 500;
+
+    // Estimate browser time at the response midpoint.
+    const midpoint = (started + finished) / 2;
+
+    const offset = estimatedServerTime - midpoint;
+
+    // Avoid adopting extremely delayed responses.
+    const roundTrip = finished - started;
+
+    if (roundTrip > 10000) {
+      throw Error('Clock synchronization timed out');
+    }
+
+    serverOffsetMs = offset;
+    clockSynchronized = true;
+    lastClockSync = finished;
+
+    updateDraftClock();
+
+  } catch (error) {
+    console.warn('Draft clock sync:', error.message);
+
+    // If a prior synchronization succeeded, preserve it.
+    // Otherwise display an unsynchronized warning rather
+    // than claiming that zero seconds remain.
+  } finally {
+    clockSyncInProgress = false;
+  }
+}
+
+function clockText(seconds) {
+  if (seconds === null) return '--:--';
+
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+
+  return `${minutes}:${String(remainder).padStart(2, '0')}`;
+}
+
+function remainingTime() {
+  const draft = draftData();
+
+  if (draft.status === 'paused') {
+    return draft.remainingSeconds ??
+      draft.secondsPerPick ??
+      90;
+  }
+
+  if (draft.status !== 'active' || !draft.deadline) {
+    return null;
+  }
+
+  if (!clockSynchronized) {
+    return null;
+  }
+
+  const deadline = Date.parse(draft.deadline);
+
+  if (!Number.isFinite(deadline)) {
+    return null;
+  }
+
+  return Math.max(
+    0,
+    Math.ceil((deadline - serverNow()) / 1000)
+  );
+}
+
+function updateDraftClock() {
+  const clock = $('draftClock');
+
+  if (!clock || tab !== 'Draft') return;
+
+  const draft = draftData();
+
+  clock.textContent = clockText(remainingTime());
+
+  const status = $('draftClockStatus');
+
+  if (status) {
+    if (draft.status === 'paused') {
+      status.textContent = 'Timer paused';
+    } else if (draft.status === 'completed') {
+      status.textContent = 'Draft complete';
+    } else if (!clockSynchronized) {
+      status.textContent = 'Synchronizing with server…';
+    } else if (draft.status === 'active') {
+      status.textContent = 'Server-synchronized countdown';
+    } else {
+      status.textContent = 'Waiting for draft';
+    }
+  }
+}
+
+// ------------------------------------
 // ESPN PLAYER DATA
 // ------------------------------------
 
@@ -235,11 +386,7 @@ async function loadESPN(force = false) {
 function injuryLabel(status) {
   const value = String(status || 'UNKNOWN').toUpperCase();
 
-  if (
-    value === 'QUESTIONABLE' ||
-    value === 'DOUBTFUL' ||
-    value === 'OUT'
-  ) {
+  if (['QUESTIONABLE','DOUBTFUL','OUT'].includes(value)) {
     return `<span class="pill warn">${esc(value)}</span>`;
   }
 
@@ -250,8 +397,12 @@ function injuryLabel(status) {
   return `<span class="muted small">${esc(value)}</span>`;
 }
 
+// ------------------------------------
+// DRAFT ENGINE DISPLAY
+// ------------------------------------
+
 function draftData() {
-  return state.draft || {
+  return state?.draft || {
     status: 'waiting',
     rounds: 15,
     secondsPerPick: 90,
@@ -264,34 +415,6 @@ function draftData() {
 function currentTurn() {
   const draft = draftData();
   return draft.order[draft.picks.length] || null;
-}
-
-function remainingTime() {
-  const draft = draftData();
-
-  if (draft.status === 'paused') {
-    return draft.remainingSeconds || draft.secondsPerPick;
-  }
-
-  if (draft.status !== 'active' || !draft.deadline) {
-    return null;
-  }
-
-  return Math.max(
-    0,
-    Math.ceil(
-      (new Date(draft.deadline).getTime() - Date.now()) / 1000
-    )
-  );
-}
-
-function clockText(seconds) {
-  if (seconds === null) return '--:--';
-
-  const minutes = Math.floor(seconds / 60);
-  const remainder = seconds % 60;
-
-  return `${minutes}:${String(remainder).padStart(2, '0')}`;
 }
 
 function availablePlayers() {
@@ -340,6 +463,7 @@ async function draftAction(action) {
 
   try {
     await apiPost('/api/draft/' + action, {});
+    await syncServerClock();
     toast('Draft updated');
   } catch (error) {
     toast(error.message);
@@ -369,6 +493,8 @@ async function selectDraftPlayer(playerId) {
       playerId: String(playerId)
     });
 
+    await syncServerClock();
+
     toast(`${player.name} drafted`);
   } catch (error) {
     toast(error.message);
@@ -377,7 +503,6 @@ async function selectDraftPlayer(playerId) {
 
 function draftBoard() {
   const draft = draftData();
-  const turn = currentTurn();
 
   if (!draft.order.length) {
     return card('Draft order', `
@@ -433,13 +558,16 @@ function draftHistory() {
 function playerTable() {
   if (!espn) {
     return card('ESPN player data', `
-      <p>${esc(espnError || 'Loading ESPN rankings and projections...')}</p>
+      <p>${esc(
+        espnError || 'Loading ESPN rankings and projections...'
+      )}</p>
       <button onclick="loadESPN(true)">Retry ESPN feed</button>
     `);
   }
 
   const draft = draftData();
   const turn = currentTurn();
+
   const myTurn =
     draft.status === 'active' &&
     turn?.manager === manager;
@@ -480,8 +608,7 @@ function playerTable() {
 
     <p class="muted small">
       Showing ${players.length} available players.
-      Players without an ESPN PPR rank appear last.
-      Missing projections display —.
+      Missing ESPN ranks and projections are displayed as —.
     </p>
 
     <div id="draftPlayerRows">
@@ -524,6 +651,7 @@ function playerTable() {
 
 function updateDraftSearch(value) {
   draftSearch = value;
+
   const input = $('draftSearch');
   const start = input?.selectionStart ?? value.length;
 
@@ -574,6 +702,7 @@ function renderDraft() {
 
     ${card('Draft status', `
       <p><b>${esc(draft.status.toUpperCase())}</b></p>
+
       <div class="grid">
         <div>
           <div class="muted small">Overall pick</div>
@@ -581,9 +710,19 @@ function renderDraft() {
             draft.order.length || 'Not started'
           }</h2>
         </div>
+
         <div>
           <div class="muted small">Pick timer</div>
-          <h2 id="draftClock">${clockText(remainingTime())}</h2>
+          <h2 id="draftClock">
+            ${clockText(remainingTime())}
+          </h2>
+          <div id="draftClockStatus" class="muted small">
+            ${
+              !clockSynchronized && draft.status === 'active'
+                ? 'Synchronizing with server…'
+                : 'Server-synchronized countdown'
+            }
+          </div>
         </div>
       </div>
 
@@ -836,11 +975,17 @@ function render() {
     </div>
     ${content}
   `;
+
+  updateDraftClock();
 }
 
 function changeTab(next) {
   tab = next;
   render();
+
+  if (tab === 'Draft') {
+    syncServerClock();
+  }
 
   if (tab === 'Draft' || tab === 'Players') {
     loadESPN();
@@ -956,7 +1101,8 @@ async function connect() {
     const response = await fetch('/api/state', {
       headers: {
         Authorization: 'Bearer ' + token
-      }
+      },
+      cache: 'no-store'
     });
 
     if (response.status === 401) return logout();
@@ -975,17 +1121,50 @@ async function connect() {
     return;
   }
 
+  // Sync immediately when the authenticated app loads.
+  await syncServerClock();
+
   const events = new EventSource(
     '/api/events?token=' + encodeURIComponent(token)
   );
 
+  let previousPickCount = state.draft?.picks?.length ?? 0;
+  let previousDeadline = state.draft?.deadline ?? null;
+  let previousStatus = state.draft?.status ?? null;
+
   events.onmessage = event => {
-    state = JSON.parse(event.data);
+    const nextState = JSON.parse(event.data);
+
+    const nextPickCount =
+      nextState.draft?.picks?.length ?? 0;
+
+    const nextDeadline =
+      nextState.draft?.deadline ?? null;
+
+    const nextStatus =
+      nextState.draft?.status ?? null;
+
+    const draftChanged =
+      nextPickCount !== previousPickCount ||
+      nextDeadline !== previousDeadline ||
+      nextStatus !== previousStatus;
+
+    previousPickCount = nextPickCount;
+    previousDeadline = nextDeadline;
+    previousStatus = nextStatus;
+
+    state = nextState;
     manager = state.viewer.manager;
 
     $('connection').textContent = '● Live synced';
 
     render();
+
+    // Resynchronize when the server advances to a new pick,
+    // or when the commissioner pauses/resumes the draft.
+    if (draftChanged) {
+      syncServerClock();
+    }
   };
 
   events.onerror = () => {
@@ -993,15 +1172,22 @@ async function connect() {
   };
 }
 
-// Update countdown without re-rendering the draft board.
+// Update the visible countdown twice per second.
+setInterval(updateDraftClock, 500);
+
+// Periodically refresh the clock offset to handle
+// device clock adjustments and browser wakeups.
 setInterval(() => {
-  if (tab !== 'Draft') return;
-
-  const clock = $('draftClock');
-
-  if (clock) {
-    clock.textContent = clockText(remainingTime());
+  if (token && state && Date.now() - lastClockSync > 30000) {
+    syncServerClock();
   }
-}, 500);
+}, 5000);
+
+// Re-sync when the app becomes visible again.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && token && state) {
+    syncServerClock();
+  }
+});
 
 connect();
