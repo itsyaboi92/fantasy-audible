@@ -206,6 +206,60 @@ function eligibility(s,starter,bench){if(!starter||!bench||starter.owner!==bench
   starter.slot==='BENCH'||bench.slot!=='BENCH'||starter.pos!==bench.pos)return null;
   if(starter.team===bench.team&&bench.kickoff<=s.phase)return 'handcuff';
   if(bench.kickoff>s.phase)return 'later';return null;}
+// Lineup moves are validated against the stored roster and game state.
+function lineupLocked(s,player){
+  if(!player)return true;
+  if(['playing','injured','finished','final','completed'].includes(String(player.status).toLowerCase()))return true;
+  if(player.kickoffAt){const at=Date.parse(player.kickoffAt);if(Number.isFinite(at)&&Date.now()>=at)return true;}
+  // Older demo entries have phase-based kickoff values. ESPN draft entries
+  // currently use 99 as a placeholder, not an actual NFL kickoff time.
+  if(typeof player.kickoff==='number'&&player.kickoff!==99&&player.kickoff<=s.phase)return true;
+  return false;
+}
+function slotEligible(player,slot){return slot==='FLEX'?['RB','WR','TE'].includes(player.pos):player.pos===slot;}
+function lineupCapacity(s,slot){return slot==='BENCH'?settingsOf(s).roster.bench:
+  slot==='IR'?settingsOf(s).roster.ir:settingsOf(s).roster.starters[slot];}
+function eligibleIR(player){return ['OUT','IR','INJURED_RESERVE','PUP','NFI'].includes(
+  String(player.injuryStatus||'').toUpperCase());}
+function assignLineup(s,actor,body){
+  const player=s.players.find(p=>p.id===body.playerId&&p.owner===actor.manager);
+  const target=String(body.slot||'');
+  const allowed=['QB','RB','WR','TE','FLEX','D/ST','K','BENCH','IR'];
+  if(!player)return failure(404,'Player not found on your roster');
+  if(!allowed.includes(target)||!Number.isInteger(lineupCapacity(s,target))||lineupCapacity(s,target)<1)
+    return failure(400,'Invalid or disabled roster slot');
+  if(player.slot===target)return {ok:true};
+  if(lineupLocked(s,player))return failure(409,'This player is locked after kickoff');
+  if(target==='IR'&&!eligibleIR(player))return failure(409,'Only IR/out-designated players can enter IR');
+  if(!['BENCH','IR'].includes(target)&&!slotEligible(player,target))
+    return failure(409,'Player is not eligible for this starting position');
+  if(s.injuries?.some(i=>i.active&&i.player===player.id))
+    return failure(409,'Resolve the pending injury decision first');
+  if(player.scoringMode||player.scoreAtSwap!==undefined)
+    return failure(409,'An injury substitution cannot be reversed through lineup management');
+  const mine=s.players.filter(p=>p.owner===actor.manager);
+  const occupied=mine.filter(p=>p.slot===target&&p.id!==player.id);
+  if(occupied.length>=lineupCapacity(s,target)){
+    // Move to an occupied starting slot by swapping with its existing starter.
+    // Bench/IR slots cannot silently displace another player.
+    if(['BENCH','IR'].includes(target))return failure(409,'That roster section is full');
+    const displacedId=String(body.displacedId||'');
+    const displaced=occupied.find(p=>p.id===displacedId);
+    if(!displaced)return failure(409,'Choose which starter to replace');
+    if(lineupLocked(s,displaced))return failure(409,'The current starter is locked');
+    if(s.injuries?.some(i=>i.active&&i.player===displaced.id)||displaced.scoringMode)
+      return failure(409,'The current starter cannot be moved');
+    if(player.slot==='IR'&&!eligibleIR(displaced))return failure(409,'Cannot swap a healthy player into IR');
+    if(!['BENCH','IR'].includes(player.slot)&&!slotEligible(displaced,player.slot))
+      return failure(409,'Displaced player cannot fill the previous starting slot');
+    displaced.slot=player.slot;
+  }else if(player.slot!=='BENCH'&&player.slot!=='IR'){
+    // Vacating a starting position is allowed, subject to bench capacity.
+  }
+  player.slot=target;
+  audit(s,'LINEUP_CHANGE',actor.manager,player.name+' moved to '+target);
+  return {ok:true};
+}
 function validateSettings(input){if(!input||typeof input!=='object'||Array.isArray(input))return null;
   const previous=DEFAULT_SETTINGS;
   const result=structuredClone(previous);
@@ -390,6 +444,7 @@ async function api(req,res,route){
       if(taken(s,name,team.id))return failure(409,'Team name already taken');
       const old=team.team;team.team=name;audit(s,'RENAME',team.id,old+' renamed to '+name);
       return {ok:true,team:name};}
+    if(route==='/api/lineup/assign')return assignLineup(s,actor,body);
     if(route==='/api/substitute'){
       const injury=s.injuries.find(i=>i.id===body.injury&&i.active),starter=s.players.find(p=>p.id===injury?.player),
         bench=s.players.find(p=>p.id===body.bench);
