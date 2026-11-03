@@ -1,5 +1,6 @@
 let state=null,manager=null,tab='Home',token=localStorage.getItem('audibleToken');
 let espn=null,espnError='',draftSearch='',draftPosition='ALL',loadingESPN=false;
+let transactionData=null,transactionError='',loadingTransactions=false,lastTransactionFetch=0;
 let serverOffsetMs=0,clockSynchronized=false,clockSyncInProgress=false,lastClockSync=0;
 let settingsDraft=null,prefsDraft=null,settingsDirty=false,prefsDirty=false;
 const $=id=>document.getElementById(id);
@@ -96,7 +97,7 @@ function canDraftPosition(pos){const r=state.settings?.roster;if(!r)return true;
   return missingStarters(counts)<=total-used-1;}
 function availablePlayers(){if(!espn?.players)return [];
   const selected=new Set(draftData().picks.map(x=>String(x.playerId)));
-  return espn.players.filter(x=>!selected.has(String(x.id)))
+  return espn.players.filter(x=>tab==='Players'||!selected.has(String(x.id)))
     .filter(x=>draftPosition==='ALL'||x.position===draftPosition)
     .filter(x=>{const q=draftSearch.toLowerCase();return x.name.toLowerCase().includes(q)||
       x.position.toLowerCase().includes(q)||String(x.nflTeamId??'').includes(q);})
@@ -138,10 +139,54 @@ function draftHistory(){const picks=[...draftData().picks].reverse();return card
   `<div class="row"><div><b>#${x.overall} ${esc(x.playerName)}</b><div class="muted small">
   ${esc(m(x.manager)?.team||x.manager)} · ${esc(x.position)} · Round ${x.round}${x.automatic?' · Auto-pick':''}
   </div></div><b>${x.rank==null?'—':'#'+x.rank}</b></div>`).join(''):'<p>No players drafted yet.</p>');}
+async function loadTransactions(){
+  if(!token||loadingTransactions||draftData().status!=='completed')return;
+  lastTransactionFetch=Date.now();
+  loadingTransactions=true;
+  try{const response=await fetch('/api/transactions/players',{headers:{Authorization:'Bearer '+token}});
+    const data=await response.json();if(!response.ok)throw Error(data.error||'Transaction data unavailable');
+    transactionData={...data,byId:new Map(data.players.map(x=>[x.id,x]))};transactionError='';
+  }catch(e){transactionError=e.message;transactionData=null;}
+  finally{loadingTransactions=false;if(tab==='Players')render();}
+}
+async function playerTransaction(id,action){
+  const player=espn?.players.find(p=>String(p.id)===String(id));
+  if(!player)return;
+  const mine=state.players.filter(p=>p.owner===manager);
+  const roster=state.settings.roster;
+  const active=mine.filter(p=>p.slot!=='IR');
+  const full=active.length>=Object.values(roster.starters).reduce((a,b)=>a+b,0)+roster.bench;
+  const maxed=active.filter(p=>p.pos===player.position).length>=roster.maximums[player.position];
+  let dropId=null;
+  if(full||maxed){
+    const options=mine.filter(p=>p.slot!=='IR');
+    const list=options.map((p,i)=>`${i+1}. ${p.name} (${p.pos})`).join('\n');
+    const response=prompt(`Select a player to drop (enter number):\n${list}`);
+    if(response===null)return;
+    const index=Number(response)-1;
+    if(!Number.isInteger(index)||!options[index])return toast('Invalid drop selection');
+    dropId=options[index].id;
+  }
+  if(!confirm(`${action==='claim'?'Submit waiver claim for':'Add'} ${player.name}${dropId?' and drop '+mine.find(p=>p.id===dropId)?.name:''}?`))return;
+  try{await apiPost('/api/transactions/'+action,{playerId:String(id),dropId});
+    toast(action==='claim'?'Waiver claim submitted':'Player added to your bench');
+    await loadTransactions();
+  }catch(e){toast(e.message);}
+}
+async function dropRosterPlayer(id){
+  const player=state.players.find(p=>p.id===id&&p.owner===manager);
+  if(!player||!confirm('Drop '+player.name+' from your roster?'))return;
+  try{await apiPost('/api/transactions/drop',{playerId:id});toast(player.name+' dropped');
+    transactionData=null;lastTransactionFetch=0;
+  }catch(e){toast(e.message);}
+}
+async function cancelWaiver(id){try{await apiPost('/api/transactions/cancel',{playerId:String(id)});
+  toast('Waiver claim cancelled');await loadTransactions();}catch(e){toast(e.message);}}
 function playerTable(){if(!espn)return card('ESPN player data',`<p>${esc(espnError||'Loading ESPN rankings and projections...')}</p>
   <button onclick="loadESPN(true)">Retry ESPN feed</button>`);
   const d=draftData(),turn=currentTurn(),myTurn=d.status==='active'&&turn?.manager===manager;
   const players=availablePlayers().slice(0,250);
+  const transactionsOpen=tab==='Players'&&d.status==='completed';
   const updated=espn.updatedAt?new Date(espn.updatedAt).toLocaleString():'Not available';
   return card('ESPN player rankings',`<p class="muted small">Season ${esc(espn.season)} · ESPN PPR projections ·
     Updated ${esc(updated)}${espn.stale?' · Cached data':''}</p>
@@ -149,13 +194,25 @@ function playerTable(){if(!espn)return card('ESPN player data',`<p>${esc(espnErr
       oninput="updateDraftSearch(this.value)"><select id="draftPosition" onchange="updateDraftPosition(this.value)">
       ${['ALL',...POSITIONS].map(pos=>`<option value="${pos}" ${draftPosition===pos?'selected':''}>${pos}</option>`).join('')}
       </select><button onclick="loadESPN(true)">Refresh</button></div>
-    <p class="muted small">Showing ${players.length} available players. Missing ranks and projections show —.</p>
+    <p class="muted small">Showing ${players.length} players. Missing ranks and projections show —.</p>
+    ${transactionsOpen?(transactionError?`<p>${esc(transactionError)} <button onclick="loadTransactions()">Retry</button></p>`:
+      `<p class="muted small">Free agents: Add immediately · Locked: game in progress · Waivers: claim after final. Waiver priority: ${esc((transactionData?.priority||[]).join(' → ')||'Not initialized')}</p>`):''}
     <div id="draftPlayerRows">${players.map(x=>{const legal=canDraftPosition(x.position);
       return `<div class="row"><div><b>${x.rank==null?'—':'#'+x.rank} ${esc(x.name)}</b>
         <div class="muted small">${esc(x.position)} · ESPN ADP ${x.averageDraftPosition==null?'—':fmt(x.averageDraftPosition)}</div>
         ${injuryLabel(x.injuryStatus)}</div><div style="text-align:right"><b>${x.projectedPoints==null?'—':fmt(x.projectedPoints)}</b>
         <div class="muted small">Projected PPR</div>${myTurn?`<button ${legal?'':'disabled'}
-          onclick="selectDraftPlayer('${esc(x.id)}')">${legal?'Draft':'Position locked'}</button>`:''}</div></div>`;}).join('')||'<p>No matching players.</p>'}</div>`);}
+          onclick="selectDraftPlayer('${esc(x.id)}')">${legal?'Draft':'Position locked'}</button>`:''}
+        ${transactionsOpen?(()=>{const tx=transactionData?.byId.get(String(x.id));
+          if(!tx)return '<span class="muted small">Checking status…</span>';
+          if(tx.status==='ROSTERED')return `<span class="muted small">${esc(m(tx.owner)?.team||'Rostered')}</span>`;
+          if(tx.status==='LOCKED')return '<span class="muted small">Locked — game in progress</span>';
+          const claimed=transactionData.claims?.some(c=>c.playerId==='espn-'+x.id);
+          if(tx.status==='WAIVERS')return claimed?
+            `<button onclick="cancelWaiver('${esc(x.id)}')">Cancel claim</button>`:
+            `<button onclick="playerTransaction('${esc(x.id)}','claim')">Claim Player</button>`;
+          return `<button onclick="playerTransaction('${esc(x.id)}','add')">Add Player</button>`;
+        })():''}</div></div>`;}).join('')||'<p>No matching players.</p>'}</div>`);}
 function updateDraftSearch(v){draftSearch=v;const input=$('draftSearch'),start=input?.selectionStart??v.length;
   render();const replacement=$('draftSearch');replacement?.focus();try{replacement?.setSelectionRange(start,start);}catch{}}
 function updateDraftPosition(v){draftPosition=v;render();}
@@ -238,7 +295,7 @@ function settingsUI(){const x=settingsDraft||state.settings;if(!x)return card('L
       <label><input type="checkbox" ${x.transactions.undroppableList?'checked':''}
       onchange="editSetting('transactions','undroppableList',this.checked)"> ESPN undroppable list</label>
       <p class="muted small">Player universe: All NFL · Lineup lock: Individual kickoff.</p>`)}
-    ${card('Save commissioner settings',`<p class="muted small">Scoring values are configurable but live NFL stat scoring and waivers are not yet implemented.</p>
+    ${card('Save commissioner settings',`<p class="muted small">Scoring values are configurable. NFL game status controls free-agent locks and waiver processing.</p>
       <button onclick="saveSettings()">Save league settings${settingsDirty?' *':''}</button>`)}
   `;}
 async function saveSettings(){try{const result=await apiPost('/api/settings',{settings:settingsDraft||state.settings});
@@ -316,7 +373,8 @@ function lineupManager(mine){
   const benchRows=bench.map(p=>`<div class="row"><span>${esc(p.name)} · ${esc(p.pos)}
     ${injuryLabel(p.injuryStatus)}</span>
     ${['OUT','IR','INJURED_RESERVE','PUP','NFI'].includes(String(p.injuryStatus||'').toUpperCase())?
-      `<button onclick="moveToSection(${JSON.stringify(p.id)},'IR')">Move to IR</button>`:''}</div>`).join('');
+      `<button onclick="moveToSection(${JSON.stringify(p.id)},'IR')">Move to IR</button>`:''}
+    ${draftData().status==='completed'?`<button onclick="dropRosterPlayer(${JSON.stringify(p.id)})">Drop</button>`:''}</div>`).join('');
   const irRows=ir.map(p=>`<div class="row"><span>${esc(p.name)} · ${esc(p.pos)}
     ${injuryLabel(p.injuryStatus)}</span>
     <button onclick="moveToSection(${JSON.stringify(p.id)},'BENCH')">Move to bench</button></div>`).join('');
@@ -359,6 +417,7 @@ function render(){if(!state||!manager)return;const mine=state.players.filter(x=>
     `<div class="row"><b>${esc(x.team)}</b><span>${fmt(total(x.id))} pts</span></div>`).join(''))}
     ${card('League roster rules',state.settings?`<p>Starters: ${Object.entries(state.settings.roster.starters).map(([k,v])=>`${k} ${v}`).join(' · ')}</p>
       <p>Bench: ${state.settings.roster.bench} · IR: ${state.settings.roster.ir}</p>`:'<p>Not yet configured.</p>')}`;
+  if(tab==='Players'&&Date.now()-lastTransactionFetch>90000)loadTransactions();
   if(tab==='Players')content=`<h1>ESPN Player Directory</h1>${playerTable()}`;
   if(tab==='Draft')content=renderDraft();
   if(tab==='Notifications')content=`<h1>Notifications</h1>${card('Injury alerts',state.injuries.map(i=>
@@ -382,7 +441,8 @@ function render(){if(!state||!manager)return;const mine=state.players.filter(x=>
     <div class="actions"><button onclick="renameTeam()">Rename Team</button><button onclick="logout()">Sign out</button></div></div>${content}`;
   updateDraftClock();}
 function changeTab(next){tab=next;render();if(tab==='Draft')syncServerClock();
-  if(tab==='Draft'||tab==='Players')loadESPN();}
+  if(tab==='Draft'||tab==='Players')loadESPN();
+  if(tab==='Players')loadTransactions();}
 function logout(){localStorage.removeItem('audibleToken');location.reload();}
 function authForm(){$('tabs').innerHTML='';$('connection').textContent='● Sign in';
   $('app').innerHTML=`<section class="card" style="max-width:500px;margin:auto"><h1>Fantasy Audible</h1>
