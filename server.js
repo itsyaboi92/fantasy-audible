@@ -595,6 +595,14 @@ async function api(req,res,route){
   if(req.method==='GET'&&route==='/api/espn/players'){
     try{const data=await draftPool();return send(res,200,{...data,count:data.players.length});}
     catch(e){return send(res,503,{error:'ESPN player data is not available yet',details:e.message});}}
+  if(req.method==='GET'&&route==='/api/players/weekly'){
+    const weekly=current.state.nflWeeklyDirectory||{};
+    return send(res,200,{season:current.state.nflSync?.season||null,
+      week:current.state.nflSync?.week||null,
+      updatedAt:current.state.nflSync?.at||null,
+      players:weekly,projectionStatus:'NOT_AVAILABLE',
+      notice:'Weekly ESPN projections are not yet verified; unavailable projections are shown as —.'});
+  }
   if(req.method==='GET'&&route==='/api/transactions/players'){
     try{
       const games=await nflGames(),map=gameMapFrom(games),data=await draftPool();
@@ -853,6 +861,26 @@ async function syncNFLScoring(){
       catch(e){failures.push(g.id+': '+e.message);}
     }));
     await change(s=>{
+      // Read-only directory cache: includes unrostered players, not just league rosters.
+      // A game with missing box-score data never produces an artificial zero.
+      const directory={...(s.nflWeeklyDirectory||{})};
+      for(const game of games){
+        const box=summaries.get(game.id);
+        if(!box)continue;
+        for(const [athleteId,stats] of box){
+          const points=liveNFL.scorePlayer(stats,settingsOf(s).scoring);
+          if(points.fieldGoalsPending)continue;
+          directory[athleteId]={
+            points:points.points,gameId:game.id,gameStatus:game.status,
+            kickoff:game.kickoff,week,season,
+            provisional:points.unsupported.length>0,
+            updatedAt:new Date().toISOString()
+          };
+        }
+      }
+      // Clear entries from older NFL weeks to prevent presenting stale results.
+      s.nflWeeklyDirectory=Object.fromEntries(Object.entries(directory).filter(
+        ([,v])=>v.week===week&&v.season===season));
       const ids=new Map();for(const game of games)for(const t of game.teams)ids.set(t.id,game);
       let changed=0;
       for(const player of s.players){
