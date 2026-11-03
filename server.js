@@ -1,28 +1,49 @@
-
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { Pool } = require('pg');
-const {
-  initializeESPN,
-  getESPNPlayers
-} = require('./espn');
+const { initializeESPN, getESPNPlayers } = require('./espn');
 
 const PORT = process.env.PORT || 3000;
 const MAX_TEAMS = 12;
-const DRAFT_ROUNDS = 15;
+const DEFAULT_ROUNDS = 16;
 const PICK_SECONDS = 90;
-
-if (!process.env.DATABASE_URL) {
-  throw new Error('DATABASE_URL is required');
-}
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL
-});
-
+if (!process.env.DATABASE_URL) throw Error('DATABASE_URL is required');
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const clients = new Map();
+
+const DEFAULT_ROSTER = {
+  starters: { QB:1, RB:2, WR:2, TE:1, FLEX:1, 'D/ST':1, K:1 },
+  maximums: { QB:4, RB:8, WR:8, TE:3, 'D/ST':3, K:3 },
+  bench:7, ir:1
+};
+const DEFAULT_SCORING = {
+  passing:{yards:0.04, touchdowns:6, touchdowns40:1, interceptions:-2, twoPoint:2},
+  rushing:{yards:0.1, touchdowns:6, touchdowns40:1, twoPoint:2, yards100to199:1},
+  receiving:{yards:0.1, receptions:1, touchdowns:6, touchdowns40:1, twoPoint:2, yards100to199:1},
+  kicking:{patMade:1, patMissed:-1, fg0to39:3, fg40to49:4, fg50to59:5, fg60plus:6, fgMiss0to39:-1},
+  defense:{sack:1, interception:2, interceptionTD:6, fumbleReturnTD:6, kickoffReturnTD:6,
+    puntReturnTD:6, blockedKickReturnTD:6, blockedKick:2, fumbleRecovered:1,
+    forcedFumble:1, safety:2, twoPointReturn:2, onePointSafety:1,
+    pointsAllowed0:5, pointsAllowed1to6:4, pointsAllowed7to13:3,
+    pointsAllowed14to17:1, pointsAllowed18to27:0, pointsAllowed28to34:-1,
+    pointsAllowed35to45:-3, pointsAllowed46plus:-5,
+    yardsAllowedUnder100:5, yardsAllowed100to199:3, yardsAllowed200to299:2,
+    yardsAllowed300to349:0, yardsAllowed350to399:-1, yardsAllowed400to449:-3,
+    yardsAllowed450to499:-5, yardsAllowed500to549:-6, yardsAllowed550plus:-7},
+  miscellaneous:{kickoffReturnTD:6,puntReturnTD:6,fumbleRecoveryTD:6,
+    fumblesLost:-2,interceptionReturnTD:6,fumbleReturnTD:6,
+    blockedKickReturnTD:6,twoPointReturn:2,onePointSafety:1}
+};
+const DEFAULT_TRANSACTIONS = {waiverDays:1, acquisitionLimit:null,
+  playerUniverse:'ALL_NFL', undroppableList:true, lineupLock:'INDIVIDUAL_KICKOFF'};
+const DEFAULT_SETTINGS = {roster:DEFAULT_ROSTER,scoring:DEFAULT_SCORING,
+  transactions:DEFAULT_TRANSACTIONS};
+const DEFAULT_PREFERENCES = {strategy:'balanced',autoDraft:false,avoidOut:true,
+  positionPriority:['RB','WR','TE','QB','D/ST','K'],queue:[]};
+const POSITIONS = ['QB','RB','WR','TE','D/ST','K'];
+const STRATEGIES = ['balanced','bpa','starters','custom'];
 
 const demoPlayers = [
   ['p1','Joe Burrow','CIN','QB',1,'injured',8.6,'QB','m1'],
@@ -37,1182 +58,361 @@ const demoPlayers = [
   ['p10','Derrick Henry','BAL','RB',1,'playing',17.5,'RB','m2'],
   ['p11','Zay Flowers','BAL','WR',1,'playing',11.1,'WR','m2'],
   ['p12','Mark Andrews','BAL','TE',1,'playing',6.3,'TE','m2']
-].map(([id,name,team,pos,kickoff,status,points,slot,owner]) => ({
-  id,name,team,pos,kickoff,status,points,slot,owner
-}));
+].map(([id,name,team,pos,kickoff,status,points,slot,owner])=>
+  ({id,name,team,pos,kickoff,status,points,slot,owner}));
 
-function initialState() {
-  return {
-    version:1,
-    league:'Fantasy Audible League',
-    week:9,
-    phase:2,
-    managers:[],
-    players:demoPlayers,
-    injuries:[{
-      id:'i1',
-      player:'p1',
-      active:true,
-      description:'Demo injury'
-    }],
-    transactions:[],
-    draft:{
-      status:'waiting',
-      rounds:DRAFT_ROUNDS,
-      secondsPerPick:PICK_SECONDS,
-      order:[],
-      picks:[],
-      deadline:null,
-      remainingSeconds:null
-    }
-  };
+function initialState(){return {version:1,league:'Fantasy Audible League',week:9,phase:2,
+  managers:[],players:demoPlayers,injuries:[{id:'i1',player:'p1',active:true,description:'Demo injury'}],
+  transactions:[],settings:structuredClone(DEFAULT_SETTINGS),draft:{status:'waiting',rounds:DEFAULT_ROUNDS,
+    secondsPerPick:PICK_SECONDS,order:[],picks:[],deadline:null,remainingSeconds:null}};}
+function ensureDraft(s){if(!s.draft)s.draft=initialState().draft;return s.draft;}
+function settingsOf(s){return s.settings || DEFAULT_SETTINGS;}
+function preferencesOf(s,id){return {...DEFAULT_PREFERENCES,...(s.draftPreferences?.[id]||{})};}
+function safeState(s,accounts,user){return {...s,managers:s.managers.map(m=>({...m,
+  claimed:accounts.some(a=>a.manager===m.id)})),draftPreferences:{[user.manager]:preferencesOf(s,user.manager)},
+  viewer:{manager:user.manager,commissioner:user.commissioner,name:user.name}};}
+function pushState(s,accounts){for(const [res,id] of clients){const a=accounts.find(x=>x.id===id);
+  if(!a){clients.delete(res);continue;}try{res.write('data: '+JSON.stringify(safeState(s,accounts,a))+'\n\n');}
+  catch{clients.delete(res);}}}
+function send(res,status,data){res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});
+  res.end(JSON.stringify(data));}
+function failure(status,error){return {status,error};}
+function hashPassword(password,salt){return crypto.scryptSync(password,salt,64).toString('hex');}
+function tokenHash(token){return crypto.createHash('sha256').update(token).digest('hex');}
+function findUser(req,accounts){const url=new URL(req.url,'http://localhost');
+  const h=req.headers.authorization||'';const token=h.startsWith('Bearer ')?h.slice(7):url.searchParams.get('token')||'';
+  if(!/^[a-f0-9]{64}$/.test(token))return null;const hash=tokenHash(token);
+  return accounts.find(a=>Array.isArray(a.sessions)&&a.sessions.some(s=>s.hash===hash&&s.expires>Date.now()))||null;}
+function teamName(v){if(typeof v!=='string')return null;const name=v.trim().replace(/\s+/g,' ');
+  return name.length>=3&&name.length<=40&&!/[<>\x00-\x1f]/.test(name)?name:null;}
+function taken(s,name,except){return s.managers.some(m=>m.id!==except&&m.team.toLowerCase()===name.toLowerCase());}
+function availableSlot(s,accounts){const existing=s.managers.find(m=>!accounts.some(a=>a.manager===m.id));
+  if(existing)return existing;if(s.managers.length>=MAX_TEAMS)return null;
+  let n=1;while(s.managers.some(m=>m.id==='m'+n))n++;
+  const slot={id:'m'+n,name:'Manager '+n,team:'Team '+n};s.managers.push(slot);return slot;}
+function audit(s,type,manager,details){s.transactions.unshift({id:crypto.randomUUID(),at:new Date().toISOString(),type,manager,details});}
+async function init(){await pool.query(`CREATE TABLE IF NOT EXISTS fantasy_audible_store
+  (id INTEGER PRIMARY KEY CHECK(id=1),state JSONB NOT NULL,accounts JSONB NOT NULL)`);
+  await pool.query(`INSERT INTO fantasy_audible_store(id,state,accounts) VALUES(1,$1,$2)
+    ON CONFLICT(id) DO NOTHING`,[JSON.stringify(initialState()),'[]']);await initializeESPN();}
+async function snapshot(){const r=await pool.query('SELECT state,accounts FROM fantasy_audible_store WHERE id=1');
+  if(!r.rows.length)throw Error('Database not initialized');return r.rows[0];}
+async function change(fn){const c=await pool.connect();try{await c.query('BEGIN');
+  const r=await c.query('SELECT state,accounts FROM fantasy_audible_store WHERE id=1 FOR UPDATE');
+  const {state,accounts}=r.rows[0];const result=await fn(state,accounts);
+  if(result?.error){await c.query('ROLLBACK');return result;}
+  state.version=(state.version||0)+1;
+  await c.query('UPDATE fantasy_audible_store SET state=$1,accounts=$2 WHERE id=1',
+    [JSON.stringify(state),JSON.stringify(accounts)]);
+  await c.query('COMMIT');pushState(state,accounts);return result;
+  }catch(e){try{await c.query('ROLLBACK');}catch{}throw e;}finally{c.release();}}
+function bodyOf(req){return new Promise((resolve,reject)=>{let raw='';let done=false;
+  req.on('data',chunk=>{if(done)return;raw+=chunk;if(raw.length>100000){done=true;
+    reject(Error('Request too large'));req.destroy();}});
+  req.on('end',()=>{if(done)return;try{resolve(JSON.parse(raw||'{}'));}catch{reject(Error('Invalid JSON'));}});
+  req.on('error',reject);});}
+function rankedPlayers(players){return [...players].sort((a,b)=>
+  (a.rank??Infinity)-(b.rank??Infinity)||
+  (a.averageDraftPosition??Infinity)-(b.averageDraftPosition??Infinity)||a.name.localeCompare(b.name));}
+async function draftPool(){const data=await getESPNPlayers();if(!Array.isArray(data.players))throw Error('ESPN player pool unavailable');return data;}
+function createDraftOrder(ids,rounds){const order=[];for(let round=1;round<=rounds;round++){
+  const seq=round%2?[...ids]:[...ids].reverse();for(const manager of seq)order.push({round,manager});}return order;}
+function currentPick(d){return d.order[d.picks.length]||null;}
+function draftResult(s){const d=ensureDraft(s);return {...d,currentPick:currentPick(d),
+  overallPick:d.picks.length+1,totalPicks:d.order.length};}
+function nextDeadline(d){d.deadline=new Date(Date.now()+d.secondsPerPick*1000).toISOString();}
+function countsFor(s,id){const counts=Object.fromEntries(POSITIONS.map(p=>[p,0]));
+  for(const pick of ensureDraft(s).picks)if(pick.manager===id&&counts[pick.position]!==undefined)counts[pick.position]++;
+  return counts;}
+function requiredPositions(roster){const st=roster.starters;return {
+  QB:st.QB,RB:st.RB,WR:st.WR,TE:st.TE,'D/ST':st['D/ST'],K:st.K};}
+function minimumUnfilled(counts,roster){const req=requiredPositions(roster);
+  let missing=Object.keys(req).reduce((n,pos)=>n+Math.max(0,req[pos]-counts[pos]),0);
+  const flex=roster.starters.FLEX;
+  const skill=['RB','WR','TE'].reduce((n,pos)=>n+Math.max(0,counts[pos]-req[pos]),0);
+  return missing+Math.max(0,flex-skill);}
+function legalPosition(s,id,pos){if(!POSITIONS.includes(pos))return false;
+  const roster=settingsOf(s).roster;const counts=countsFor(s,id);
+  if(counts[pos]>=roster.maximums[pos])return false;
+  const draft=ensureDraft(s);const teamTotal=draft.order.filter(x=>x.manager===id).length;
+  const teamPicks=draft.picks.filter(x=>x.manager===id).length;
+  const remainingAfter=teamTotal-teamPicks-1;
+  if(remainingAfter<0)return false;
+  counts[pos]++;
+  return minimumUnfilled(counts,roster)<=remainingAfter;
 }
-
-function ensureDraft(state) {
-  if (!state.draft) {
-    state.draft = {
-      status:'waiting',
-      rounds:DRAFT_ROUNDS,
-      secondsPerPick:PICK_SECONDS,
-      order:[],
-      picks:[],
-      deadline:null,
-      remainingSeconds:null
-    };
+function availableFor(s,players,id){const selected=new Set(ensureDraft(s).picks.map(p=>String(p.playerId)));
+  return rankedPlayers(players).filter(p=>!selected.has(String(p.id))&&legalPosition(s,id,p.position));}
+function injuryOut(p){return ['OUT','IR','INJURED_RESERVE','DOUBTFUL','SUSPENSION','SUSPENDED'].includes(
+  String(p.injuryStatus||'').toUpperCase());}
+function chooseAutomatic(s,players,id){let available=availableFor(s,players,id);
+  if(!available.length)return null;const pref=preferencesOf(s,id);
+  if(pref.avoidOut){const healthy=available.filter(p=>!injuryOut(p));if(healthy.length)available=healthy;}
+  const queued=(pref.queue||[]).map(String);
+  for(const q of queued){const match=available.find(p=>String(p.id)===q);if(match)return match;}
+  if(pref.strategy==='bpa')return available[0];
+  const roster=settingsOf(s).roster, counts=countsFor(s,id), req=requiredPositions(roster);
+  const missing=Object.keys(req).filter(pos=>counts[pos]<req[pos]);
+  const flexNeed=roster.starters.FLEX>
+    ['RB','WR','TE'].reduce((n,pos)=>n+Math.max(0,counts[pos]-req[pos]),0);
+  const needs=available.filter(p=>missing.includes(p.position)||
+    (flexNeed&&['RB','WR','TE'].includes(p.position)));
+  if(pref.strategy==='starters'&&needs.length)return needs[0];
+  if(pref.strategy==='custom'){
+    const priority=Array.isArray(pref.positionPriority)?pref.positionPriority:DEFAULT_PREFERENCES.positionPriority;
+    for(const pos of priority){const found=available.find(p=>p.position===pos);if(found)return found;}
   }
-  return state.draft;
-}
-
-async function init() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS fantasy_audible_store (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
-      state JSONB NOT NULL,
-      accounts JSONB NOT NULL
-    )
-  `);
-
-  await pool.query(`
-    INSERT INTO fantasy_audible_store
-      (id,state,accounts)
-    VALUES (1,$1,$2)
-    ON CONFLICT (id) DO NOTHING
-  `,[
-    JSON.stringify(initialState()),
-    JSON.stringify([])
-  ]);
-
-  await initializeESPN();
-}
-
-async function snapshot() {
-  const result = await pool.query(`
-    SELECT state,accounts
-    FROM fantasy_audible_store
-    WHERE id=1
-  `);
-
-  if (!result.rows.length) {
-    throw new Error('Database not initialized');
+  if(pref.strategy==='balanced'){
+    const teamPicks=ensureDraft(s).picks.filter(p=>p.manager===id).length;
+    const teamTotal=ensureDraft(s).order.filter(x=>x.manager===id).length;
+    const left=teamTotal-teamPicks;
+    const missingCount=minimumUnfilled(counts,roster);
+    if(missingCount>=left&&needs.length)return needs[0];
+    // Use BPA within needed positions, but avoid early K/DST reaches.
+    const skillNeeds=needs.filter(p=>!['K','D/ST'].includes(p.position));
+    const first=skillNeeds[0]||needs[0];
+    if(first){const overall=available[0];
+      if(!overall)return first;
+      const rankA=Number.isFinite(first.rank)?first.rank:9999;
+      const rankB=Number.isFinite(overall.rank)?overall.rank:9999;
+      const allowedReach=left>5?20:40;
+      if(rankA-rankB<=allowedReach)return first;
+    }
+    // If starters are covered, seek underrepresented depth positions.
+    const target={QB:2,RB:4,WR:4,TE:2,'D/ST':1,K:1};
+    const depth=available.filter(p=>counts[p.position]<Math.min(target[p.position],roster.maximums[p.position]));
+    if(depth.length){const best=depth[0];const top=available[0];
+      if((best.rank??9999)-(top.rank??9999)<=25)return best;}
   }
-
-  return result.rows[0];
+  return available[0];
 }
-
-async function change(fn) {
-  const client = await pool.connect();
-
-  try {
-    await client.query('BEGIN');
-
-    const result = await client.query(`
-      SELECT state,accounts
-      FROM fantasy_audible_store
-      WHERE id=1
-      FOR UPDATE
-    `);
-
-    const {state,accounts} = result.rows[0];
-
-    const output = await fn(state,accounts);
-
-    if (output && output.error) {
-      await client.query('ROLLBACK');
-      return output;
-    }
-
-    state.version = (state.version || 0) + 1;
-
-    await client.query(`
-      UPDATE fantasy_audible_store
-      SET state=$1,accounts=$2
-      WHERE id=1
-    `,[
-      JSON.stringify(state),
-      JSON.stringify(accounts)
-    ]);
-
-    await client.query('COMMIT');
-
-    pushState(state,accounts);
-
-    return output;
-
-  } catch (error) {
-    try {
-      await client.query('ROLLBACK');
-    } catch {}
-
-    throw error;
-
-  } finally {
-    client.release();
-  }
-}
-
-function failure(status,error) {
-  return {status,error};
-}
-
-function hashPassword(password,salt) {
-  return crypto.scryptSync(password,salt,64).toString('hex');
-}
-
-function tokenHash(token) {
-  return crypto.createHash('sha256')
-    .update(token)
-    .digest('hex');
-}
-
-function findUser(req,accounts) {
-  const url = new URL(req.url,'http://localhost');
-
-  const header = req.headers.authorization || '';
-
-  const token = header.startsWith('Bearer ')
-    ? header.slice(7)
-    : url.searchParams.get('token') || '';
-
-  if (!/^[a-f0-9]{64}$/.test(token)) return null;
-
-  const hashed = tokenHash(token);
-
-  return accounts.find(a =>
-    Array.isArray(a.sessions) &&
-    a.sessions.some(s =>
-      s.hash === hashed &&
-      s.expires > Date.now()
-    )
-  ) || null;
-}
-
-function safeState(state,accounts,user) {
-  return {
-    ...state,
-    managers:state.managers.map(m=>({
-      ...m,
-      claimed:accounts.some(a=>a.manager===m.id)
-    })),
-    viewer:{
-      manager:user.manager,
-      commissioner:user.commissioner,
-      name:user.name
-    }
-  };
-}
-
-function pushState(state,accounts) {
-  for (const [res,id] of clients) {
-    const account = accounts.find(a=>a.id===id);
-
-    if (!account) {
-      clients.delete(res);
-      continue;
-    }
-
-    try {
-      res.write(
-        'data: ' +
-        JSON.stringify(safeState(state,accounts,account)) +
-        '\n\n'
-      );
-    } catch {
-      clients.delete(res);
+function recordPick(s,player,automatic=false){const d=ensureDraft(s),turn=currentPick(d);
+  if(!turn)return failure(409,'Draft is complete');
+  if(d.picks.some(p=>String(p.playerId)===String(player.id)))return failure(409,'Player already drafted');
+  if(!legalPosition(s,turn.manager,player.position))return failure(409,'Position maximum reached or required starters would become impossible to fill');
+  const overall=d.picks.length+1;
+  const pick={overall,round:turn.round,manager:turn.manager,playerId:String(player.id),
+    playerName:player.name,position:player.position,nflTeamId:player.nflTeamId,
+    rank:player.rank,projectedPoints:player.projectedPoints,automatic,at:new Date().toISOString()};
+  d.picks.push(pick);s.players.push({id:'espn-'+player.id,espnId:String(player.id),
+    name:player.name,team:String(player.nflTeamId??''),pos:player.position,
+    kickoff:99,status:'upcoming',points:0,slot:'BENCH',owner:turn.manager,
+    projectedPoints:player.projectedPoints,rank:player.rank});
+  audit(s,automatic?'AUTO_PICK':'DRAFT_PICK',turn.manager,player.name+' selected at pick '+overall);
+  if(d.picks.length>=d.order.length){d.status='completed';d.deadline=null;d.remainingSeconds=null;
+    audit(s,'DRAFT_COMPLETE',null,'Draft completed');}else nextDeadline(d);
+  return {ok:true,pick};}
+function eligibility(s,starter,bench){if(!starter||!bench||starter.owner!==bench.owner||
+  starter.slot==='BENCH'||bench.slot!=='BENCH'||starter.pos!==bench.pos)return null;
+  if(starter.team===bench.team&&bench.kickoff<=s.phase)return 'handcuff';
+  if(bench.kickoff>s.phase)return 'later';return null;}
+function validateSettings(input){if(!input||typeof input!=='object'||Array.isArray(input))return null;
+  const previous=DEFAULT_SETTINGS;
+  const result=structuredClone(previous);
+  const r=input.roster;
+  if(!r||typeof r!=='object'||!r.starters||!r.maximums)return null;
+  for(const pos of [...POSITIONS,'FLEX']){
+    if(pos==='FLEX'){
+      const n=r.starters.FLEX;if(!Number.isInteger(n)||n<0||n>3)return null;result.roster.starters.FLEX=n;
+    }else{
+      const a=r.starters[pos],b=r.maximums[pos];
+      if(!Number.isInteger(a)||a<0||a>8||!Number.isInteger(b)||b<a||b>12)return null;
+      result.roster.starters[pos]=a;result.roster.maximums[pos]=b;
     }
   }
-}
-
-function send(res,status,data) {
-  res.writeHead(status,{
-    'Content-Type':'application/json',
-    'Cache-Control':'no-store'
-  });
-
-  res.end(JSON.stringify(data));
-}
-
-function teamName(value) {
-  if (typeof value !== 'string') return null;
-
-  const name = value.trim().replace(/\s+/g,' ');
-
-  if (
-    name.length < 3 ||
-    name.length > 40 ||
-    /[<>\x00-\x1f]/.test(name)
-  ) return null;
-
-  return name;
-}
-
-function taken(state,name,except) {
-  return state.managers.some(m =>
-    m.id !== except &&
-    m.team.toLowerCase() === name.toLowerCase()
-  );
-}
-
-function availableSlot(state,accounts) {
-  const existing = state.managers.find(m =>
-    !accounts.some(a=>a.manager===m.id)
-  );
-
-  if (existing) return existing;
-
-  if (state.managers.length >= MAX_TEAMS) return null;
-
-  const used = new Set(state.managers.map(m=>m.id));
-
-  let n=1;
-
-  while (used.has('m'+n)) n++;
-
-  const slot = {
-    id:'m'+n,
-    name:'Manager '+n,
-    team:'Team '+n
-  };
-
-  state.managers.push(slot);
-
-  return slot;
-}
-
-function audit(state,type,manager,details) {
-  state.transactions.unshift({
-    id:crypto.randomUUID(),
-    at:new Date().toISOString(),
-    type,
-    manager,
-    details
-  });
-}
-
-function eligibility(state,starter,bench) {
-  if (
-    !starter ||
-    !bench ||
-    starter.owner !== bench.owner ||
-    starter.slot === 'BENCH' ||
-    bench.slot !== 'BENCH' ||
-    starter.pos !== bench.pos
-  ) return null;
-
-  if (
-    starter.team === bench.team &&
-    bench.kickoff <= state.phase
-  ) return 'handcuff';
-
-  if (bench.kickoff > state.phase) return 'later';
-
-  return null;
-}
-
-function bodyOf(req) {
-  return new Promise((resolve,reject)=>{
-    let raw='';
-    let tooLarge=false;
-
-    req.on('data',chunk=>{
-      raw+=chunk;
-
-      if (raw.length > 20000) {
-        tooLarge=true;
-        reject(new Error('Request too large'));
-        req.destroy();
-      }
-    });
-
-    req.on('end',()=>{
-      if (tooLarge) return;
-
-      try {
-        resolve(JSON.parse(raw||'{}'));
-      } catch {
-        reject(new Error('Invalid JSON'));
-      }
-    });
-
-    req.on('error',reject);
-  });
-}
-
-// -------------------------------
-// ESPN PLAYER DATA
-// -------------------------------
-
-async function draftPool() {
-  const result = await getESPNPlayers();
-
-  if (!Array.isArray(result.players)) {
-    throw new Error('ESPN player pool unavailable');
-  }
-
-  return result;
-}
-
-function rankedPlayers(players) {
-  return [...players].sort((a,b)=>{
-    const ra = a.rank ?? Infinity;
-    const rb = b.rank ?? Infinity;
-
-    if (ra !== rb) return ra-rb;
-
-    const aa = a.averageDraftPosition ?? Infinity;
-    const ab = b.averageDraftPosition ?? Infinity;
-
-    if (aa !== ab) return aa-ab;
-
-    return a.name.localeCompare(b.name);
-  });
-}
-
-// -------------------------------
-// SNAKE DRAFT ENGINE
-// -------------------------------
-
-function createDraftOrder(managerIds,rounds) {
-  const order=[];
-
-  for (let round=1;round<=rounds;round++) {
-    const sequence = round%2===1
-      ? [...managerIds]
-      : [...managerIds].reverse();
-
-    for (const manager of sequence) {
-      order.push({
-        round,
-        manager
-      });
+  for(const field of ['bench','ir']){const n=r[field];if(!Number.isInteger(n)||n<0||n>20)return null;
+    result.roster[field]=n;}
+  const starterCount=Object.values(result.roster.starters).reduce((a,b)=>a+b,0);
+  if(starterCount+result.roster.bench<2||starterCount+result.roster.bench>30)return null;
+  if(result.roster.starters.FLEX>0&&
+    ['RB','WR','TE'].reduce((n,p)=>n+result.roster.maximums[p]-result.roster.starters[p],0)<result.roster.starters.FLEX)return null;
+  for(const [group,defaults] of Object.entries(DEFAULT_SCORING)){
+    if(!input.scoring?.[group]||typeof input.scoring[group]!=='object')return null;
+    for(const key of Object.keys(defaults)){
+      const n=input.scoring[group][key];if(typeof n!=='number'||!Number.isFinite(n)||n< -100||n>100)return null;
+      result.scoring[group][key]=n;
     }
   }
-
-  return order;
-}
-
-function currentPick(draft) {
-  return draft.order[draft.picks.length] || null;
-}
-
-function draftResult(state) {
-  const draft=ensureDraft(state);
-
-  return {
-    ...draft,
-    currentPick:currentPick(draft),
-    overallPick:draft.picks.length+1,
-    totalPicks:draft.order.length
-  };
-}
-
-function nextDeadline(draft) {
-  draft.deadline =
-    new Date(Date.now()+draft.secondsPerPick*1000)
-      .toISOString();
-}
-
-function recordPick(state,player,automatic=false) {
-  const draft=ensureDraft(state);
-  const turn=currentPick(draft);
-
-  if (!turn) {
-    return failure(409,'Draft is complete');
-  }
-
-  if (draft.picks.some(p=>p.playerId===player.id)) {
-    return failure(409,'Player already drafted');
-  }
-
-  const overall=draft.picks.length+1;
-
-  const pick={
-    overall,
-    round:turn.round,
-    manager:turn.manager,
-    playerId:player.id,
-    playerName:player.name,
-    position:player.position,
-    nflTeamId:player.nflTeamId,
-    rank:player.rank,
-    projectedPoints:player.projectedPoints,
-    automatic,
-    at:new Date().toISOString()
-  };
-
-  draft.picks.push(pick);
-
-  // Newly drafted players are placed on the bench.
-  // Starting-lineup management comes in the next update.
-  state.players.push({
-    id:'espn-'+player.id,
-    espnId:player.id,
-    name:player.name,
-    team:String(player.nflTeamId ?? ''),
-    pos:player.position,
-    kickoff:99,
-    status:'upcoming',
-    points:0,
-    slot:'BENCH',
-    owner:turn.manager,
-    projectedPoints:player.projectedPoints,
-    rank:player.rank
-  });
-
-  audit(
-    state,
-    automatic?'AUTO_PICK':'DRAFT_PICK',
-    turn.manager,
-    player.name+' selected at pick '+overall
-  );
-
-  if (draft.picks.length>=draft.order.length) {
-    draft.status='completed';
-    draft.deadline=null;
-    draft.remainingSeconds=null;
-
-    audit(state,'DRAFT_COMPLETE',null,'Draft completed');
-  } else {
-    nextDeadline(draft);
-  }
-
-  return {ok:true,pick};
-}
-
-async function processExpiredPick() {
-  const data=await snapshot();
-  const draft=ensureDraft(data.state);
-
-  if (
-    draft.status!=='active' ||
-    !draft.deadline ||
-    Date.now()<new Date(draft.deadline).getTime()
-  ) return;
-
-  let poolData;
-
-  try {
-    poolData=await draftPool();
-  } catch(error) {
-    console.error('Auto-pick data unavailable:',error.message);
-
-    // Stop the clock rather than make an unverified pick.
-    await change(state=>{
-      const d=ensureDraft(state);
-
-      if (
-        d.status==='active' &&
-        d.deadline &&
-        Date.now()>=new Date(d.deadline).getTime()
-      ) {
-        d.status='paused';
-        d.remainingSeconds=d.secondsPerPick;
-        d.deadline=null;
-        audit(state,'DRAFT_PAUSED',null,
-          'Draft paused because player data is unavailable');
-      }
-
-      return {ok:true};
-    });
-
-    return;
-  }
-
-  await change(state=>{
-    const d=ensureDraft(state);
-
-    if (
-      d.status!=='active' ||
-      !d.deadline ||
-      Date.now()<new Date(d.deadline).getTime()
-    ) return {ok:true};
-
-    const selected=new Set(
-      d.picks.map(p=>p.playerId)
-    );
-
-    const available=rankedPlayers(poolData.players)
-      .filter(p=>!selected.has(p.id));
-
-    if (!available.length) {
-      d.status='paused';
-      d.remainingSeconds=d.secondsPerPick;
-      d.deadline=null;
-      return {ok:true};
-    }
-
-    return recordPick(state,available[0],true);
-  });
-}
-
-// -------------------------------
-// API
-// -------------------------------
-
-async function api(req,res,route) {
-
-  if (req.method==='GET' && route==='/api/teams') {
-    const {state,accounts}=await snapshot();
-
-    return send(res,200,state.managers.map(m=>({
-      id:m.id,
-      team:m.team,
-      claimed:accounts.some(a=>a.manager===m.id)
-    })));
-  }
-
-  if (req.method==='POST' && route==='/api/register') {
-    const body=await bodyOf(req);
-
-    const email=String(body.email||'')
-      .trim().toLowerCase();
-
-    const password=String(body.password||'');
-    const name=teamName(body.teamName);
-
-    if (
-      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
-      password.length<10
-    ) {
-      return send(res,400,{
-        error:'Valid email and 10-character password required'
-      });
-    }
-
-    if (!name) {
-      return send(res,400,{
-        error:'Team name must be 3–40 valid characters'
-      });
-    }
-
-    const result=await change((state,accounts)=>{
-      const draft=ensureDraft(state);
-
-      if (draft.status!=='waiting') {
-        return failure(409,'Registration is closed after the draft starts');
-      }
-
-      if (accounts.some(a=>a.email===email)) {
-        return failure(409,'Email already registered');
-      }
-
-      if (taken(state,name)) {
-        return failure(409,'Team name already taken');
-      }
-
-      const slot=availableSlot(state,accounts);
-
-      if (!slot) {
-        return failure(409,'League is full (12 teams)');
-      }
-
-      const salt=crypto.randomBytes(16).toString('hex');
-      const token=crypto.randomBytes(32).toString('hex');
-
-      const account={
-        id:crypto.randomUUID(),
-        email,
-        name:email.split('@')[0],
-        manager:slot.id,
-        commissioner:accounts.length===0,
-        salt,
-        passwordHash:hashPassword(password,salt),
-        sessions:[{
-          hash:tokenHash(token),
-          expires:Date.now()+30*86400000
-        }]
-      };
-
-      slot.team=name;
-      accounts.push(account);
-
-      audit(
-        state,
-        'REGISTRATION',
-        slot.id,
-        name+' joined the league'
-      );
-
-      return {token};
-    });
-
-    return send(res,result.status||200,result);
-  }
-
-  if (req.method==='POST' && route==='/api/login') {
-    const body=await bodyOf(req);
-
-    const email=String(body.email||'')
-      .trim().toLowerCase();
-
-    const password=String(body.password||'');
-
-    const result=await change((state,accounts)=>{
-      const account=accounts.find(a=>a.email===email);
-
-      if (
-        !account ||
-        !/^[a-f0-9]{128}$/.test(account.passwordHash)
-      ) return failure(401,'Incorrect credentials');
-
-      const candidate=hashPassword(password,account.salt);
-
-      if (!crypto.timingSafeEqual(
-        Buffer.from(candidate,'hex'),
-        Buffer.from(account.passwordHash,'hex')
-      )) return failure(401,'Incorrect credentials');
-
-      const token=crypto.randomBytes(32).toString('hex');
-
-      account.sessions=(account.sessions||[])
-        .filter(s=>s.expires>Date.now());
-
-      account.sessions.push({
-        hash:tokenHash(token),
-        expires:Date.now()+30*86400000
-      });
-
-      return {token};
-    });
-
-    return send(res,result.status||200,result);
-  }
-
-  const current=await snapshot();
-  const user=findUser(req,current.accounts);
-
-  if (!user) {
-    return send(res,401,{error:'Please sign in'});
-  }
-
-  if (req.method==='GET' && route==='/api/state') {
-    return send(
-      res,200,
-      safeState(current.state,current.accounts,user)
-    );
-  }
-
-  if (req.method==='GET' && route==='/api/events') {
-    res.writeHead(200,{
-      'Content-Type':'text/event-stream',
-      'Cache-Control':'no-cache, no-transform',
-      Connection:'keep-alive'
-    });
-
-    res.write(
-      'data: '+
-      JSON.stringify(
-        safeState(current.state,current.accounts,user)
-      )+'\n\n'
-    );
-
-    clients.set(res,user.id);
-
-    req.on('close',()=>clients.delete(res));
-    return;
-  }
-
-  // ESPN rankings and projections.
-  if (req.method==='GET' && route==='/api/espn/players') {
-    try {
-      const data=await draftPool();
-
-      return send(res,200,{
-        ...data,
-        count:data.players.length
-      });
-
-    } catch(error) {
-      return send(res,503,{
-        error:'ESPN player data is not available yet',
-        details:error.message
-      });
-    }
-  }
-
-  if (req.method==='GET' && route==='/api/draft') {
-    return send(res,200,draftResult(current.state));
-  }
-
-  if (req.method!=='POST') {
-    return send(res,405,{error:'Method not allowed'});
-  }
-
+  const t=input.transactions;if(!t||typeof t!=='object')return null;
+  if(!Number.isInteger(t.waiverDays)||t.waiverDays<0||t.waiverDays>7)return null;
+  if(t.acquisitionLimit!==null&&(!Number.isInteger(t.acquisitionLimit)||t.acquisitionLimit<0||t.acquisitionLimit>1000))return null;
+  if(t.playerUniverse!=='ALL_NFL'||t.lineupLock!=='INDIVIDUAL_KICKOFF'||typeof t.undroppableList!=='boolean')return null;
+  result.transactions={...t};return result;}
+function validatePreferences(input){if(!input||typeof input!=='object')return null;
+  const strategy=String(input.strategy||'balanced');if(!STRATEGIES.includes(strategy))return null;
+  if(typeof input.autoDraft!=='boolean'||typeof input.avoidOut!=='boolean')return null;
+  const priority=input.positionPriority;
+  if(!Array.isArray(priority)||priority.length!==POSITIONS.length||
+    new Set(priority).size!==POSITIONS.length||priority.some(p=>!POSITIONS.includes(p)))return null;
+  const queue=input.queue;if(!Array.isArray(queue)||queue.length>200||
+    queue.some(id=>!/^\d{1,20}$/.test(String(id))))return null;
+  return {strategy,autoDraft:input.autoDraft,avoidOut:input.avoidOut,
+    positionPriority:priority,queue:[...new Set(queue.map(String))]};}
+async function processAutomaticTurn(){const data=await snapshot(),d=ensureDraft(data.state);
+  if(d.status!=='active'||!d.deadline)return;
+  const turn=currentPick(d);if(!turn)return;
+  const expired=Date.now()>=Date.parse(d.deadline);
+  const immediate=preferencesOf(data.state,turn.manager).autoDraft;
+  if(!expired&&!immediate)return;
+  let poolData;try{poolData=await draftPool();}catch(e){console.error('Auto-pick data unavailable:',e.message);
+    if(expired)await change(s=>{const x=ensureDraft(s);
+      if(x.status==='active'&&x.deadline&&Date.now()>=Date.parse(x.deadline)){
+        x.status='paused';x.remainingSeconds=x.secondsPerPick;x.deadline=null;
+        audit(s,'DRAFT_PAUSED',null,'Draft paused because player data is unavailable');}
+      return {ok:true};});return;}
+  await change(s=>{const x=ensureDraft(s),t=currentPick(x);
+    if(x.status!=='active'||!t||!x.deadline)return {ok:true};
+    if(Date.now()<Date.parse(x.deadline)&&!preferencesOf(s,t.manager).autoDraft)return {ok:true};
+    const player=chooseAutomatic(s,poolData.players,t.manager);
+    if(!player){x.status='paused';x.remainingSeconds=x.secondsPerPick;x.deadline=null;
+      audit(s,'DRAFT_PAUSED',null,'No eligible players for current pick');return {ok:true};}
+    return recordPick(s,player,true);});}
+async function api(req,res,route){
+  if(req.method==='GET'&&route==='/api/teams'){const {state,accounts}=await snapshot();
+    return send(res,200,state.managers.map(m=>({id:m.id,team:m.team,
+      claimed:accounts.some(a=>a.manager===m.id)})));}
+  if(req.method==='POST'&&route==='/api/register'){
+    const body=await bodyOf(req),email=String(body.email||'').trim().toLowerCase(),
+      password=String(body.password||''),name=teamName(body.teamName);
+    if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||password.length<10)
+      return send(res,400,{error:'Valid email and 10-character password required'});
+    if(!name)return send(res,400,{error:'Team name must be 3–40 valid characters'});
+    const result=await change((s,accounts)=>{const d=ensureDraft(s);
+      if(d.status!=='waiting')return failure(409,'Registration is closed after the draft starts');
+      if(accounts.some(a=>a.email===email))return failure(409,'Email already registered');
+      if(taken(s,name))return failure(409,'Team name already taken');
+      const slot=availableSlot(s,accounts);if(!slot)return failure(409,'League is full (12 teams)');
+      const salt=crypto.randomBytes(16).toString('hex'),token=crypto.randomBytes(32).toString('hex');
+      accounts.push({id:crypto.randomUUID(),email,name:email.split('@')[0],manager:slot.id,
+        commissioner:accounts.length===0,salt,passwordHash:hashPassword(password,salt),
+        sessions:[{hash:tokenHash(token),expires:Date.now()+30*86400000}]});
+      slot.team=name;audit(s,'REGISTRATION',slot.id,name+' joined the league');return {token};});
+    return send(res,result.status||200,result);}
+  if(req.method==='POST'&&route==='/api/login'){
+    const body=await bodyOf(req),email=String(body.email||'').trim().toLowerCase(),password=String(body.password||'');
+    const result=await change((s,accounts)=>{const a=accounts.find(x=>x.email===email);
+      if(!a||!/^[a-f0-9]{128}$/.test(a.passwordHash))return failure(401,'Incorrect credentials');
+      const candidate=hashPassword(password,a.salt);
+      if(!crypto.timingSafeEqual(Buffer.from(candidate,'hex'),Buffer.from(a.passwordHash,'hex')))
+        return failure(401,'Incorrect credentials');
+      const token=crypto.randomBytes(32).toString('hex');a.sessions=(a.sessions||[]).filter(x=>x.expires>Date.now());
+      a.sessions.push({hash:tokenHash(token),expires:Date.now()+30*86400000});return {token};});
+    return send(res,result.status||200,result);}
+  const current=await snapshot(),user=findUser(req,current.accounts);
+  if(!user)return send(res,401,{error:'Please sign in'});
+  if(req.method==='GET'&&route==='/api/state')return send(res,200,safeState(current.state,current.accounts,user));
+  if(req.method==='GET'&&route==='/api/events'){
+    res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache, no-transform',Connection:'keep-alive'});
+    res.write('data: '+JSON.stringify(safeState(current.state,current.accounts,user))+'\n\n');
+    clients.set(res,user.id);req.on('close',()=>clients.delete(res));return;}
+  if(req.method==='GET'&&route==='/api/espn/players'){
+    try{const data=await draftPool();return send(res,200,{...data,count:data.players.length});}
+    catch(e){return send(res,503,{error:'ESPN player data is not available yet',details:e.message});}}
+  if(req.method==='GET'&&route==='/api/draft')return send(res,200,draftResult(current.state));
+  if(req.method!=='POST')return send(res,405,{error:'Method not allowed'});
   const body=await bodyOf(req);
-
-  // Fetch ESPN outside the database transaction.
   let espnData=null;
-
-  if (
-    route==='/api/draft/start' ||
-    route==='/api/draft/pick'
-  ) {
-    try {
-      espnData=await draftPool();
-    } catch(error) {
-      return send(res,503,{
-        error:'ESPN player data unavailable',
-        details:error.message
-      });
-    }
-  }
-
-  const result=await change((state,accounts)=>{
-    const actor=findUser(req,accounts);
-
-    if (!actor) {
-      return failure(401,'Session expired');
-    }
-
-    const draft=ensureDraft(state);
-
-    // ---------------------------
-    // DRAFT START
-    // ---------------------------
-
-    if (route==='/api/draft/start') {
-      if (!actor.commissioner) {
-        return failure(403,'Commissioner only');
-      }
-
-      if (draft.status!=='waiting') {
-        return failure(409,'Draft already started');
-      }
-
-      const registered=state.managers.filter(m=>
-        accounts.some(a=>a.manager===m.id)
-      );
-
-      if (registered.length<2) {
-        return failure(409,'At least two managers required');
-      }
-
-      if (!espnData.players.length) {
-        return failure(503,'No ESPN players available');
-      }
-
-      if (
-        espnData.players.length <
-        registered.length*DRAFT_ROUNDS
-      ) {
-        return failure(503,'Not enough ESPN players for draft');
-      }
-
-      const ids=registered.map(m=>m.id);
-
-      draft.order=createDraftOrder(ids,DRAFT_ROUNDS);
-      draft.picks=[];
-      draft.status='active';
-      draft.rounds=DRAFT_ROUNDS;
-      draft.secondsPerPick=PICK_SECONDS;
-      draft.remainingSeconds=null;
-
-      nextDeadline(draft);
-
-      // Remove beta demo rosters when the real draft starts.
-      state.players=[];
-      state.injuries=[];
-
-      audit(state,'DRAFT_STARTED',actor.manager,
-        registered.length+'-team snake draft started');
-
-      return {ok:true,draft:draftResult(state)};
-    }
-
-    // ---------------------------
-    // DRAFT PAUSE
-    // ---------------------------
-
-    if (route==='/api/draft/pause') {
-      if (!actor.commissioner) {
-        return failure(403,'Commissioner only');
-      }
-
-      if (draft.status!=='active') {
-        return failure(409,'Draft is not active');
-      }
-
-      draft.remainingSeconds=Math.max(
-        1,
-        Math.ceil(
-          (new Date(draft.deadline).getTime()-Date.now())/1000
-        )
-      );
-
-      draft.status='paused';
-      draft.deadline=null;
-
-      audit(state,'DRAFT_PAUSED',actor.manager,
-        'Commissioner paused draft');
-
-      return {ok:true};
-    }
-
-    // ---------------------------
-    // DRAFT RESUME
-    // ---------------------------
-
-    if (route==='/api/draft/resume') {
-      if (!actor.commissioner) {
-        return failure(403,'Commissioner only');
-      }
-
-      if (draft.status!=='paused') {
-        return failure(409,'Draft is not paused');
-      }
-
-      const seconds=draft.remainingSeconds ||
-        draft.secondsPerPick;
-
-      draft.status='active';
-      draft.deadline=new Date(
-        Date.now()+seconds*1000
-      ).toISOString();
-
-      draft.remainingSeconds=null;
-
-      audit(state,'DRAFT_RESUMED',actor.manager,
-        'Commissioner resumed draft');
-
-      return {ok:true};
-    }
-
-    // ---------------------------
-    // DRAFT PICK
-    // ---------------------------
-
-    if (route==='/api/draft/pick') {
-      if (draft.status!=='active') {
-        return failure(409,'Draft is not active');
-      }
-
-      const turn=currentPick(draft);
-
-      if (!turn) {
-        return failure(409,'Draft complete');
-      }
-
-      if (turn.manager!==actor.manager) {
-        return failure(403,'Not your turn');
-      }
-
-      if (
-        draft.deadline &&
-        Date.now()>new Date(draft.deadline).getTime()
-      ) {
-        return failure(409,'Pick timer expired');
-      }
-
-      const player=espnData.players.find(p=>
-        p.id===String(body.playerId)
-      );
-
-      if (!player) {
-        return failure(404,'Player not found');
-      }
-
-      return recordPick(state,player,false);
-    }
-
-    // ---------------------------
-    // TEAM NAME
-    // ---------------------------
-
-    if (route==='/api/team-name') {
-      const name=teamName(body.name);
-      const team=state.managers.find(m=>m.id===actor.manager);
-
-      if (!team) return failure(403,'Team not found');
-      if (!name) return failure(400,'Invalid team name');
-
-      if (taken(state,name,team.id)) {
-        return failure(409,'Team name already taken');
-      }
-
-      const old=team.team;
-      team.team=name;
-
-      audit(state,'RENAME',team.id,
-        old+' renamed to '+name);
-
-      return {ok:true,team:name};
-    }
-
-    // ---------------------------
-    // INJURY SUBSTITUTION
-    // ---------------------------
-
-    if (route==='/api/substitute') {
-      const injury=state.injuries.find(i=>
-        i.id===body.injury && i.active
-      );
-
-      const starter=state.players.find(p=>
-        p.id===injury?.player
-      );
-
-      const bench=state.players.find(p=>
-        p.id===body.bench
-      );
-
-      if (!starter || starter.owner!==actor.manager) {
-        return failure(403,'Not your team or injury unavailable');
-      }
-
-      const mode=eligibility(state,starter,bench);
-
-      if (!mode) {
-        return failure(409,'Replacement not eligible');
-      }
-
-      const slot=starter.slot;
-      const previous=starter.points;
-
-      starter.slot='BENCH';
-      bench.slot=slot;
-      bench.scoringMode=mode;
-      bench.scoreAtSwap=mode==='handcuff'?bench.points:0;
-      bench.credited=mode==='handcuff'?0:bench.points;
-
-      injury.active=false;
-
-      audit(state,'SUBSTITUTION',actor.manager,
-        starter.name+' ('+previous.toFixed(1)+
-        ' pts) replaced by '+bench.name+' ('+mode+')');
-
-      return {ok:true,mode};
-    }
-
-    if (route==='/api/keep') {
-      const injury=state.injuries.find(i=>
-        i.id===body.injury && i.active
-      );
-
-      if (!injury) {
-        return failure(409,'Injury already resolved');
-      }
-
-      const starter=state.players.find(p=>
-        p.id===injury.player
-      );
-
-      if (starter?.owner!==actor.manager) {
-        return failure(403,'Not your team');
-      }
-
-      injury.active=false;
-
-      audit(state,'KEEP',actor.manager,
-        'Manager retained injured starter');
-
-      return {ok:true};
-    }
-
-    // ---------------------------
-    // COMMISSIONER DEMO
-    // ---------------------------
-
-    if (route==='/api/demo') {
-      if (!actor.commissioner) {
-        return failure(403,'Commissioner only');
-      }
-
-      if (body.action==='advance') {
-        state.phase=Math.min(4,state.phase+1);
-
-        state.players.forEach(p=>{
-          if (
-            p.kickoff<=state.phase &&
-            p.status==='upcoming'
-          ) p.status='playing';
-        });
-
-      } else if (body.action==='injure') {
-        const player=state.players.find(p=>
-          p.id===body.player &&
-          p.slot!=='BENCH'
-        );
-
-        if (!player) {
-          return failure(400,'Choose a starter');
-        }
-
-        if (state.injuries.some(i=>
-          i.player===player.id && i.active
-        )) {
-          return failure(409,'Injury already pending');
-        }
-
-        player.status='injured';
-
-        state.injuries.push({
-          id:crypto.randomUUID(),
-          player:player.id,
-          active:true,
-          description:'Demo injury event'
-        });
-
-      } else if (body.action==='points') {
-        const player=state.players.find(p=>
-          p.id===body.player
-        );
-
-        const amount=Number(body.amount);
-
-        if (
-          !player ||
-          !Number.isFinite(amount) ||
-          Math.abs(amount)>100
-        ) {
-          return failure(400,'Invalid player or points');
-        }
-
-        player.points+=amount;
-
-        if (player.scoringMode==='handcuff') {
-          player.credited=
-            player.points-player.scoreAtSwap;
-        }
-
-      } else {
-        return failure(400,'Unknown action');
-      }
-
-      return {ok:true};
-    }
-
-    return failure(404,'Not found');
-  });
-
+  if(['/api/draft/start','/api/draft/pick'].includes(route)){
+    try{espnData=await draftPool();}catch(e){return send(res,503,{error:'ESPN player data unavailable',details:e.message});}}
+  const result=await change((s,accounts)=>{
+    const actor=findUser(req,accounts);if(!actor)return failure(401,'Session expired');
+    const d=ensureDraft(s);
+    if(route==='/api/settings'){
+      if(!actor.commissioner)return failure(403,'Commissioner only');
+      const valid=validateSettings(body.settings);if(!valid)return failure(400,'Invalid league settings');
+      // Roster configuration cannot change once draft has started.
+      if(d.status!=='waiting'&&JSON.stringify(valid.roster)!==JSON.stringify(settingsOf(s).roster))
+        return failure(409,'Roster settings are locked once the draft starts');
+      s.settings=valid;audit(s,'SETTINGS_CHANGED',actor.manager,'Commissioner updated league settings');
+      return {ok:true,settings:valid};}
+    if(route==='/api/draft/preferences'){
+      const valid=validatePreferences(body);if(!valid)return failure(400,'Invalid draft preferences');
+      s.draftPreferences ||= {};s.draftPreferences[actor.manager]=valid;
+      audit(s,'DRAFT_PREFERENCES',actor.manager,'Updated personal auto-draft preferences');return {ok:true};}
+    if(route==='/api/draft/start'){
+      if(!actor.commissioner)return failure(403,'Commissioner only');
+      if(d.status!=='waiting')return failure(409,'Draft already started');
+      const registered=s.managers.filter(m=>accounts.some(a=>a.manager===m.id));
+      if(registered.length<2)return failure(409,'At least two managers required');
+      const roster=settingsOf(s).roster;
+      const rounds=Object.values(roster.starters).reduce((n,v)=>n+v,0)+roster.bench;
+      if(espnData.players.length<registered.length*rounds)return failure(503,'Not enough ESPN players for draft');
+      d.order=createDraftOrder(registered.map(m=>m.id),rounds);d.picks=[];d.status='active';
+      d.rounds=rounds;d.secondsPerPick=PICK_SECONDS;d.remainingSeconds=null;nextDeadline(d);
+      s.players=[];s.injuries=[];
+      audit(s,'DRAFT_STARTED',actor.manager,registered.length+'-team '+rounds+'-round snake draft started');
+      return {ok:true,draft:draftResult(s)};}
+    if(route==='/api/draft/pause'){
+      if(!actor.commissioner)return failure(403,'Commissioner only');
+      if(d.status!=='active')return failure(409,'Draft is not active');
+      d.remainingSeconds=Math.max(1,Math.ceil((Date.parse(d.deadline)-Date.now())/1000));
+      d.status='paused';d.deadline=null;audit(s,'DRAFT_PAUSED',actor.manager,'Commissioner paused draft');return {ok:true};}
+    if(route==='/api/draft/resume'){
+      if(!actor.commissioner)return failure(403,'Commissioner only');
+      if(d.status!=='paused')return failure(409,'Draft is not paused');
+      d.status='active';d.deadline=new Date(Date.now()+(d.remainingSeconds||d.secondsPerPick)*1000).toISOString();
+      d.remainingSeconds=null;audit(s,'DRAFT_RESUMED',actor.manager,'Commissioner resumed draft');return {ok:true};}
+    if(route==='/api/draft/pick'){
+      if(d.status!=='active')return failure(409,'Draft is not active');
+      const turn=currentPick(d);if(!turn)return failure(409,'Draft complete');
+      if(turn.manager!==actor.manager)return failure(403,'Not your turn');
+      if(d.deadline&&Date.now()>Date.parse(d.deadline))return failure(409,'Pick timer expired');
+      const player=espnData.players.find(p=>String(p.id)===String(body.playerId));
+      if(!player)return failure(404,'Player not found');return recordPick(s,player,false);}
+    if(route==='/api/team-name'){
+      const name=teamName(body.name),team=s.managers.find(m=>m.id===actor.manager);
+      if(!team)return failure(403,'Team not found');if(!name)return failure(400,'Invalid team name');
+      if(taken(s,name,team.id))return failure(409,'Team name already taken');
+      const old=team.team;team.team=name;audit(s,'RENAME',team.id,old+' renamed to '+name);
+      return {ok:true,team:name};}
+    if(route==='/api/substitute'){
+      const injury=s.injuries.find(i=>i.id===body.injury&&i.active),starter=s.players.find(p=>p.id===injury?.player),
+        bench=s.players.find(p=>p.id===body.bench);
+      if(!starter||starter.owner!==actor.manager)return failure(403,'Not your team or injury unavailable');
+      const mode=eligibility(s,starter,bench);if(!mode)return failure(409,'Replacement not eligible');
+      const slot=starter.slot,previous=starter.points;starter.slot='BENCH';bench.slot=slot;
+      bench.scoringMode=mode;bench.scoreAtSwap=mode==='handcuff'?bench.points:0;
+      bench.credited=mode==='handcuff'?0:bench.points;injury.active=false;
+      audit(s,'SUBSTITUTION',actor.manager,starter.name+' ('+previous.toFixed(1)+
+        ' pts) replaced by '+bench.name+' ('+mode+')');return {ok:true,mode};}
+    if(route==='/api/keep'){
+      const injury=s.injuries.find(i=>i.id===body.injury&&i.active);
+      if(!injury)return failure(409,'Injury already resolved');
+      const starter=s.players.find(p=>p.id===injury.player);
+      if(starter?.owner!==actor.manager)return failure(403,'Not your team');
+      injury.active=false;audit(s,'KEEP',actor.manager,'Manager retained injured starter');return {ok:true};}
+    if(route==='/api/demo'){
+      if(!actor.commissioner)return failure(403,'Commissioner only');
+      if(body.action==='advance'){
+        s.phase=Math.min(4,s.phase+1);s.players.forEach(p=>{if(p.kickoff<=s.phase&&p.status==='upcoming')p.status='playing';});
+      }else if(body.action==='injure'){
+        const player=s.players.find(p=>p.id===body.player&&p.slot!=='BENCH');
+        if(!player)return failure(400,'Choose a starter');
+        if(s.injuries.some(i=>i.player===player.id&&i.active))return failure(409,'Injury already pending');
+        player.status='injured';s.injuries.push({id:crypto.randomUUID(),player:player.id,active:true,description:'Demo injury event'});
+      }else if(body.action==='points'){
+        const player=s.players.find(p=>p.id===body.player),amount=Number(body.amount);
+        if(!player||!Number.isFinite(amount)||Math.abs(amount)>100)return failure(400,'Invalid player or points');
+        player.points+=amount;if(player.scoringMode==='handcuff')player.credited=player.points-player.scoreAtSwap;
+      }else return failure(400,'Unknown action');return {ok:true};}
+    return failure(404,'Not found');});
   return send(res,result.status||200,result);
 }
-
-// -------------------------------
-// STATIC FILES
-// -------------------------------
-
-function staticFile(req,res,route) {
-  if (req.method!=='GET' && req.method!=='HEAD') {
-    res.writeHead(405);
-    return res.end();
-  }
-
-  const root=path.resolve(__dirname,'public');
-
-  let decoded;
-
-  try {
-    decoded=decodeURIComponent(route);
-  } catch {
-    res.writeHead(400);
-    return res.end();
-  }
-
-  const file=path.resolve(
-    root,
-    '.'+(decoded==='/'?'/index.html':decoded)
-  );
-
-  if (
-    file!==root &&
-    !file.startsWith(root+path.sep)
-  ) {
-    res.writeHead(403);
-    return res.end();
-  }
-
-  fs.readFile(file,(err,data)=>{
-    if (err) {
-      res.writeHead(404);
-      return res.end();
-    }
-
-    const type=file.endsWith('.html')
-      ? 'text/html; charset=utf-8'
-      :file.endsWith('.js')
-      ? 'application/javascript; charset=utf-8'
-      :file.endsWith('.css')
-      ? 'text/css; charset=utf-8'
-      :'application/octet-stream';
-
-    res.writeHead(200,{
-      'Content-Type':type,
-      'X-Content-Type-Options':'nosniff',
-      'Cache-Control':'no-cache'
-    });
-
-    res.end(req.method==='HEAD'?undefined:data);
-  });
-}
-
-// -------------------------------
-// SERVER
-// -------------------------------
-
-const server=http.createServer((req,res)=>{
-  const route=new URL(
-    req.url,'http://localhost'
-  ).pathname;
-
-  if (route.startsWith('/api/')) {
-    api(req,res,route).catch(error=>{
-      console.error('API error:',error);
-
-      if (!res.headersSent) {
-        send(res,500,{error:'Server error'});
-      } else {
-        res.end();
-      }
-    });
-  } else {
-    staticFile(req,res,route);
-  }
-});
-
-// Check expired draft timers every second.
-// PostgreSQL transactions prevent duplicate picks.
-let checkingTimer=false;
-
-setInterval(async()=>{
-  if (checkingTimer) return;
-
-  checkingTimer=true;
-
-  try {
-    await processExpiredPick();
-  } catch(error) {
-    console.error('Draft timer error:',error);
-  } finally {
-    checkingTimer=false;
-  }
-},1000);
-
-init()
-  .then(()=>server.listen(PORT,()=>{
-    console.log(
-      'Fantasy Audible running with PostgreSQL and ESPN draft support on '+PORT
-    );
-  }))
-  .catch(error=>{
-    console.error('Database startup failed:',error);
-    process.exit(1);
-  });
+function staticFile(req,res,route){if(req.method!=='GET'&&req.method!=='HEAD'){res.writeHead(405);return res.end();}
+  const root=path.resolve(__dirname,'public');let decoded;
+  try{decoded=decodeURIComponent(route);}catch{res.writeHead(400);return res.end();}
+  const file=path.resolve(root,'.'+(decoded==='/'?'/index.html':decoded));
+  if(file!==root&&!file.startsWith(root+path.sep)){res.writeHead(403);return res.end();}
+  fs.readFile(file,(err,data)=>{if(err){res.writeHead(404);return res.end();}
+    const type=file.endsWith('.html')?'text/html; charset=utf-8':file.endsWith('.js')?
+      'application/javascript; charset=utf-8':file.endsWith('.css')?'text/css; charset=utf-8':'application/octet-stream';
+    res.writeHead(200,{'Content-Type':type,'X-Content-Type-Options':'nosniff','Cache-Control':'no-cache'});
+    res.end(req.method==='HEAD'?undefined:data);});}
+const server=http.createServer((req,res)=>{const route=new URL(req.url,'http://localhost').pathname;
+  if(route.startsWith('/api/'))api(req,res,route).catch(e=>{console.error('API error:',e);
+    if(!res.headersSent)send(res,500,{error:'Server error'});else res.end();});
+  else staticFile(req,res,route);});
+let checkingTimer=false;setInterval(async()=>{if(checkingTimer)return;checkingTimer=true;
+  try{await processAutomaticTurn();}catch(e){console.error('Draft timer error:',e);}finally{checkingTimer=false;}},1000);
+init().then(()=>server.listen(PORT,()=>console.log('Fantasy Audible running on '+PORT)))
+  .catch(e=>{console.error('Database startup failed:',e);process.exit(1);});
