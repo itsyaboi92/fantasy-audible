@@ -8,7 +8,8 @@ function eventGames(board){return (board.events||[]).map(e=>({id:String(e.id),we
 const number=x=>{const n=Number(String(x??'').replace(/,/g,''));return Number.isFinite(n)?n:0;};
 function rowValues(group,row){const labels=group.labels||[],values=row.stats||[];const result={};for(let i=0;i<labels.length;i++)result[String(labels[i]).toUpperCase().replace(/[^A-Z0-9]/g,'')]=values[i];return result;}
 function get(v,...keys){for(const k of keys){const x=v[k.replace(/[^A-Z0-9]/g,'')];if(x!==undefined)return number(x);}return 0;}
-function playerStats(summary){const out=new Map();for(const team of summary.boxscore?.players||[])for(const group of team.statistics||[])for(const entry of group.athletes||[]){const athlete=entry.athlete||{};if(!athlete.id)continue;const id=String(athlete.id);let p=out.get(id);if(!p){p={id,teamId:String(team.team?.id),name:athlete.displayName,passing:{},rushing:{},receiving:{},kicking:{},misc:{}};out.set(id,p);}const values=rowValues(group,entry);const name=String(group.name||group.type||'').toLowerCase();if(name.includes('pass'))Object.assign(p.passing,values);else if(name.includes('rush'))Object.assign(p.rushing,values);else if(name.includes('receiv'))Object.assign(p.receiving,values);else if(name.includes('kick')||name.includes('field'))Object.assign(p.kicking,values);else if(name.includes('return'))Object.assign(p.misc,values);}
+function playerStats(summary){const out=new Map();for(const team of summary.boxscore?.players||[])for(const group of team.statistics||[])for(const entry of group.athletes||[]){const athlete=entry.athlete||{};if(!athlete.id)continue;const id=String(athlete.id);let p=out.get(id);if(!p){p={id,teamId:String(team.team?.id),name:athlete.displayName,passing:{},rushing:{},receiving:{},kicking:{},misc:{}};out.set(id,p);}const values=rowValues(group,entry);const name=String(group.name||group.type||'').toLowerCase();if(name.includes('pass'))Object.assign(p.passing,values);else if(name.includes('rush'))Object.assign(p.rushing,values);else if(name.includes('receiv'))Object.assign(p.receiving,values);else if(name.includes('kick')||name.includes('field'))Object.assign(p.kicking,values);else if(name.includes('return')||name.includes('fumbl')||name.includes('misc'))Object.assign(p.misc,values);
+if(name.includes('fumbl'))p.fumbleGroupSeen=true;}
 return out;}
 function scorePlayer(p,rules){const a=p.passing,b=p.rushing,c=p.receiving,k=p.kicking,m=p.misc;const pass=rules.passing||{},rush=rules.rushing||{},rec=rules.receiving||{},kick=rules.kicking||{},misc=rules.miscellaneous||{};
 const passY=get(a,'YDS'),rushY=get(b,'YDS'),recY=get(c,'YDS');
@@ -32,6 +33,11 @@ add('Receiving 2PT',get(c,'2PT'),rec.twoPoint||0);
 score+=recY*(rec.yards||0)+get(c,'REC')*(rec.receptions||0)+ctd*(rec.touchdowns||0)+get(c,'2PT')*(rec.twoPoint||0);
 if(rushY>=100&&rushY<200){score+=rush.yards100to199||0;add('100–199 rush yards bonus',1,rush.yards100to199||0);}
 if(recY>=100&&recY<200){score+=rec.yards100to199||0;add('100–199 receiving yards bonus',1,rec.yards100to199||0);}
+// Fumbles lost are a Miscellaneous scoring rule. ESPN may expose this
+// as LOST, FL, FUMLOST, or FUMBLESLOST in a dedicated fumbles group.
+const lost=get(m,'LOST','FL','FUMLOST','FUMBLESLOST');
+const lostRate=Number(misc.fumblesLost??0);
+if(lost){score+=lost*lostRate;add('Fumbles lost',lost,lostRate);}
 // ESPN summary aggregates do not reliably contain each scoring play's length.
 // 40+ yard TD bonuses and return TDs are added only when event-level attribution is reliable.
 const fg=get(k,'FG'),fga=get(k,'FGA');const xp=get(k,'XP'),xpa=get(k,'XPA');
@@ -40,7 +46,7 @@ function madeAttempts(raw){const match=String(raw??'').match(/^(\d+)\s*\/\s*(\d+
 const fgPair=madeAttempts(k.FG),xpPair=madeAttempts(k.XP);
 score+=(xpPair?xpPair[0]:xp)*(kick.patMade||0)+(xpPair?xpPair[1]-xpPair[0]:Math.max(0,xpa-xp))*(kick.patMissed||0);
 // Field goal distance scoring requires play-level distance data; never assign a false 3-point default.
-return {points:Math.round(score*100)/100,breakdown:components,fieldGoalsPending:!!(fgPair?.[0]||fg),unsupported:['field-goal distance','40+ yard TD bonuses','fumble lost','return touchdowns']};}
+return {points:Math.round(score*100)/100,breakdown:components,fieldGoalsPending:!!(fgPair?.[0]||fg),unsupported:['field-goal distance','40+ yard TD bonuses','return touchdowns']};}
 function teamId(player){const v=String(player.nflTeamId??player.team??'');return /^\d+$/.test(v)?v:TEAM_IDS[v.toUpperCase()]||null;}
 async function loadWeek(season,week){const board=await json(`${BASE}/scoreboard?season=${season}&seasontype=2&week=${week}&limit=100`);const games=eventGames(board);if(!games.length)throw Error('No NFL games returned for requested week');return games;}
 async function fetchGame(id){return json(`${BASE}/summary?event=${encodeURIComponent(id)}`);}
