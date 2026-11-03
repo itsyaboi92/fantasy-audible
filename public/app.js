@@ -433,7 +433,7 @@ function render(){if(!state||!manager)return;const mine=state.players.filter(x=>
       ${state.injuries.filter(i=>i.active).map(injuryCard).join('')}
       ${lineupManager(mine)}`;}
   if(tab==='Matchup'){const opponent=manager==='m1'?'m2':'m1';
-    content=`<h1>Week ${state.week} Matchup</h1><div class="grid">${card(esc(myTeam.team),
+    content=`<h1>Week ${state.week} Matchup</h1>${card('NFL live feed',state.nflSync?`<p>Last synchronized: ${esc(new Date(state.nflSync.at).toLocaleString())}</p><p>${state.nflSync.updatedPlayers} players updated · ${state.nflSync.failures.length} game feed errors</p><p class="muted">${esc(state.nflSync.warning)}</p>`:'<p>Waiting for first NFL sync. Scores are not yet verified.</p>')}<div class="grid">${card(esc(myTeam.team),
       `<div class="stat">${fmt(total(manager))}</div>${mine.filter(x=>!['BENCH','IR'].includes(x.slot)).map(playerRow).join('')}`)}
       ${m(opponent)?card(esc(m(opponent).team),`<div class="stat">${fmt(total(opponent))}</div>
       ${state.players.filter(x=>x.owner===opponent&&!['BENCH','IR'].includes(x.slot)).map(playerRow).join('')}`):''}</div>`;}
