@@ -104,6 +104,25 @@ function availablePlayers(){if(!espn?.players)return [];
       (a.averageDraftPosition??Infinity)-(b.averageDraftPosition??Infinity));}
 async function draftAction(action){if(!confirm({start:'Start the draft now?',pause:'Pause the draft?',resume:'Resume the draft?'}[action]))return;
   try{await apiPost('/api/draft/'+action,{});await syncServerClock();toast('Draft updated');}catch(e){toast(e.message);}}
+async function restartLeague(){
+  const confirmation=prompt(
+    'DANGER: This permanently clears all draft picks, the draft order, '+
+    'draft history, team rosters, and injury events. Accounts, team names, '+
+    'league settings, and manager draft preferences are kept. '+
+    'Type RESTART LEAGUE to proceed:'
+  );
+  if(confirmation!=='RESTART LEAGUE'){
+    if(confirmation!==null)toast('Restart canceled: confirmation did not match');
+    return;
+  }
+  if(!confirm('Final confirmation: restart the league and erase the current draft?'))return;
+  try{
+    const result=await apiPost('/api/league/restart',{confirmation});
+    toast('League restarted. '+result.clearedPicks+' picks cleared.');
+    tab='Commissioner';
+    await syncServerClock();
+  }catch(e){toast(e.message);}
+}
 async function selectDraftPlayer(id){const turn=currentTurn();if(!turn||turn.manager!==manager)return toast('It is not your turn');
   const player=espn?.players.find(x=>String(x.id)===String(id));if(!player)return;
   if(!canDraftPosition(player.position))return toast('Position limit or required-starter protection');
@@ -260,6 +279,9 @@ function render(){if(!state||!manager)return;const mine=state.players.filter(x=>
     ${card('Transactions',state.transactions.slice(0,50).map(t=>`<div class="row">${esc(t.details)}</div>`).join('')||'<p>No transactions.</p>')}`;
   if(tab==='Commissioner'&&state.viewer.commissioner)content=`<h1>Commissioner Controls</h1>
     ${card('Draft management','<p>Manage the snake draft.</p><button onclick="changeTab(\'Draft\')">Open draft controls</button>')}
+    ${card('Restart league',`<p><b>Destructive action:</b> clear the current draft order, all picks, draft history, drafted rosters, and injuries. Keep manager accounts, team names, commissioner scoring/roster rules, and each manager's draft preferences.</p>
+      <p>The next draft will use your configured roster size (16 rounds by default).</p>
+      <button onclick="restartLeague()" style="background:#a32121;color:white">Restart league / New draft</button>`)}
     ${settingsUI()}
     ${card('Simulate injury',`<select id="injuryPlayer">${state.players.filter(x=>x.slot!=='BENCH').map(x=>
       `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('')}</select>
