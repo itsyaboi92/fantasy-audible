@@ -114,15 +114,16 @@ function transactionStatus(player,gameMap,s,now=Date.now()){
   const id=String(player.nflTeamId??player.team??'');
   const game=gameMap.get(id);
   const forced=s.waiverHolds?.[String(player.id)];
+  const zeroDay=settingsOf(s).transactions.waiverDays===0;
   if(game){
     const start=Date.parse(game.kickoff);
     if(now>=start&&!game.completed)return {status:'LOCKED',kickoff:game.kickoff};
     if(game.completed){
       const until=Date.parse(nextWednesdayEastern(start));
-      if(now<until)return {status:'WAIVERS',clearsAt:new Date(until).toISOString(),kickoff:game.kickoff};
+      if(now<until)return {status:'WAIVERS',clearsAt:zeroDay?new Date(now).toISOString():new Date(until).toISOString(),kickoff:game.kickoff};
     }
   }
-  if(forced&&Date.parse(forced)>now)return {status:'WAIVERS',clearsAt:forced};
+  if(forced&&Date.parse(forced)>now&&!zeroDay)return {status:'WAIVERS',clearsAt:forced};
   return {status:'FREE_AGENT'};
 }
 function gameMapFrom(games){const map=new Map();
@@ -181,7 +182,11 @@ async function processWaivers(){
       const player=s.players.find(p=>p.id===claim.playerId);
       if(!player||player.owner){due.add(claim.id);continue;}
       const status=transactionStatus(player,map,s,now);
-      if(status.status==='FREE_AGENT')due.add(claim.id);
+      // A claim is due when its processing deadline arrives, even if the
+      // player is still classified as on waivers. Zero-day settings also
+      // apply to claims submitted before the commissioner changed the delay.
+      if(status.status==='FREE_AGENT'||(status.status==='WAIVERS'&&
+          Number.isFinite(Date.parse(status.clearsAt))&&Date.parse(status.clearsAt)<=now))due.add(claim.id);
     }
     if(!due.size)return {ok:true};
     const byPlayer=new Map();
