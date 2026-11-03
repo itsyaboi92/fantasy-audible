@@ -61,9 +61,158 @@ const demoPlayers = [
 ].map(([id,name,team,pos,kickoff,status,points,slot,owner])=>
   ({id,name,team,pos,kickoff,status,points,slot,owner}));
 
+// NFL scoreboard is authoritative for individual game kickoff and final status.
+// Fail closed if it cannot be checked: never mistakenly allow an in-game pickup.
+let nflSchedule={at:0,games:null,error:null};
+async function nflGames(){
+  if(nflSchedule.games&&Date.now()-nflSchedule.at<90000)return nflSchedule.games;
+  try{
+    const response=await fetch('https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?limit=100',
+      {signal:AbortSignal.timeout(9000)});
+    if(!response.ok)throw Error('NFL scoreboard HTTP '+response.status);
+    const data=await response.json();
+    let events=data.events||[];
+    const week=Number(data.week?.number),year=Number(data.season?.year);
+    if(week>1&&Number.isInteger(year)){
+      try{const prior=await fetch(`https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=${year}&seasontype=2&week=${week-1}&limit=100`,
+        {signal:AbortSignal.timeout(9000)});
+        if(prior.ok)events=events.concat((await prior.json()).events||[]);
+      }catch{} // Current-week schedule still protects live kickoff locks.
+    }
+    const games=events.map(event=>{
+      const competition=event.competitions?.[0];
+      return {id:String(event.id),teams:(competition?.competitors||[]).map(x=>String(x.team?.id)),
+        kickoff:competition?.date||event.date,
+        state:event.status?.type?.state||competition?.status?.type?.state||'pre',
+        completed:Boolean(event.status?.type?.completed||competition?.status?.type?.completed)};
+    }).filter(g=>g.teams.length===2&&Number.isFinite(Date.parse(g.kickoff)));
+    if(!games.length)throw Error('NFL scoreboard contains no games');
+    nflSchedule={at:Date.now(),games,error:null};return games;
+  }catch(e){nflSchedule.error=e.message;
+    // Never use stale game data for new transactions.
+    throw Error('Live NFL schedule unavailable; player transactions temporarily paused');}
+}
+function easternParts(time){const p=new Intl.DateTimeFormat('en-US',
+  {timeZone:'America/New_York',year:'numeric',month:'2-digit',day:'2-digit',weekday:'short',hour:'2-digit',hourCycle:'h23'}).formatToParts(time);
+  return Object.fromEntries(p.map(x=>[x.type,x.value]));}
+function sameEasternDay(a,b){const x=easternParts(new Date(a)),y=easternParts(new Date(b));
+  return x.year===y.year&&x.month===y.month&&x.day===y.day;}
+function nextWednesdayEastern(after){
+  // 03:00 ET is 07:00 or 08:00 UTC, depending on DST.
+  for(let i=0;i<9;i++){
+    const d=new Date(after+i*86400000),parts=easternParts(d);
+    if(parts.weekday!=='Wed')continue;
+    const utc=Date.UTC(+parts.year,+parts.month-1,+parts.day,8);
+    const candidate=new Date(utc);
+    const offset=easternParts(candidate).hour==='03'?-5:-4;
+    const when=Date.UTC(+parts.year,+parts.month-1,+parts.day,3-offset);
+    if(when>after)return new Date(when).toISOString();
+  }
+  return new Date(after+7*86400000).toISOString();
+}
+function transactionStatus(player,gameMap,s,now=Date.now()){
+  const id=String(player.nflTeamId??player.team??'');
+  const game=gameMap.get(id);
+  const forced=s.waiverHolds?.[String(player.id)];
+  if(game){
+    const start=Date.parse(game.kickoff);
+    if(now>=start&&!game.completed)return {status:'LOCKED',kickoff:game.kickoff};
+    if(game.completed){
+      const until=Date.parse(nextWednesdayEastern(start));
+      if(now<until)return {status:'WAIVERS',clearsAt:new Date(until).toISOString(),kickoff:game.kickoff};
+    }
+  }
+  if(forced&&Date.parse(forced)>now)return {status:'WAIVERS',clearsAt:forced};
+  return {status:'FREE_AGENT'};
+}
+function gameMapFrom(games){const map=new Map();
+  for(const game of games)for(const id of game.teams){
+    const previous=map.get(id);
+    if(!previous||Date.parse(game.kickoff)>Date.parse(previous.kickoff))map.set(id,game);
+    // Until Wednesday's clearance, a finished prior-week game takes precedence.
+    if(previous?.completed&&Date.now()<Date.parse(nextWednesdayEastern(Date.parse(previous.kickoff))))map.set(id,previous);
+    if(game.completed&&Date.now()<Date.parse(nextWednesdayEastern(Date.parse(game.kickoff))))map.set(id,game);
+  }return map;}
+function activeRoster(s,owner){return s.players.filter(x=>x.owner===owner&&x.slot!=='IR');}
+function transactionCapacity(s,owner,player,drop){
+  const roster=settingsOf(s).roster,active=activeRoster(s,owner).filter(x=>x.id!==drop?.id);
+  if(active.length>=Object.values(roster.starters).reduce((a,b)=>a+b,0)+roster.bench)
+    return 'Roster is full; select a player to drop';
+  if(active.filter(x=>x.pos===player.position).length>=roster.maximums[player.position])
+    return 'Position maximum reached';
+  return null;
+}
+function acquisitionCount(s,owner){return (s.transactions||[]).filter(x=>x.manager===owner&&
+  ['FREE_AGENT_ADD','WAIVER_AWARDED'].includes(x.type)).length;}
+function acquire(s,owner,player,drop,kind){
+  const old=drop?.name;
+  if(drop){drop.owner=null;drop.slot='BENCH';drop.acquiredAt=null;drop.acquisitionType=null;
+    // Same-day pickups return directly to free agency unless a game has begun.
+    const immediate=drop.lastAcquiredAt&&drop.lastAcquisitionType!=='DRAFT'&&
+      sameEasternDay(drop.lastAcquiredAt,Date.now());
+    if(!immediate)s.waiverHolds[drop.id]=new Date(Date.now()+settingsOf(s).transactions.waiverDays*86400000).toISOString();
+    else delete s.waiverHolds[drop.id];
+  }
+  player.owner=owner;player.slot='BENCH';player.acquiredAt=new Date().toISOString();
+  player.lastAcquiredAt=player.acquiredAt;player.acquisitionType=kind;
+  player.lastAcquisitionType=kind;delete s.waiverHolds[player.id];
+  audit(s,kind==='WAIVER'?'WAIVER_AWARDED':'FREE_AGENT_ADD',owner,
+    player.name+' acquired'+(old?' (dropped '+old+')':''));
+}
+function ensureTransactions(s){s.waiverHolds||={};s.waiverClaims||=[];}
+function dropValidation(s,owner,id,gameMap){
+  if(!id)return null;
+  const player=s.players.find(p=>p.id===id&&p.owner===owner);
+  if(!player)return failure(404,'Player to drop is not on your roster');
+  const game=gameMap.get(String(player.nflTeamId??player.team??''));
+  if(game&&Date.now()>=Date.parse(game.kickoff)&&!game.completed)
+    return failure(409,'Cannot drop a player during their NFL game');
+  if(lineupLocked(s,player))return failure(409,'Cannot drop a locked lineup player');
+  return player;
+}
+async function processWaivers(){
+  const {state}=await snapshot();
+  if(!(state.waiverClaims||[]).length)return;
+  const games=await nflGames(),map=gameMapFrom(games),now=Date.now();
+  await change(s=>{
+    ensureTransactions(s);
+    const due=new Set();
+    for(const claim of s.waiverClaims){
+      const player=s.players.find(p=>p.id===claim.playerId);
+      if(!player||player.owner){due.add(claim.id);continue;}
+      const status=transactionStatus(player,map,s,now);
+      if(status.status==='FREE_AGENT')due.add(claim.id);
+    }
+    if(!due.size)return {ok:true};
+    const byPlayer=new Map();
+    for(const claim of s.waiverClaims.filter(c=>due.has(c.id))){
+      if(!byPlayer.has(claim.playerId))byPlayer.set(claim.playerId,[]);
+      byPlayer.get(claim.playerId).push(claim);
+    }
+    if(!s.waiverPriority?.length)s.waiverPriority=s.managers.map(m=>m.id);
+    for(const [id,claims] of byPlayer){
+      const player=s.players.find(p=>p.id===id);
+      if(!player||player.owner)continue;
+      claims.sort((a,b)=>s.waiverPriority.indexOf(a.manager)-s.waiverPriority.indexOf(b.manager)||a.at.localeCompare(b.at));
+      for(const claim of claims){
+        const drop=claim.dropId?s.players.find(p=>p.id===claim.dropId&&p.owner===claim.manager):null;
+        if(claim.dropId&&!drop)continue;
+        if(drop&&dropValidation(s,claim.manager,drop.id,map)?.error)continue;
+        if(transactionCapacity(s,claim.manager,{position:player.pos},drop))continue;
+        const limit=settingsOf(s).transactions.acquisitionLimit;
+        if(limit!==null&&acquisitionCount(s,claim.manager)>=limit)continue;
+        acquire(s,claim.manager,player,drop,'WAIVER');
+        s.waiverPriority=s.waiverPriority.filter(x=>x!==claim.manager).concat(claim.manager);
+        break;
+      }
+    }
+    s.waiverClaims=s.waiverClaims.filter(c=>!due.has(c.id));
+    return {ok:true};
+  });
+}
 function initialState(){return {version:1,league:'Fantasy Audible League',week:9,phase:2,
   managers:[],players:demoPlayers,injuries:[{id:'i1',player:'p1',active:true,description:'Demo injury'}],
-  transactions:[],settings:structuredClone(DEFAULT_SETTINGS),draft:{status:'waiting',rounds:DEFAULT_ROUNDS,
+  transactions:[],waiverHolds:{},waiverClaims:[],waiverPriority:[],settings:structuredClone(DEFAULT_SETTINGS),draft:{status:'waiting',rounds:DEFAULT_ROUNDS,
     secondsPerPick:PICK_SECONDS,order:[],picks:[],deadline:null,remainingSeconds:null}};}
 function ensureDraft(s){if(!s.draft)s.draft=initialState().draft;return s.draft;}
 function settingsOf(s){return s.settings || DEFAULT_SETTINGS;}
@@ -197,7 +346,8 @@ function recordPick(s,player,automatic=false){const d=ensureDraft(s),turn=curren
   d.picks.push(pick);s.players.push({id:'espn-'+player.id,espnId:String(player.id),
     name:player.name,team:String(player.nflTeamId??''),pos:player.position,
     kickoff:99,status:'upcoming',points:0,slot:'BENCH',owner:turn.manager,
-    projectedPoints:player.projectedPoints,rank:player.rank});
+    projectedPoints:player.projectedPoints,rank:player.rank,injuryStatus:player.injuryStatus||'UNKNOWN',
+    nflTeamId:player.nflTeamId,acquisitionType:'DRAFT',lastAcquisitionType:'DRAFT'});
   audit(s,automatic?'AUTO_PICK':'DRAFT_PICK',turn.manager,player.name+' selected at pick '+overall);
   if(d.picks.length>=d.order.length){d.status='completed';d.deadline=null;d.remainingSeconds=null;
     audit(s,'DRAFT_COMPLETE',null,'Draft completed');}else nextDeadline(d);
@@ -418,12 +568,33 @@ async function api(req,res,route){
   if(req.method==='GET'&&route==='/api/espn/players'){
     try{const data=await draftPool();return send(res,200,{...data,count:data.players.length});}
     catch(e){return send(res,503,{error:'ESPN player data is not available yet',details:e.message});}}
+  if(req.method==='GET'&&route==='/api/transactions/players'){
+    try{
+      const games=await nflGames(),map=gameMapFrom(games),data=await draftPool();
+      const owned=new Map(current.state.players.filter(p=>p.espnId).map(p=>[String(p.espnId),p]));
+      const selected=new Set(ensureDraft(current.state).picks.map(p=>String(p.playerId)));
+      const result=data.players.map(p=>{
+        const record=owned.get(String(p.id))||{id:'espn-'+p.id,nflTeamId:p.nflTeamId};
+        const availability=transactionStatus(record,map,current.state);
+        return {id:String(p.id),owner:record.owner||null,
+          status:record.owner?'ROSTERED':availability.status,clearsAt:availability.clearsAt||null,
+          kickoff:availability.kickoff||null,
+          drafted:selected.has(String(p.id))};
+      });
+      return send(res,200,{players:result,priority:current.state.waiverPriority||[],
+        claims:(current.state.waiverClaims||[]).filter(x=>x.manager===user.manager)});
+    }catch(e){return send(res,503,{error:e.message});}
+  }
   if(req.method==='GET'&&route==='/api/draft')return send(res,200,draftResult(current.state));
   if(req.method!=='POST')return send(res,405,{error:'Method not allowed'});
   const body=await bodyOf(req);
   let espnData=null;
-  if(['/api/draft/start','/api/draft/pick'].includes(route)){
+  if(['/api/draft/start','/api/draft/pick','/api/transactions/add','/api/transactions/claim'].includes(route)){
     try{espnData=await draftPool();}catch(e){return send(res,503,{error:'ESPN player data unavailable',details:e.message});}}
+  let nflMap=null;
+  if(route.startsWith('/api/transactions/')){
+    try{nflMap=gameMapFrom(await nflGames());}catch(e){return send(res,503,{error:e.message});}
+  }
   const result=await change((s,accounts)=>{
     const actor=findUser(req,accounts);if(!actor)return failure(401,'Session expired');
     const d=ensureDraft(s);
@@ -451,7 +622,7 @@ async function api(req,res,route){
         secondsPerPick:PICK_SECONDS,order:[],picks:[],
         deadline:null,remainingSeconds:null};
       s.players=[];
-      s.injuries=[];
+      s.injuries=[];s.waiverClaims=[];s.waiverHolds={};s.waiverPriority=s.managers.map(m=>m.id);
       s.phase=0;
       s.week=1;
       // Remove draft-specific history while retaining non-draft audits.
@@ -494,6 +665,57 @@ async function api(req,res,route){
       if(d.deadline&&Date.now()>Date.parse(d.deadline))return failure(409,'Pick timer expired');
       const player=espnData.players.find(p=>String(p.id)===String(body.playerId));
       if(!player)return failure(404,'Player not found');return recordPick(s,player,false);}
+    if(route.startsWith('/api/transactions/')){
+      if(d.status!=='completed')return failure(409,'Player transactions open after the draft is complete');
+      ensureTransactions(s);
+      const playerId=String(body.playerId||''),espnPlayer=espnData?.players.find(p=>String(p.id)===playerId);
+      if(route==='/api/transactions/drop'){
+        const owned=dropValidation(s,actor.manager,String(body.playerId||''),nflMap);
+        if(!owned||owned.error)return owned||failure(400,'Select a player to drop');
+        const acquiredSameDay=owned.lastAcquiredAt&&owned.lastAcquisitionType!=='DRAFT'&&
+          sameEasternDay(owned.lastAcquiredAt,Date.now());
+        owned.owner=null;owned.slot='BENCH';
+        if(!acquiredSameDay)s.waiverHolds[owned.id]=new Date(Date.now()+settingsOf(s).transactions.waiverDays*86400000).toISOString();
+        else delete s.waiverHolds[owned.id];
+        audit(s,'PLAYER_DROPPED',actor.manager,owned.name+' dropped');return {ok:true};
+      }
+      if(route==='/api/transactions/cancel'){
+        const count=s.waiverClaims.length;
+        s.waiverClaims=s.waiverClaims.filter(c=>!(c.manager===actor.manager&&c.playerId==='espn-'+playerId));
+        return {ok:true,cancelled:count-s.waiverClaims.length};
+      }
+      if(!espnPlayer)return failure(404,'ESPN player not found');
+      let player=s.players.find(p=>p.espnId===playerId);
+      if(player?.owner)return failure(409,'Player is already rostered');
+      if(!player){player={id:'espn-'+playerId,espnId:playerId,name:espnPlayer.name,
+        team:String(espnPlayer.nflTeamId??''),nflTeamId:espnPlayer.nflTeamId,
+        pos:espnPlayer.position,injuryStatus:espnPlayer.injuryStatus||'UNKNOWN',
+        projectedPoints:espnPlayer.projectedPoints,rank:espnPlayer.rank,
+        kickoff:99,status:'upcoming',points:0,slot:'BENCH',owner:null};s.players.push(player);}
+      const availability=transactionStatus(player,nflMap,s);
+      const dropId=body.dropId?String(body.dropId):null;
+      const drop=dropValidation(s,actor.manager,dropId,nflMap);
+      if(drop?.error)return drop;
+      if(drop?.id===player.id)return failure(400,'Cannot drop the player being acquired');
+      const limit=settingsOf(s).transactions.acquisitionLimit;
+      if(limit!==null&&acquisitionCount(s,actor.manager)>=limit)return failure(409,'Season acquisition limit reached');
+      if(transactionCapacity(s,actor.manager,espnPlayer,drop))
+        return failure(409,transactionCapacity(s,actor.manager,espnPlayer,drop));
+      if(route==='/api/transactions/add'){
+        if(availability.status!=='FREE_AGENT')return failure(409,
+          availability.status==='LOCKED'?'Player is locked until their game ends':'Player is on waivers; submit a claim');
+        acquire(s,actor.manager,player,drop,'FREE_AGENT');return {ok:true};
+      }
+      if(route==='/api/transactions/claim'){
+        if(availability.status!=='WAIVERS')return failure(409,'Player is not currently on waivers');
+        s.waiverClaims=s.waiverClaims.filter(c=>!(c.manager===actor.manager&&c.playerId===player.id));
+        s.waiverClaims.push({id:crypto.randomUUID(),manager:actor.manager,playerId:player.id,
+          dropId,at:new Date().toISOString()});
+        audit(s,'WAIVER_CLAIM',actor.manager,'Submitted waiver claim for '+player.name);
+        return {ok:true,clearsAt:availability.clearsAt};
+      }
+      return failure(404,'Unknown transaction action');
+    }
     if(route==='/api/team-name'){
       const name=teamName(body.name),team=s.managers.find(m=>m.id===actor.manager);
       if(!team)return failure(403,'Team not found');if(!name)return failure(400,'Invalid team name');
@@ -549,6 +771,8 @@ const server=http.createServer((req,res)=>{const route=new URL(req.url,'http://l
   if(route.startsWith('/api/'))api(req,res,route).catch(e=>{console.error('API error:',e);
     if(!res.headersSent)send(res,500,{error:'Server error'});else res.end();});
   else staticFile(req,res,route);});
+let checkingWaivers=false;setInterval(async()=>{if(checkingWaivers)return;checkingWaivers=true;
+  try{await processWaivers();}catch(e){console.error('Waiver processing:',e.message);}finally{checkingWaivers=false;}},30000);
 let checkingTimer=false;setInterval(async()=>{if(checkingTimer)return;checkingTimer=true;
   try{await processAutomaticTurn();}catch(e){console.error('Draft timer error:',e);}finally{checkingTimer=false;}},1000);
 init().then(()=>server.listen(PORT,()=>console.log('Fantasy Audible running on '+PORT)))
