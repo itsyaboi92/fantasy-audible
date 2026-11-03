@@ -4,7 +4,7 @@ let transactionData=null,transactionError='',loadingTransactions=false,lastTrans
 let serverOffsetMs=0,clockSynchronized=false,clockSyncInProgress=false,lastClockSync=0;
 let settingsDraft=null,prefsDraft=null,settingsDirty=false,prefsDirty=false;
 const $=id=>document.getElementById(id);
-const tabs=['Home','My Team','Matchup','League','Players','Draft','Notifications','Commissioner'];
+const tabs=['Home','My Team','Matchup','League','Players','My Waivers','Draft','Notifications','Commissioner'];
 const POSITIONS=['QB','RB','WR','TE','D/ST','K'];
 const GROUP_LABELS={passing:'Passing',rushing:'Rushing',receiving:'Receiving',kicking:'Kicking',
   defense:'Defense / Special Teams',miscellaneous:'Miscellaneous'};
@@ -148,7 +148,7 @@ async function loadTransactions(){
     const data=await response.json();if(!response.ok)throw Error(data.error||'Transaction data unavailable');
     transactionData={...data,byId:new Map(data.players.map(x=>[x.id,x]))};transactionError='';
   }catch(e){transactionError=e.message;transactionData=null;}
-  finally{loadingTransactions=false;if(tab==='Players')render();}
+  finally{loadingTransactions=false;if(tab==='Players'||tab==='My Waivers')render();}
 }
 async function playerTransaction(id,action){
   const player=espn?.players.find(p=>String(p.id)===String(id));
@@ -172,7 +172,7 @@ async function playerTransaction(id,action){
   }
   if(!confirm(`${action==='claim'?'Submit waiver claim for':'Add'} ${player.name}${dropId?' and drop '+mine.find(p=>p.id===dropId)?.name:''}?`))return;
   try{await apiPost('/api/transactions/'+action,{playerId:String(id),dropId});
-    toast(action==='claim'?'Waiver claim submitted':'Player added to your bench');
+    toast(action==='claim'?'Waiver claim submitted — see My Waivers':'Player added to your bench');
     await loadTransactions();
   }catch(e){toast(e.message);}
 }
@@ -185,6 +185,27 @@ async function dropRosterPlayer(id){
 }
 async function cancelWaiver(id){try{await apiPost('/api/transactions/cancel',{playerId:String(id)});
   toast('Waiver claim cancelled');await loadTransactions();}catch(e){toast(e.message);}}
+function myWaiversPanel(){
+  if(draftData().status!=='completed')return card('My pending waiver claims','<p>Waivers become available after the draft.</p>');
+  if(loadingTransactions&&!transactionData)return card('My pending waiver claims','<p>Loading claims…</p>');
+  if(transactionError)return card('My pending waiver claims',`<p role="alert">${esc(transactionError)}</p><button onclick="loadTransactions()">Retry</button>`);
+  if(!transactionData)return card('My pending waiver claims','<p>Claim status has not loaded yet.</p><button onclick="loadTransactions()">Refresh claims</button>');
+  const claims=transactionData.claims||[];
+  const rows=claims.map(c=>{
+    const id=String(c.playerId||'').replace(/^espn-/,'');
+    const player=espn?.players?.find(p=>String(p.id)===id);
+    const owned=state?.players?.find(p=>p.id===c.playerId);
+    const name=player?.name||owned?.name||'Player #'+id;
+    const drop=state?.players?.find(p=>p.id===c.dropId);
+    const status=transactionData.byId?.get(id);
+    const date=status?.clearsAt?new Date(status.clearsAt):null;
+    const due=date&&!isNaN(date.getTime())?date.toLocaleString(): 'Processing time pending';
+    return `<div class="row"><div><b>${esc(name)}</b><div class="muted small">Submitted: ${esc(new Date(c.at).toLocaleString())}</div><div class="muted small">${esc(due)}${drop?' · Drop '+esc(drop.name):''}</div></div><button type="button" onclick="cancelWaiver(${jsAttr(id)})">Cancel Claim</button></div>`;
+  }).join('');
+  return card('My pending waiver claims ('+claims.length+')',
+    `<p class="muted small">Claims remain pending until waiver processing. Submission does not guarantee an award.</p>${rows||'<p>No pending waiver claims.</p>'}<button type="button" onclick="refreshMyWaivers()">Refresh claims</button>`);
+}
+async function refreshMyWaivers(){lastTransactionFetch=0;await loadTransactions();}
 function playerTable(){if(!espn)return card('ESPN player data',`<p>${esc(espnError||'Loading ESPN rankings and projections...')}</p>
   <button onclick="loadESPN(true)">Retry ESPN feed</button>`);
   const d=draftData(),turn=currentTurn(),myTurn=d.status==='active'&&turn?.manager===manager;
@@ -420,8 +441,9 @@ function render(){if(!state||!manager)return;const mine=state.players.filter(x=>
     `<div class="row"><b>${esc(x.team)}</b><span>${fmt(total(x.id))} pts</span></div>`).join(''))}
     ${card('League roster rules',state.settings?`<p>Starters: ${Object.entries(state.settings.roster.starters).map(([k,v])=>`${k} ${v}`).join(' · ')}</p>
       <p>Bench: ${state.settings.roster.bench} · IR: ${state.settings.roster.ir}</p>`:'<p>Not yet configured.</p>')}`;
-  if(tab==='Players'&&Date.now()-lastTransactionFetch>90000)loadTransactions();
-  if(tab==='Players')content=`<h1>ESPN Player Directory</h1>${playerTable()}`;
+  if((tab==='Players'||tab==='My Waivers')&&Date.now()-lastTransactionFetch>90000)loadTransactions();
+  if(tab==='Players')content=`<h1>ESPN Player Directory</h1>${myWaiversPanel()}${playerTable()}`;
+  if(tab==='My Waivers')content=`<h1>My Waivers</h1>${myWaiversPanel()}`;
   if(tab==='Draft')content=renderDraft();
   if(tab==='Notifications')content=`<h1>Notifications</h1>${card('Injury alerts',state.injuries.map(i=>
     `<div class="row"><b>${esc(p(i.player)?.name||'Player')}</b><span>${i.active?'Pending':'Resolved'}</span></div>`).join('')||'<p>No alerts.</p>')}
@@ -445,7 +467,7 @@ function render(){if(!state||!manager)return;const mine=state.players.filter(x=>
   updateDraftClock();}
 function changeTab(next){tab=next;render();if(tab==='Draft')syncServerClock();
   if(tab==='Draft'||tab==='Players')loadESPN();
-  if(tab==='Players')loadTransactions();}
+  if(tab==='Players'||tab==='My Waivers')loadTransactions();}
 function logout(){localStorage.removeItem('audibleToken');location.reload();}
 function authForm(){$('tabs').innerHTML='';$('connection').textContent='● Sign in';
   $('app').innerHTML=`<section class="card" style="max-width:500px;margin:auto"><h1>Fantasy Audible</h1>
