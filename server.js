@@ -598,8 +598,8 @@ async function api(req,res,route){
   if(req.method==='GET'&&route==='/api/players/weekly'){
     const weekly=current.state.nflWeeklyDirectory||{};
     return send(res,200,{season:current.state.nflSync?.season||null,
-      week:current.state.nflSync?.week||null,
-      updatedAt:current.state.nflSync?.at||null,
+      week:current.state.nflDirectorySync?.currentWeek||null,
+      updatedAt:current.state.nflDirectorySync?.at||null,
       players:weekly,projectionStatus:'NOT_AVAILABLE',
       notice:'Weekly ESPN projections are not yet verified; unavailable projections are shown as —.'});
   }
@@ -861,28 +861,8 @@ async function syncNFLScoring(){
       catch(e){failures.push(g.id+': '+e.message);}
     }));
     await change(s=>{
-      // Read-only directory cache: includes unrostered players, not just league rosters.
-      // A game with missing box-score data never produces an artificial zero.
-      const directory={...(s.nflWeeklyDirectory||{})};
-      for(const game of games){
-        const box=summaries.get(game.id);
-        if(!box)continue;
-        for(const [athleteId,stats] of box){
-          const points=liveNFL.scorePlayer(stats,settingsOf(s).scoring);
-          if(points.fieldGoalsPending)continue;
-          directory[athleteId]={
-            points:points.points,breakdown:points.breakdown,gameId:game.id,
-            opponent:game.teams.find(t=>t.id!==stats.teamId)?.abbreviation||null,
-            gameStatus:game.status,
-            kickoff:game.kickoff,week,season,
-            provisional:points.unsupported.length>0,
-            updatedAt:new Date().toISOString()
-          };
-        }
-      }
-      // Clear entries from older NFL weeks to prevent presenting stale results.
-      s.nflWeeklyDirectory=Object.fromEntries(Object.entries(directory).filter(
-        ([,v])=>v.week===week&&v.season===season));
+      // Player-directory history is updated by its own NFL-calendar sync below.
+      // Never overwrite it with the fantasy league's draft/matchup week.
       const ids=new Map();for(const game of games)for(const t of game.teams)ids.set(t.id,game);
       let changed=0;
       for(const player of s.players){
@@ -912,6 +892,60 @@ async function syncNFLScoring(){
   }catch(e){console.error('NFL scoring sync:',e.message);}
   finally{scoringSyncBusy=false;}
 }
+// Independent player-directory game history. League state.week is not the NFL
+// calendar week: newly created leagues often remain on week 1.
+let directorySyncBusy=false;
+async function syncPlayerDirectory(){
+  if(directorySyncBusy)return;
+  directorySyncBusy=true;
+  try{
+    const season=Number(process.env.NFL_SEASON||new Date().getUTCFullYear());
+    // ESPN's current scoreboard supplies the NFL calendar week; if its feed
+    // is unavailable, leave existing directory entries unchanged.
+    const response=await fetch('https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?limit=100',
+      {signal:AbortSignal.timeout(12000)});
+    if(!response.ok)throw Error('NFL calendar scoreboard HTTP '+response.status);
+    const board=await response.json();
+    if(Number(board.season?.year)!==season)throw Error('NFL season mismatch');
+    const currentWeek=Number(board.week?.number||board.week?.week);
+    if(!Number.isInteger(currentWeek)||currentWeek<1||currentWeek>18)throw Error('Invalid NFL calendar week');
+    // Scan the current and preceding four weeks to cover byes and short absences.
+    // Persist earlier entries, so long absences do not erase last completed games.
+    const first=Math.max(1,currentWeek-4),weeks=[];
+    for(let w=first;w<=currentWeek;w++){
+      try{weeks.push({week:w,games:await liveNFL.loadWeek(season,w)});}
+      catch(e){console.warn('Directory week',w,e.message);}
+    }
+    const completed=weeks.flatMap(x=>x.games.map(g=>({...g,week:x.week})))
+      .filter(g=>g.status==='final');
+    const boxscores=await Promise.all(completed.map(async game=>{
+      try{return {game,stats:liveNFL.playerStats(await liveNFL.fetchGame(game.id))};}
+      catch(e){console.warn('Directory game',game.id,e.message);return null;}
+    }));
+    await change(s=>{
+      const directory={...(s.nflWeeklyDirectory||{})};
+      for(const entry of boxscores.filter(Boolean)){
+        const {game,stats}=entry;
+        for(const [athleteId,playerStats] of stats){
+          const previous=directory[athleteId];
+          // Select the latest COMPLETED game by NFL week, not processing order.
+          if(previous?.season===season&&previous?.gameStatus==='final'&&previous.week>game.week)continue;
+          const result=liveNFL.scorePlayer(playerStats,settingsOf(s).scoring);
+          directory[athleteId]={points:result.points,breakdown:result.breakdown,
+            gameId:game.id,opponent:game.teams.find(t=>t.id!==playerStats.teamId)?.abbreviation||null,
+            gameStatus:'final',kickoff:game.kickoff,week:game.week,season,
+            provisional:true,updatedAt:new Date().toISOString()};
+        }
+      }
+      s.nflWeeklyDirectory=directory;
+      s.nflDirectorySync={season,currentWeek,at:new Date().toISOString(),completedGames:completed.length};
+      return {ok:true};
+    });
+  }catch(e){console.error('NFL player directory sync:',e.message);}
+  finally{directorySyncBusy=false;}
+}
+setInterval(syncPlayerDirectory,15*60*1000);
+setTimeout(syncPlayerDirectory,12000);
 setInterval(syncNFLScoring,60000);
 setTimeout(syncNFLScoring,6000);
 let checkingWaivers=false;setInterval(async()=>{if(checkingWaivers)return;checkingWaivers=true;
