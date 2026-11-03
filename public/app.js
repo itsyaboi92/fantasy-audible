@@ -27,6 +27,7 @@ const LABELS={yards:'Yards',touchdowns:'Touchdowns',touchdowns40:'40+ yard TD bo
   yardsAllowed350to399:'Yards allowed 350–399',yardsAllowed400to449:'Yards allowed 400–449',
   yardsAllowed450to499:'Yards allowed 450–499',yardsAllowed500to549:'Yards allowed 500–549',
   yardsAllowed550plus:'Yards allowed 550+',fumbleRecoveryTD:'Fumble recovery TD',fumblesLost:'Fumbles lost'};
+const jsAttr=v=>JSON.stringify(v).replace(/"/g,"&quot;");
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=v=>Number(v||0).toFixed(1);
 const m=id=>state?.managers.find(x=>x.id===id);
@@ -362,7 +363,7 @@ function lineupManager(mine){
     const choices=mine.filter(p=>p.slot!=='IR'&&
       (position==='FLEX'?['RB','WR','TE'].includes(p.pos):p.pos===position));
     return `<div class="row"><div><b>${esc(position)} ${index+1}</b></div>
-      <select style="max-width:70%;min-width:170px" onchange="updateLineupSelection(${JSON.stringify(key)},this.value)">
+      <select style="max-width:70%;min-width:170px" onchange="updateLineupSelection(${jsAttr(key)},this.value)">
         <option value="" ${!selected?'selected':''}>Empty starting slot</option>
         ${choices.map(p=>`<option value="${esc(p.id)}" ${selected===p.id?'selected':''}>
           ${esc(p.name)} (${esc(p.pos)})</option>`).join('')}
@@ -373,11 +374,11 @@ function lineupManager(mine){
   const benchRows=bench.map(p=>`<div class="row"><span>${esc(p.name)} · ${esc(p.pos)}
     ${injuryLabel(p.injuryStatus)}</span>
     ${['OUT','IR','INJURED_RESERVE','PUP','NFI'].includes(String(p.injuryStatus||'').toUpperCase())?
-      `<button onclick="moveToSection(${JSON.stringify(p.id)},'IR')">Move to IR</button>`:''}
-    ${draftData().status==='completed'?`<button onclick="dropRosterPlayer(${JSON.stringify(p.id)})">Drop</button>`:''}</div>`).join('');
+      `<button onclick="moveToSection(${jsAttr(p.id)},'IR')">Move to IR</button>`:''}
+    ${draftData().status==='completed'?`<button onclick="dropRosterPlayer(${jsAttr(p.id)})">Drop</button>`:''}</div>`).join('');
   const irRows=ir.map(p=>`<div class="row"><span>${esc(p.name)} · ${esc(p.pos)}
     ${injuryLabel(p.injuryStatus)}</span>
-    <button onclick="moveToSection(${JSON.stringify(p.id)},'BENCH')">Move to bench</button></div>`).join('');
+    <button onclick="moveToSection(${jsAttr(p.id)},'BENCH')">Move to bench</button></div>`).join('');
   return card('Set starting lineup',`<p class="muted small">Choose all your starters, then save once. Selecting a player in a different slot removes their earlier selection. Game locks are enforced by the server.</p>
     ${rows}
     <div class="actions"><button onclick="saveLineup()" ${!lineupDirty||lineupSaving?'disabled':''}>
