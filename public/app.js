@@ -543,11 +543,25 @@ function matchupSwipeEnd(e){if(matchupTouchX===null)return;const diff=(e.changed
 function matchupStarters(id){const starters=state.players.filter(x=>x.owner===id&&!['BENCH','IR'].includes(x.slot));
   const used=new Set();return STARTER_ORDER.map(slot=>{const player=starters.find(x=>!used.has(x.id)&&(x.slot===slot||(slot==='FLEX'&&['FLEX','RB','WR','TE'].includes(x.slot))));if(player)used.add(player.id);return player||null;});}
 function matchupPlayerCell(x){
-  if(!x)return '<span class="muted">Empty</span>';
+  if(!x)return '<span class="muted">Open slot</span>';
   const playerId=String(x.id||'');
-  const clickable=playerId&&espn?.players?.some(p=>String(p.id)===playerId);
+  const directoryPlayer=espn?.players?.find(p=>String(p.id)===playerId);
+  const clickable=!!directoryPlayer;
   const name=clickable?`<button class="fa-match-player-link" onclick='openPlayerProfile(${jsAttr(playerId)})'>${esc(x.name)}</button>`:`<b>${esc(x.name)}</b>`;
-  return `${name}<div class="muted small">${esc(x.team||'')} · ${esc(x.status||'upcoming')}</div><strong>${fmt(Number(x.points??score(x))||0)}</strong>`;
+  const injury=String(x.injuryStatus||directoryPlayer?.injuryStatus||'').toUpperCase();
+  const designation=({QUESTIONABLE:'Q',DOUBTFUL:'D',OUT:'O',INJURED_RESERVE:'IR',IR:'IR',PROBABLE:'P'})[injury]||'';
+  const injuryBadge=designation?`<span class="fa-injury" title="${esc(injury)}">${esc(designation)}</span>`:'';
+  const opponent=x.opponent||directoryPlayer?.opponent||null;
+  const gameTime=x.gameTime||x.kickoffAt||directoryPlayer?.gameTime||directoryPlayer?.kickoffAt||null;
+  const kickoff=gameTime&&!Number.isNaN(Date.parse(gameTime))?new Date(gameTime).toLocaleString(undefined,{weekday:'short',hour:'numeric',minute:'2-digit',timeZoneName:'short'}):null;
+  const oprk=Number(x.oprk||directoryPlayer?.opponentPositionRank);
+  const oppLabel=opponent?` · ${esc(opponent)}`:'';
+  const projected=Number(x.weeklyProjectedPoints||directoryPlayer?.weeklyProjectedPoints);
+  return `<div class="fa-match-player-title">${name} ${injuryBadge}</div>
+    <div class="muted small">${esc(x.team||'')}${oppLabel}</div>
+    <div class="muted small">${kickoff?esc(kickoff):'Kickoff TBD'} · ${esc(x.status||'upcoming')}</div>
+    <div class="muted small">OPRK: ${Number.isInteger(oprk)&&oprk>=1&&oprk<=32?oprk+'th':'—'} · Proj: ${Number.isFinite(projected)&&projected>0?fmt(projected):'—'}</div>
+    <strong>${fmt(Number(x.points??score(x))||0)} <span class="muted small">pts</span></strong>`;
 }
 function matchupView(){
   const week=selectedMatchupWeek(),games=state.matchupSchedule?.[week]||[];
@@ -577,6 +591,7 @@ function matchupView(){
   .fa-match-row:nth-child(even){background:rgba(255,255,255,.025)}.fa-player{padding:12px 5px;min-width:0;overflow-wrap:anywhere;font-size:14px}
   .fa-player strong{display:block;margin-top:7px;font-size:18px}.fa-right{text-align:right}.fa-position{display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:bold;background:#101824}
   .fa-match-player-link{background:transparent;border:0;padding:0;text-align:inherit;color:#77dbb6;font:inherit;font-weight:700;text-decoration:underline}
+  .fa-injury{display:inline-block;background:#8c5c22;color:#fff;border-radius:4px;padding:1px 5px;font-size:11px;font-weight:800}.fa-match-player-title{display:flex;gap:4px;align-items:center;flex-wrap:wrap}.fa-right .fa-match-player-title{justify-content:flex-end}
   .fa-match-meta{text-align:center;margin:4px 0 16px}.fa-match-nav{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:10px 0}
   @media(max-width:420px){.fa-head .fa-total{font-size:26px}.fa-player{font-size:12px}.fa-position{font-size:11px}}
   </style>
