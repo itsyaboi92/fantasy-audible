@@ -124,7 +124,7 @@ async function openPlayerProfile(id){
     const response=await fetch('/api/players/history?id='+encodeURIComponent(id),
       {headers:{Authorization:'Bearer '+token}});
     const data=await response.json();
-    if(!response.ok)throw Error(data.error||'History unavailable');
+    if(!response.ok)throw Error(data.details ? (data.error||'History unavailable')+': '+data.details : (data.error||'History unavailable'));
     if(profilePlayerId===String(id))profileHistory=data;
   }catch(e){if(profilePlayerId===String(id))profileError=e.message;}
   finally{if(profilePlayerId===String(id)){profileLoading=false;render();}}
