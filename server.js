@@ -479,6 +479,7 @@ function autoFillStarters(s, managerId){
   const caps=settingsOf(s).roster.starters;
   const owned=s.players.filter(p=>p.owner===managerId);
   const assigned=[];
+  const intentional=s.intentionalEmptySlots?.[managerId]||{};
   const rankValue=p=>{
     const projected=Number(p.projectedPoints);
     const rank=Number(p.rank);
@@ -491,7 +492,8 @@ function autoFillStarters(s, managerId){
   for(const slot of ['QB','RB','WR','TE','D/ST','K','FLEX']){
     const capacity=Number(caps[slot]||0);
     let filled=owned.filter(p=>p.slot===slot).length;
-    while(filled<capacity){
+    const reserved=Math.min(Math.max(0,Number(intentional[slot])||0),Math.max(0,capacity-filled));
+    while(filled<capacity-reserved){
       const next=candidates.find(p=>p.slot==='BENCH'&&slotEligible(p,slot));
       if(!next)break;
       next.slot=slot;assigned.push(next.name+' ('+slot+')');filled++;
@@ -629,6 +631,10 @@ function saveStartingLineup(s,actor,body){
   for(const player of mine){
     player.slot=proposed.get(player.id)||(player.slot==='IR'?'IR':'BENCH');
   }
+  // Explicit empty selections are intentional and must not be auto-filled later.
+  s.intentionalEmptySlots ||= {};
+  s.intentionalEmptySlots[actor.manager]=Object.fromEntries(Object.entries(starters).map(([position,count])=>
+    [position,Array.from({length:count},(_,index)=>requested[position+':'+index]).filter(id=>id===null).length]));
   audit(s,'LINEUP_SAVED',actor.manager,'Starting lineup saved');
   return {ok:true};
 }
