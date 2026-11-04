@@ -553,6 +553,7 @@ async function processAutomaticTurn(){const data=await snapshot(),d=ensureDraft(
       audit(s,'DRAFT_PAUSED',null,'No eligible players for current pick');return {ok:true};}
     return recordPick(s,player,true);});}
 async function api(req,res,route){
+  const url=new URL(req.url,'http://localhost');
   if(req.method==='GET'&&route==='/api/teams'){const {state,accounts}=await snapshot();
     return send(res,200,state.managers.map(m=>({id:m.id,team:m.team,
       claimed:accounts.some(a=>a.manager===m.id)})));}
