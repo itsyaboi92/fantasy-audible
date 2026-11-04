@@ -1,4 +1,5 @@
 let state=null,manager=null,tab='Home',token=localStorage.getItem('audibleToken');
+let chatMessages=[],chatMuted=false,chatMutedManagers=[],chatLastId=0,chatSeenId=Number(localStorage.getItem('audibleChatSeen')||0),chatLoading=false,chatError='',chatDraft='';
 let matchupWeek=null,matchupIndex=0,matchupTouchX=null;
 let espn=null,espnError='',draftSearch='',draftPosition='ALL',loadingESPN=false;
 let weeklyDirectory={},weeklyUpdatedAt=null,weeklyLoading=false,weeklyLastFetch=0;
@@ -9,7 +10,7 @@ let transactionData=null,transactionError='',loadingTransactions=false,lastTrans
 let serverOffsetMs=0,clockSynchronized=false,clockSyncInProgress=false,lastClockSync=0;
 let settingsDraft=null,prefsDraft=null,settingsDirty=false,prefsDirty=false;
 const $=id=>document.getElementById(id);
-const tabs=['Home','My Team','Matchup','League','Players','My Waivers','Draft','Notifications','Commissioner'];
+const tabs=['Home','My Team','Matchup','League','Players','My Waivers','Draft','Notifications','Locker Room','Commissioner'];
 const POSITIONS=['QB','RB','WR','TE','D/ST','K'];
 const GROUP_LABELS={passing:'Passing',rushing:'Rushing',receiving:'Receiving',kicking:'Kicking',
   defense:'Defense / Special Teams',miscellaneous:'Miscellaneous'};
@@ -558,10 +559,49 @@ function matchupView(){const week=selectedMatchupWeek(),games=state.matchupSched
     <div class="fa-match-strip">${games.map((g,i)=>`<button class="fa-match-pill ${i===matchupIndex?'active':''}" onclick="selectMatchup(${i})">${teamPhoto(g.home,25)} ${esc(m(g.home)?.team||g.home)} vs ${teamPhoto(g.away,25)} ${esc(m(g.away)?.team||g.away)}</button>`).join('')}</div>
     <section class="card fa-match-surface" ontouchstart="matchupSwipeStart(event)" ontouchend="matchupSwipeEnd(event)"><div class="fa-head"><div>${teamPhoto(game.home,58)}<br><b>${esc(left?.team||'Team')}</b><div class="fa-total">${recorded?fmt(recorded.homeScore):'—'}</div></div><span>VS</span><div>${teamPhoto(game.away,58)}<br><b>${esc(right?.team||'Team')}</b><div class="fa-total">${recorded?fmt(recorded.awayScore):'—'}</div></div></div>
     ${byeTeams.length?`<p class="muted small">Bye: ${byeTeams.map(x=>esc(x.team||x.id)).join(', ')}</p>`:''}<p class="muted small">${recorded?(recorded.status==='final'?'Final · verified matchup result':'Provisional · not counted in standings'):'No recorded scores for this week'}</p>${cells}<p class="muted small" style="text-align:center">Swipe left or right to view other matchups</p></section><section class="card"><h3>League standings · verified finals only</h3><div style="overflow-x:auto"><table style="width:100%;text-align:left"><thead><tr><th>Team</th><th>W</th><th>L</th><th>T</th><th>PF</th></tr></thead><tbody>${(state.standings||[]).map(r=>`<tr><td>${esc(m(r.manager)?.team||r.manager)}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.ties}</td><td>${fmt(r.pointsFor)}</td></tr>`).join('')}</tbody></table></div></section>`;}
+async function loadChat(){
+  if(!token||!state||chatLoading)return;
+  chatLoading=true;
+  try{const r=await fetch('/api/chat',{headers:{Authorization:'Bearer '+token},cache:'no-store'});
+    const d=await r.json();if(!r.ok)throw Error(d.error||'Chat unavailable');
+    chatMessages=d.messages||[];chatMuted=!!d.muted;chatMutedManagers=d.mutedManagers||[];
+    chatLastId=chatMessages.length?Number(chatMessages[chatMessages.length-1].id):0;
+    chatError='';
+    if(tab==='Locker Room'){
+      chatSeenId=Math.max(chatSeenId,chatLastId);localStorage.setItem('audibleChatSeen',String(chatSeenId));
+    }
+    render();
+  }catch(e){chatError=e.message;if(tab==='Locker Room')render();}
+  finally{chatLoading=false;}
+}
+function chatView(){
+  const messages=chatMessages.map(x=>{
+    const team=m(x.manager)?.team||'Former manager';
+    return `<div class="fa-chat-msg"><div class="fa-chat-head">${teamPhoto(x.manager,30)} <b>${esc(team)}</b> <span class="muted small">${esc(new Date(x.created_at).toLocaleString())}</span>
+    ${state.viewer.commissioner?`<button class="fa-chat-small" onclick="deleteChatMessage(${Number(x.id)})">Delete</button>`:''}</div>
+    <div class="fa-chat-body">${esc(x.body)}</div></div>`;
+  }).join('')||'<p class="muted">No messages yet. Start the trash talk!</p>';
+  const controls=state.viewer.commissioner?`<section class="card"><h3>Commissioner moderation</h3>
+    ${state.managers.filter(x=>x.claimed&&x.id!==manager).map(x=>`<div class="row"><span>${esc(x.team)}</span>
+    <button onclick='muteChatManager(${jsAttr(x.id)},${!chatMutedManagers.includes(x.id)})'>${chatMutedManagers.includes(x.id)?'Unmute':'Mute'}</button></div>`).join('')}</section>`:'';
+  return `<h1>League Locker Room</h1><p class="muted small">Private league chat · Team names shown · Messages saved</p>
+    <section class="card"><div class="fa-chat-list" id="chatList">${messages}</div>
+    ${chatError?`<p class="muted">${esc(chatError)}</p>`:''}
+    ${chatMuted?'<p>You have been muted by the commissioner.</p>':`<form id="chatForm" onsubmit="sendChatMessage(event)">
+      <textarea id="chatInput" maxlength="1000" rows="2" placeholder="Talk some trash..." oninput="chatDraft=this.value">${esc(chatDraft)}</textarea>
+      <button type="submit">Send message</button></form>`}</section>${controls}`;
+}
+async function sendChatMessage(event){event.preventDefault();const value=$('chatInput')?.value.trim();if(!value)return;
+  try{await apiPost('/api/chat',{message:value});chatDraft='';await loadChat();}
+  catch(e){toast(e.message);}}
+async function deleteChatMessage(id){if(!confirm('Delete this message?'))return;
+  try{await apiPost('/api/chat/delete',{id});await loadChat();}catch(e){toast(e.message);}}
+async function muteChatManager(id,muted){
+  try{await apiPost('/api/chat/mute',{manager:id,muted});await loadChat();}catch(e){toast(e.message);}}
 function render(){if(!state||!manager)return;const mine=state.players.filter(x=>x.owner===manager),myTeam=m(manager);
   if(!myTeam)return;
   $('tabs').innerHTML=tabs.filter(t=>t!=='Commissioner'||state.viewer.commissioner)
-    .map(t=>`<button class="${tab===t?'active':''}" onclick="changeTab('${t}')">${t}</button>`).join('');
+    .map(t=>`<button class="${tab===t?'active':''}" onclick="changeTab('${t}')">${t==='Locker Room'&&chatLastId>chatSeenId?'💬 '+t+' •':t}</button>`).join('');
   let content='';
   if(tab==='Home')content=`<h1>${esc(state.league)}</h1><p>Week ${state.week} · ${esc(myTeam.team)}</p>
     <div class="grid">${card('Your score',`<div class="stat">${fmt(total(manager))}</div>`)}
@@ -585,6 +625,7 @@ function render(){if(!state||!manager)return;const mine=state.players.filter(x=>
   if(tab==='Players')content=`<h1>ESPN Player Directory</h1>${myWaiversPanel()}${playerTable()}`;
   if(tab==='My Waivers')content=`<h1>My Waivers</h1>${myWaiversPanel()}`;
   if(tab==='Draft')content=renderDraft();
+  if(tab==='Locker Room')content=chatView();
   if(tab==='Notifications')content=`<h1>Notifications</h1>${card('Injury alerts',state.injuries.map(i=>
     `<div class="row"><b>${esc(p(i.player)?.name||'Player')}</b><span>${i.active?'Pending':'Resolved'}</span></div>`).join('')||'<p>No alerts.</p>')}
     ${card('Transactions',state.transactions.slice(0,50).map(t=>`<div class="row">${esc(t.details)}</div>`).join('')||'<p>No transactions.</p>')}`;
@@ -605,7 +646,9 @@ function render(){if(!state||!manager)return;const mine=state.players.filter(x=>
       <button onclick="act('/api/demo',{action:'points',player:$('pointPlayer').value,amount:3.5})">Add 3.5 points</button>`)}`;
   $('app').innerHTML=`<div class="row"><span class="muted small">${esc(state.viewer.name)} · ${esc(myTeam.team)}</span>
     <div class="actions"><button onclick="renameTeam()">Rename Team</button><button onclick="logout()">Sign out</button></div></div>${content}`;
-  updateDraftClock();}
+  updateDraftClock();
+  if(tab==='Locker Room'){const list=$('chatList');if(list)list.scrollTop=list.scrollHeight;}
+}
 async function manageLeagueMember(managerId,terminate){
   const team=state.managers.find(m=>m.id===managerId);
   if(!team||managerId===manager)return;
@@ -635,7 +678,8 @@ function leagueMembersUI(){
 function changeTab(next){if(next==='Matchup'&&tab!=='Matchup'){matchupWeek=null;matchupIndex=0;}tab=next;render();if(tab==='Draft')syncServerClock();
   if(tab==='Draft'||tab==='Players')loadESPN();
   if(tab==='Players')loadWeeklyDirectory();
-  if(tab==='Players'||tab==='My Waivers')loadTransactions();}
+  if(tab==='Players'||tab==='My Waivers')loadTransactions();
+  if(tab==='Locker Room')loadChat();}
 function logout(){localStorage.removeItem('audibleToken');location.reload();}
 function authForm(){$('tabs').innerHTML='';$('connection').textContent='● Sign in';
   $('app').innerHTML=`<section class="card" style="max-width:500px;margin:auto"><h1>Fantasy Audible</h1>
@@ -657,7 +701,7 @@ function authForm(){$('tabs').innerHTML='';$('connection').textContent='● Sign
   $('auth').onsubmit=e=>{e.preventDefault();submit('login');};$('register').onclick=()=>submit('register');}
 async function connect(){if(!token)return authForm();try{const response=await fetch('/api/state',{
   headers:{Authorization:'Bearer '+token},cache:'no-store'});if(response.status===401)return logout();
-  if(!response.ok)throw Error('Server unavailable');state=await response.json();manager=state.viewer.manager;render();}
+  if(!response.ok)throw Error('Server unavailable');state=await response.json();manager=state.viewer.manager;render();loadChat();}
   catch(e){$('connection').textContent='● Offline';return;}
   await syncServerClock();const events=new EventSource('/api/events?token='+encodeURIComponent(token));
   let previousPickCount=state.draft?.picks?.length??0,previousDeadline=state.draft?.deadline??null,
@@ -670,6 +714,7 @@ async function connect(){if(!token)return authForm();try{const response=await fe
     if(changed)syncServerClock();};
   events.onerror=()=>{$('connection').textContent='● Reconnecting…';};}
 setInterval(updateDraftClock,500);
+setInterval(()=>{if(token&&state&&!document.hidden)loadChat();},8000);
 setInterval(()=>{if(token&&state&&Date.now()-lastClockSync>30000)syncServerClock();},5000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&token&&state)syncServerClock();});
 connect();
