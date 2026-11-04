@@ -54,6 +54,29 @@ async function renameTeam(){const current=m(manager)?.team||'',proposed=prompt('
   if(proposed===null)return;const name=proposed.trim().replace(/\s+/g,' ');if(name===current)return;
   try{const result=await apiPost('/api/team-name',{name});m(manager).team=result.team;render();toast('Team name updated');}
   catch(e){toast(e.message);}}
+function teamPhoto(id,size=44){
+  if(!document.getElementById('fa-avatar-style')){const style=document.createElement('style');style.id='fa-avatar-style';style.textContent='.fa-team-avatar{display:inline-flex;vertical-align:middle;align-items:center;justify-content:center;flex-shrink:0;border-radius:50%;overflow:hidden;background:#354662;color:white;font-weight:700;margin-right:5px}.fa-team-avatar img{width:100%;height:100%;object-fit:cover}.fa-photo-editor{margin:12px 0;padding:12px;border:1px solid #354662;border-radius:10px}.fa-photo-editor input{display:block;max-width:100%;margin:10px 0}.fa-match-pill .fa-team-avatar{margin:0 3px}';document.head.appendChild(style);}
+const x=m(id),photo=x?.photo;
+  const label=esc((x?.team||'Team').slice(0,1).toUpperCase());
+  return `<span class="fa-team-avatar" style="width:${size}px;height:${size}px;font-size:${Math.round(size*.42)}px">${photo?`<img src="${esc(photo)}" alt="${esc(x.team)} team photo">`:label}</span>`;
+}
+async function uploadTeamPhoto(input){const file=input.files?.[0];if(!file)return;
+  if(!['image/jpeg','image/png','image/webp'].includes(file.type)){toast('Choose a JPEG, PNG, or WebP photo');input.value='';return;}
+  if(file.size>8*1024*1024){toast('Photo must be under 8 MB');input.value='';return;}
+  try{const img=await createImageBitmap(file),canvas=document.createElement('canvas');
+    canvas.width=160;canvas.height=160;
+    const ctx=canvas.getContext('2d');ctx.fillStyle='#ffffff';ctx.fillRect(0,0,160,160);
+    const scale=Math.max(160/img.width,160/img.height);
+    ctx.drawImage(img,(160-img.width*scale)/2,(160-img.height*scale)/2,img.width*scale,img.height*scale);
+    img.close?.();
+    let photo=canvas.toDataURL('image/jpeg',.78);
+    if(photo.length>80000)photo=canvas.toDataURL('image/jpeg',.48);
+    const result=await apiPost('/api/team-photo',{photo});m(manager).photo=result.photo;render();toast('Team photo updated');
+  }catch(e){toast(e.message||'Unable to upload photo');}finally{input.value='';}
+}
+async function removeTeamPhoto(){if(!confirm('Remove your team photo?'))return;
+  try{await apiPost('/api/team-photo',{photo:null});m(manager).photo=null;render();toast('Team photo removed');}
+  catch(e){toast(e.message);}}
 function injuryCard(injury){const starter=p(injury.player);if(!starter||starter.owner!==manager)return '';
   const choices=state.players.filter(x=>x.owner===manager&&x.slot==='BENCH'&&x.pos===starter.pos)
     .map(x=>{const same=x.team===starter.team&&x.kickoff<=state.phase;
@@ -525,12 +548,13 @@ function matchupView(){const week=selectedMatchupWeek(),games=state.matchupSched
   if(matchupWeek===null){matchupWeek=week;const mine=games.findIndex(g=>g.home===manager||g.away===manager);if(mine>=0)matchupIndex=mine;}
   const game=games[matchupIndex],left=m(game.home),right=m(game.away);
   const current=Number(state.nflDirectorySync?.currentWeek||state.week||1),isCurrent=week===current;
-  const leftPlayers=isCurrent?matchupStarters(game.home):[],rightPlayers=isCurrent?matchupStarters(game.away):[];
-  const cells=STARTER_ORDER.map((slot,i)=>`<div class="fa-match-row"><div class="fa-player">${isCurrent?matchupPlayerCell(leftPlayers[i]):'<span class="muted">Historical lineup unavailable</span>'}</div><div class="fa-position">${slot}</div><div class="fa-player fa-right">${isCurrent?matchupPlayerCell(rightPlayers[i]):'<span class="muted">Historical lineup unavailable</span>'}</div></div>`).join('');
+  const recorded=state.weeklyLedger?.[week]?.matchups?.[game.id];
+  const leftPlayers=recorded?.homeLineup|| (isCurrent?matchupStarters(game.home):[]),rightPlayers=recorded?.awayLineup||(isCurrent?matchupStarters(game.away):[]);
+  const cells=STARTER_ORDER.map((slot,i)=>`<div class="fa-match-row"><div class="fa-player">${leftPlayers[i]?matchupPlayerCell(leftPlayers[i]):'<span class="muted">No saved lineup</span>'}</div><div class="fa-position">${slot}</div><div class="fa-player fa-right">${rightPlayers[i]?matchupPlayerCell(rightPlayers[i]):'<span class="muted">No saved lineup</span>'}</div></div>`).join('');
   return `<style>.fa-week{display:flex;align-items:center;justify-content:center;gap:12px;margin:14px 0}.fa-week select{padding:8px;background:#202d43;color:inherit;border-radius:8px}.fa-match-strip{display:flex;overflow-x:auto;gap:8px;padding:8px 0 16px;scroll-snap-type:x mandatory}.fa-match-pill{flex:0 0 auto;max-width:220px;white-space:normal;scroll-snap-align:center}.fa-match-pill.active{outline:2px solid #66da8c}.fa-head{display:grid;grid-template-columns:minmax(0,1fr) 36px minmax(0,1fr);align-items:center;text-align:center;gap:6px;padding:12px 0}.fa-head b{overflow-wrap:anywhere}.fa-total{font-size:26px;font-weight:700;margin:8px}.fa-match-row{display:grid;grid-template-columns:minmax(0,1fr) 46px minmax(0,1fr);gap:5px;align-items:stretch;border-top:1px solid #384357;min-height:66px}.fa-player{padding:10px 4px;min-width:0;overflow-wrap:anywhere}.fa-player strong{display:block;margin-top:5px}.fa-right{text-align:right}.fa-position{display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:bold;background:#101824}.fa-match-surface{touch-action:pan-y}</style><h1>Week ${week} Matchups</h1><div class="fa-week"><button onclick="setMatchupWeek(${week-1})" ${week===1?'disabled':''}>‹</button><label>Week <select onchange="setMatchupWeek(this.value)">${Array.from({length:14},(_,i)=>`<option value="${i+1}" ${week===i+1?'selected':''}>${i+1}</option>`).join('')}</select></label><button onclick="setMatchupWeek(${week+1})" ${week===14?'disabled':''}>›</button></div>
-    <div class="fa-match-strip">${games.map((g,i)=>`<button class="fa-match-pill ${i===matchupIndex?'active':''}" onclick="selectMatchup(${i})">${esc(m(g.home)?.team||g.home)} vs ${esc(m(g.away)?.team||g.away)}</button>`).join('')}</div>
-    <section class="card fa-match-surface" ontouchstart="matchupSwipeStart(event)" ontouchend="matchupSwipeEnd(event)"><div class="fa-head"><div><b>${esc(left?.team||'Team')}</b><div class="fa-total">${isCurrent?fmt(total(game.home)):'—'}</div></div><span>VS</span><div><b>${esc(right?.team||'Team')}</b><div class="fa-total">${isCurrent?fmt(total(game.away)):'—'}</div></div></div>
-    <p class="muted small">${isCurrent?'Current roster scores · live updates when synced':'Scheduled pairing · historical scores and rosters not stored yet'}</p>${cells}<p class="muted small" style="text-align:center">Swipe left or right to view other matchups</p></section>`;}
+    <div class="fa-match-strip">${games.map((g,i)=>`<button class="fa-match-pill ${i===matchupIndex?'active':''}" onclick="selectMatchup(${i})">${teamPhoto(g.home,25)} ${esc(m(g.home)?.team||g.home)} vs ${teamPhoto(g.away,25)} ${esc(m(g.away)?.team||g.away)}</button>`).join('')}</div>
+    <section class="card fa-match-surface" ontouchstart="matchupSwipeStart(event)" ontouchend="matchupSwipeEnd(event)"><div class="fa-head"><div>${teamPhoto(game.home,58)}<br><b>${esc(left?.team||'Team')}</b><div class="fa-total">${recorded?fmt(recorded.homeScore):'—'}</div></div><span>VS</span><div>${teamPhoto(game.away,58)}<br><b>${esc(right?.team||'Team')}</b><div class="fa-total">${recorded?fmt(recorded.awayScore):'—'}</div></div></div>
+    <p class="muted small">${recorded?(recorded.status==='final'?'Final · verified matchup result':'Provisional · not counted in standings'):'No recorded scores for this week'}</p>${cells}<p class="muted small" style="text-align:center">Swipe left or right to view other matchups</p></section><section class="card"><h3>League standings · verified finals only</h3><div style="overflow-x:auto"><table style="width:100%;text-align:left"><thead><tr><th>Team</th><th>W</th><th>L</th><th>T</th><th>PF</th></tr></thead><tbody>${(state.standings||[]).map(r=>`<tr><td>${esc(m(r.manager)?.team||r.manager)}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.ties}</td><td>${fmt(r.pointsFor)}</td></tr>`).join('')}</tbody></table></div></section>`;}
 function render(){if(!state||!manager)return;const mine=state.players.filter(x=>x.owner===manager),myTeam=m(manager);
   if(!myTeam)return;
   $('tabs').innerHTML=tabs.filter(t=>t!=='Commissioner'||state.viewer.commissioner)
@@ -543,7 +567,7 @@ function render(){if(!state||!manager)return;const mine=state.players.filter(x=>
     ${state.injuries.filter(i=>i.active).map(injuryCard).join('')}
     ${card('Recent activity',state.transactions.slice(0,8).map(t=>`<div class="row"><span>${esc(t.details)}</span></div>`).join('')||'<p>No activity yet.</p>')}`;
   if(tab==='My Team'){const picks=draftData().picks.filter(x=>x.manager===manager);
-    content=`<h1>${esc(myTeam.team)}</h1><button onclick="renameTeam()">Rename My Team</button>
+    content=`<h1>${teamPhoto(manager,64)} ${esc(myTeam.team)}</h1><button onclick="renameTeam()">Rename My Team</button><div class="fa-photo-editor"><label for="teamPhotoUpload">Team profile photo</label><input id="teamPhotoUpload" type="file" accept="image/jpeg,image/png,image/webp" onchange="uploadTeamPhoto(this)"><button onclick="removeTeamPhoto()" ${myTeam.photo?'':'disabled'}>Remove photo</button><p class="muted small">Images are cropped to a square and resized automatically.</p></div>
       ${card('Drafted players',picks.map(x=>`<div class="row"><div><b>${esc(x.playerName)}</b>
       <div class="muted small">${esc(x.position)} · Pick ${x.overall}</div></div>
       <b>${x.projectedPoints==null?'—':fmt(x.projectedPoints)}</b></div>`).join('')||'<p>No draft picks yet.</p>')}
@@ -551,7 +575,7 @@ function render(){if(!state||!manager)return;const mine=state.players.filter(x=>
       ${lineupManager(mine)}`;}
   if(tab==='Matchup')content=matchupView();
   if(tab==='League')content=`<h1>League</h1>${card('Teams',state.managers.filter(x=>x.claimed).map(x=>
-    `<div class="row"><b>${esc(x.team)}</b><span>${fmt(total(x.id))} pts</span></div>`).join(''))}
+    `<div class="row"><b>${teamPhoto(x.id,36)} ${esc(x.team)}</b><span>${fmt(total(x.id))} pts</span></div>`).join(''))}
     ${card('League roster rules',state.settings?`<p>Starters: ${Object.entries(state.settings.roster.starters).map(([k,v])=>`${k} ${v}`).join(' · ')}</p>
       <p>Bench: ${state.settings.roster.bench} · IR: ${state.settings.roster.ir}</p>`:'<p>Not yet configured.</p>')}`;
   if((tab==='Players'||tab==='My Waivers')&&Date.now()-lastTransactionFetch>90000)loadTransactions();
@@ -646,3 +670,5 @@ setInterval(updateDraftClock,500);
 setInterval(()=>{if(token&&state&&Date.now()-lastClockSync>30000)syncServerClock();},5000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&token&&state)syncServerClock();});
 connect();
+
+// Team photo styles are injected once for all tabs.
