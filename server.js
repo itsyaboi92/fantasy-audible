@@ -253,7 +253,43 @@ function fantasySchedule(s,accounts){
   }
   return result;
 }
-function safeState(s,accounts,user){return {...s,matchupSchedule:fantasySchedule(s,accounts),settings:settingsOf(s),managers:s.managers.map(m=>({...m,
+// Persisted week-specific ledger. Historical weeks are never inferred from today's roster.
+function ledgerScore(p){return Number(p.scoringMode==='handcuff'?(p.credited??0):p.points)||0;}
+function ledgerLineup(s,id){return s.players.filter(p=>p.owner===id&&!['BENCH','IR'].includes(p.slot)).map(p=>({id:p.id,name:p.name,team:p.team,pos:p.pos,slot:p.slot,status:p.status,points:ledgerScore(p),liveScoreStatus:p.liveScoreStatus||null}));}
+function ledgerTotal(lineup){return Math.round(lineup.reduce((n,p)=>n+p.points,0)*100)/100;}
+function updateWeeklyLedger(s,accounts,week,games,failures){
+  if(!Number.isInteger(week)||week<1||week>14)return;
+  s.weeklyLedger ||= {};
+  const schedule=s.frozenMatchupSchedule ||= fantasySchedule(s,accounts);
+  const matches=schedule[week]||[];
+  const entry=s.weeklyLedger[week] ||= {week,createdAt:new Date().toISOString(),matchups:{}};
+  const allFinal=games.length>0&&games.every(g=>g.status==='final')&&failures.length===0;
+  for(const match of matches){
+    const prior=entry.matchups[match.id];if(prior?.status==='final')continue;
+    const homeLineup=ledgerLineup(s,match.home),awayLineup=ledgerLineup(s,match.away);
+    const allPlayers=[...homeLineup,...awayLineup];
+    const verified=allPlayers.every(p=>p.liveScoreStatus==='UPDATED'||p.status==='upcoming'&&p.points===0);
+    const status=allFinal&&verified?'final':'provisional';
+    const homeScore=ledgerTotal(homeLineup),awayScore=ledgerTotal(awayLineup);
+    entry.matchups[match.id]={id:match.id,home:match.home,away:match.away,
+      homeScore,awayScore,homeLineup,awayLineup,status,
+      winner:status==='final'?(homeScore===awayScore?null:homeScore>awayScore?match.home:match.away):null,
+      updatedAt:new Date().toISOString(),warning:status==='final'?null:'Scoring is provisional; missing or unsupported NFL scoring may affect results.'};
+  }
+}
+function leagueStandings(s,accounts){
+  const result={};for(const m of s.managers)result[m.id]={manager:m.id,wins:0,losses:0,ties:0,pointsFor:0,pointsAgainst:0};
+  for(const week of Object.values(s.weeklyLedger||{}))for(const match of Object.values(week.matchups||{})){
+    if(match.status!=='final'||!result[match.home]||!result[match.away])continue;
+    const a=result[match.home],b=result[match.away];a.pointsFor+=match.homeScore;a.pointsAgainst+=match.awayScore;
+    b.pointsFor+=match.awayScore;b.pointsAgainst+=match.homeScore;
+    if(match.homeScore===match.awayScore){a.ties++;b.ties++;}
+    else if(match.homeScore>match.awayScore){a.wins++;b.losses++;}else{b.wins++;a.losses++;}
+  }
+  return Object.values(result).map(x=>({...x,pointsFor:Math.round(x.pointsFor*100)/100,pointsAgainst:Math.round(x.pointsAgainst*100)/100}))
+    .sort((a,b)=>(b.wins+b.ties/2)/(b.wins+b.losses+b.ties||1)-(a.wins+a.ties/2)/(a.wins+a.losses+a.ties||1)||b.pointsFor-a.pointsFor);
+}
+function safeState(s,accounts,user){return {...s,matchupSchedule:s.frozenMatchupSchedule||fantasySchedule(s,accounts),standings:leagueStandings(s,accounts),settings:settingsOf(s),managers:s.managers.map(m=>({...m,
   claimed:accounts.some(a=>a.manager===m.id)})),draftPreferences:{[user.manager]:preferencesOf(s,user.manager)},
   viewer:{manager:user.manager,commissioner:user.commissioner,name:user.name}};}
 function pushState(s,accounts){for(const [res,id] of clients){const a=accounts.find(x=>x.id===id);
@@ -849,6 +885,22 @@ async function api(req,res,route){
       }
       return failure(404,'Unknown transaction action');
     }
+    if(route==='/api/team-photo'){
+      const team=s.managers.find(m=>m.id===actor.manager);
+      if(!team)return failure(403,'Team not found');
+      if(body.photo===null){team.photo=null;return {ok:true,photo:null};}
+      const photo=body.photo;
+      if(typeof photo!=='string'||photo.length>85000)return failure(400,'Image is too large');
+      const match=/^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/]+={0,2})$/.exec(photo);
+      if(!match)return failure(400,'Upload a JPEG, PNG or WebP image');
+      const bytes=Buffer.from(match[2],'base64');
+      if(bytes.length<12||bytes.length>62000)return failure(400,'Image must be under 62 KB after resizing');
+      const valid=match[1]==='jpeg'?bytes[0]===255&&bytes[1]===216&&bytes[2]===255:
+        match[1]==='png'?bytes.subarray(0,8).equals(Buffer.from('89504e470d0a1a0a','hex')):
+        bytes.toString('ascii',0,4)==='RIFF'&&bytes.toString('ascii',8,12)==='WEBP';
+      if(!valid)return failure(400,'Invalid image data');
+      team.photo=photo;return {ok:true,photo};
+    }
     if(route==='/api/team-name'){
       const name=teamName(body.name),team=s.managers.find(m=>m.id===actor.manager);
       if(!team)return failure(403,'Team not found');if(!name)return failure(400,'Invalid team name');
@@ -919,7 +971,7 @@ async function syncNFLScoring(){
       try{summaries.set(g.id,liveNFL.playerStats(await liveNFL.fetchGame(g.id)));}
       catch(e){failures.push(g.id+': '+e.message);}
     }));
-    await change(s=>{
+    await change((s,accounts)=>{
       // Player-directory history is updated by its own NFL-calendar sync below.
       // Never overwrite it with the fantasy league's draft/matchup week.
       const ids=new Map();for(const game of games)for(const t of game.teams)ids.set(t.id,game);
@@ -945,6 +997,7 @@ async function syncNFLScoring(){
         player.liveScoreStatus=calculated.unsupported.length?'PARTIAL':'UPDATED';
         player.liveScoreUpdatedAt=new Date().toISOString();changed++;
       }
+      updateWeeklyLedger(s,accounts,week,games,failures);
       s.nflSync={season,week,at:new Date().toISOString(),games:games.map(g=>({id:g.id,status:g.status,kickoff:g.kickoff,teams:g.teams})),failures,updatedPlayers:changed,warning:'Provisional: D/ST, play-level bonuses, field-goal distances, and injury substitutions remain unverified.'};
       return {ok:true};
     });
