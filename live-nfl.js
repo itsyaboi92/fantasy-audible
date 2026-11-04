@@ -81,7 +81,66 @@ function scorePlayer(p,rules,events=[]){
  return {points:Math.round(score*100)/100,breakdown,
    fieldGoalsPending:madeFG>eventFG,unsupported:[...new Set(unsupported)]};
 }
+// Defensive box-score attribution. Only award values present in the ESPN feed.
+// Missing fields are never silently treated as verified zeros.
+function defenseStats(summary,game){
+ const teams=summary.boxscore?.teams||[];
+ const output=new Map();
+ const aliases={sacks:['sacks','totalsacks'],interceptions:['interceptions','defensiveinterceptions'],
+  fumbleRecovered:['fumblesrecovered','fumblerecoveries'],forcedFumble:['forcedfumbles'],
+  safety:['safeties'],blockedKick:['blockedkicks','blockedpunts']};
+ for(const team of teams){
+  const id=String(team.team?.id||'');if(!id)continue;
+  const raw={};
+  for(const stat of team.statistics||[]){
+   const key=String(stat.name||stat.label||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+   if(key)raw[key]=stat.displayValue??stat.value;
+  }
+  const stats={};
+  for(const [key,keys] of Object.entries(aliases))for(const k of keys){
+   if(raw[k]!==undefined){const v=Number(raw[k]);if(Number.isFinite(v)){stats[key]=v;break;} }
+  }
+  const opponent=game.teams.find(t=>String(t.id)!==id);
+  const oppBox=teams.find(t=>String(t.team?.id)!==id);
+  // ESPN's totalYards is the opponent's offensive total, not net punting yards.
+  const oppTotal=(oppBox?.statistics||[]).find(x=>String(x.name||'').toLowerCase()==='totalyards');
+  const yards=oppTotal?Number(oppTotal.displayValue??oppTotal.value):NaN;
+  output.set(id,{stats,pointsAllowed:opponent?.score,
+    yardsAllowed:Number.isFinite(yards)?yards:null,
+    opponentFound:!!opponent,gameStatus:game.status});
+ }
+ return output;
+}
+function scoreDefense(input,rules){
+ const r=rules.defense||{},d=input?.stats||{},breakdown=[],missing=[];let points=0;
+ const add=(label,quantity,rate)=>{const v=Number(quantity),n=Number(rate);
+  if(!Number.isFinite(v)||!Number.isFinite(n)||!v||!n)return;
+  const value=Math.round(v*n*100)/100;points+=value;
+  breakdown.push({label,quantity:v,rate:n,points:value});};
+ for(const [key,label] of Object.entries({sacks:'Sacks',interceptions:'Interceptions',
+   fumbleRecovered:'Fumbles recovered',forcedFumble:'Forced fumbles',
+   safety:'Safeties',blockedKick:'Blocked kicks'})){
+   if(Object.hasOwn(d,key))add(label,d[key],key==='sacks'?r.sack:r[key]);else missing.push(label);
+ }
+ const pa=Number(input?.pointsAllowed);
+ if(input?.opponentFound&&Number.isFinite(pa)){
+  const key=pa===0?'pointsAllowed0':pa<=6?'pointsAllowed1to6':pa<=13?'pointsAllowed7to13':
+   pa<=17?'pointsAllowed14to17':pa<=27?'pointsAllowed18to27':pa<=34?'pointsAllowed28to34':
+   pa<=45?'pointsAllowed35to45':'pointsAllowed46plus';
+  add('Points allowed bracket',1,r[key]);
+ }else missing.push('Points allowed');
+ const ya=input?.yardsAllowed;
+ if(Number.isFinite(ya)){
+  const key=ya<100?'yardsAllowedUnder100':ya<200?'yardsAllowed100to199':
+   ya<300?'yardsAllowed200to299':ya<350?'yardsAllowed300to349':
+   ya<400?'yardsAllowed350to399':ya<450?'yardsAllowed400to449':
+   ya<500?'yardsAllowed450to499':ya<550?'yardsAllowed500to549':'yardsAllowed550plus';
+  add('Yards allowed bracket',1,r[key]);
+ }else missing.push('Yards allowed');
+ missing.push('Defensive/return touchdowns','2-point returns','1-point safeties');
+ return {points:Math.round(points*100)/100,breakdown,unsupported:missing};
+}
 function teamId(player){const v=String(player.nflTeamId??player.team??'');return /^\d+$/.test(v)?v:TEAM_IDS[v.toUpperCase()]||null;}
 async function loadWeek(season,week){const board=await json(`${BASE}/scoreboard?season=${season}&seasontype=2&week=${week}&limit=100`);const games=eventGames(board);if(!games.length)throw Error('No NFL games returned for requested week');return games;}
 async function fetchGame(id){return json(`${BASE}/summary?event=${encodeURIComponent(id)}`);}
-module.exports={loadWeek,fetchGame,playerStats,scorePlayer,teamId};
+module.exports={loadWeek,fetchGame,playerStats,scorePlayer,defenseStats,scoreDefense,teamId};
