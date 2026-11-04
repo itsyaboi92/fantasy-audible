@@ -1,4 +1,5 @@
 let state=null,manager=null,tab='Home',token=localStorage.getItem('audibleToken');
+let matchupWeek=null,matchupIndex=0,matchupTouchX=null;
 let espn=null,espnError='',draftSearch='',draftPosition='ALL',loadingESPN=false;
 let weeklyDirectory={},weeklyUpdatedAt=null,weeklyLoading=false,weeklyLastFetch=0;
 let playerSort='rank';
@@ -508,6 +509,28 @@ async function moveToSection(playerId,slot){
   try{await apiPost('/api/lineup/assign',{playerId,slot});toast('Roster updated');}
   catch(e){toast(e.message);}
 }
+const STARTER_ORDER=['QB','RB','RB','WR','WR','TE','FLEX','D/ST','K'];
+function selectedMatchupWeek(){return Math.min(14,Math.max(1,matchupWeek??Number(state.nflDirectorySync?.currentWeek||state.week||1)));}
+function setMatchupWeek(week){matchupWeek=Math.min(14,Math.max(1,Number(week)||1));matchupIndex=0;render();}
+function selectMatchup(index){const games=state.matchupSchedule?.[selectedMatchupWeek()]||[];if(!games.length)return;matchupIndex=(index+games.length)%games.length;render();}
+function matchupSwipeStart(e){matchupTouchX=e.touches?.[0]?.clientX??null;}
+function matchupSwipeEnd(e){if(matchupTouchX===null)return;const diff=(e.changedTouches?.[0]?.clientX??matchupTouchX)-matchupTouchX;matchupTouchX=null;if(Math.abs(diff)>55)selectMatchup(matchupIndex+(diff<0?1:-1));}
+function matchupStarters(id){const starters=state.players.filter(x=>x.owner===id&&!['BENCH','IR'].includes(x.slot));
+  const used=new Set();return STARTER_ORDER.map(slot=>{const player=starters.find(x=>!used.has(x.id)&&(x.slot===slot||(slot==='FLEX'&&['FLEX','RB','WR','TE'].includes(x.slot))));if(player)used.add(player.id);return player||null;});}
+function matchupPlayerCell(x){if(!x)return '<span class="muted">Empty</span>';
+  return `<b>${esc(x.name)}</b><div class="muted small">${esc(x.team||'')} · ${esc(x.status||'')}</div><strong>${fmt(score(x))}</strong>`;}
+function matchupView(){const week=selectedMatchupWeek(),games=state.matchupSchedule?.[week]||[];
+  if(!games.length)return `<h1>Week ${week} Matchups</h1>${card('League matchups','At least two registered teams are required.')}`;
+  if(matchupIndex>=games.length)matchupIndex=0;
+  if(matchupWeek===null){matchupWeek=week;const mine=games.findIndex(g=>g.home===manager||g.away===manager);if(mine>=0)matchupIndex=mine;}
+  const game=games[matchupIndex],left=m(game.home),right=m(game.away);
+  const current=Number(state.nflDirectorySync?.currentWeek||state.week||1),isCurrent=week===current;
+  const leftPlayers=isCurrent?matchupStarters(game.home):[],rightPlayers=isCurrent?matchupStarters(game.away):[];
+  const cells=STARTER_ORDER.map((slot,i)=>`<div class="fa-match-row"><div class="fa-player">${isCurrent?matchupPlayerCell(leftPlayers[i]):'<span class="muted">Historical lineup unavailable</span>'}</div><div class="fa-position">${slot}</div><div class="fa-player fa-right">${isCurrent?matchupPlayerCell(rightPlayers[i]):'<span class="muted">Historical lineup unavailable</span>'}</div></div>`).join('');
+  return `<style>.fa-week{display:flex;align-items:center;justify-content:center;gap:12px;margin:14px 0}.fa-week select{padding:8px;background:#202d43;color:inherit;border-radius:8px}.fa-match-strip{display:flex;overflow-x:auto;gap:8px;padding:8px 0 16px;scroll-snap-type:x mandatory}.fa-match-pill{flex:0 0 auto;max-width:220px;white-space:normal;scroll-snap-align:center}.fa-match-pill.active{outline:2px solid #66da8c}.fa-head{display:grid;grid-template-columns:minmax(0,1fr) 36px minmax(0,1fr);align-items:center;text-align:center;gap:6px;padding:12px 0}.fa-head b{overflow-wrap:anywhere}.fa-total{font-size:26px;font-weight:700;margin:8px}.fa-match-row{display:grid;grid-template-columns:minmax(0,1fr) 46px minmax(0,1fr);gap:5px;align-items:stretch;border-top:1px solid #384357;min-height:66px}.fa-player{padding:10px 4px;min-width:0;overflow-wrap:anywhere}.fa-player strong{display:block;margin-top:5px}.fa-right{text-align:right}.fa-position{display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:bold;background:#101824}.fa-match-surface{touch-action:pan-y}</style><h1>Week ${week} Matchups</h1><div class="fa-week"><button onclick="setMatchupWeek(${week-1})" ${week===1?'disabled':''}>‹</button><label>Week <select onchange="setMatchupWeek(this.value)">${Array.from({length:14},(_,i)=>`<option value="${i+1}" ${week===i+1?'selected':''}>${i+1}</option>`).join('')}</select></label><button onclick="setMatchupWeek(${week+1})" ${week===14?'disabled':''}>›</button></div>
+    <div class="fa-match-strip">${games.map((g,i)=>`<button class="fa-match-pill ${i===matchupIndex?'active':''}" onclick="selectMatchup(${i})">${esc(m(g.home)?.team||g.home)} vs ${esc(m(g.away)?.team||g.away)}</button>`).join('')}</div>
+    <section class="card fa-match-surface" ontouchstart="matchupSwipeStart(event)" ontouchend="matchupSwipeEnd(event)"><div class="fa-head"><div><b>${esc(left?.team||'Team')}</b><div class="fa-total">${isCurrent?fmt(total(game.home)):'—'}</div></div><span>VS</span><div><b>${esc(right?.team||'Team')}</b><div class="fa-total">${isCurrent?fmt(total(game.away)):'—'}</div></div></div>
+    <p class="muted small">${isCurrent?'Current roster scores · live updates when synced':'Scheduled pairing · historical scores and rosters not stored yet'}</p>${cells}<p class="muted small" style="text-align:center">Swipe left or right to view other matchups</p></section>`;}
 function render(){if(!state||!manager)return;const mine=state.players.filter(x=>x.owner===manager),myTeam=m(manager);
   if(!myTeam)return;
   $('tabs').innerHTML=tabs.filter(t=>t!=='Commissioner'||state.viewer.commissioner)
@@ -526,11 +549,7 @@ function render(){if(!state||!manager)return;const mine=state.players.filter(x=>
       <b>${x.projectedPoints==null?'—':fmt(x.projectedPoints)}</b></div>`).join('')||'<p>No draft picks yet.</p>')}
       ${state.injuries.filter(i=>i.active).map(injuryCard).join('')}
       ${lineupManager(mine)}`;}
-  if(tab==='Matchup'){const opponent=manager==='m1'?'m2':'m1';
-    content=`<h1>Week ${state.week} Matchup</h1>${card('NFL live feed',state.nflSync?`<p>Last synchronized: ${esc(new Date(state.nflSync.at).toLocaleString())}</p><p>${state.nflSync.updatedPlayers} players updated · ${state.nflSync.failures.length} game feed errors</p><p class="muted">${esc(state.nflSync.warning)}</p>`:'<p>Waiting for first NFL sync. Scores are not yet verified.</p>')}<div class="grid">${card(esc(myTeam.team),
-      `<div class="stat">${fmt(total(manager))}</div>${mine.filter(x=>!['BENCH','IR'].includes(x.slot)).map(playerRow).join('')}`)}
-      ${m(opponent)?card(esc(m(opponent).team),`<div class="stat">${fmt(total(opponent))}</div>
-      ${state.players.filter(x=>x.owner===opponent&&!['BENCH','IR'].includes(x.slot)).map(playerRow).join('')}`):''}</div>`;}
+  if(tab==='Matchup')content=matchupView();
   if(tab==='League')content=`<h1>League</h1>${card('Teams',state.managers.filter(x=>x.claimed).map(x=>
     `<div class="row"><b>${esc(x.team)}</b><span>${fmt(total(x.id))} pts</span></div>`).join(''))}
     ${card('League roster rules',state.settings?`<p>Starters: ${Object.entries(state.settings.roster.starters).map(([k,v])=>`${k} ${v}`).join(' · ')}</p>
@@ -586,7 +605,7 @@ function leagueMembersUI(){
   }).join('');
   return card('League Members',`<p class="muted small">Remove Manager revokes access but keeps the roster for a replacement. Terminate Roster removes the team and places its players on waivers. Both actions require two confirmations.</p>${rows||'<p>No other teams.</p>'}`);
 }
-function changeTab(next){tab=next;render();if(tab==='Draft')syncServerClock();
+function changeTab(next){if(next==='Matchup'&&tab!=='Matchup'){matchupWeek=null;matchupIndex=0;}tab=next;render();if(tab==='Draft')syncServerClock();
   if(tab==='Draft'||tab==='Players')loadESPN();
   if(tab==='Players')loadWeeklyDirectory();
   if(tab==='Players'||tab==='My Waivers')loadTransactions();}
