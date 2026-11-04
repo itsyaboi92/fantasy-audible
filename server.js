@@ -474,6 +474,32 @@ function chooseAutomatic(s,players,id){let available=availableFor(s,players,id);
   }
   return available[0];
 }
+// Fill only vacant starting slots; never replace a manager's selections.
+function autoFillStarters(s, managerId){
+  const caps=settingsOf(s).roster.starters;
+  const owned=s.players.filter(p=>p.owner===managerId);
+  const assigned=[];
+  const rankValue=p=>{
+    const projected=Number(p.projectedPoints);
+    const rank=Number(p.rank);
+    return [Number.isFinite(projected)&&projected>0?projected:-Infinity,
+      Number.isFinite(rank)&&rank>0?-rank:-Infinity];
+  };
+  const candidates=owned.filter(p=>p.slot==='BENCH'&&!p.scoringMode&&!lineupLocked(s,p))
+    .sort((a,b)=>{const x=rankValue(a),y=rankValue(b);return y[0]-x[0]||y[1]-x[1];});
+  // Dedicated positions first; FLEX receives the strongest remaining RB/WR/TE.
+  for(const slot of ['QB','RB','WR','TE','D/ST','K','FLEX']){
+    const capacity=Number(caps[slot]||0);
+    let filled=owned.filter(p=>p.slot===slot).length;
+    while(filled<capacity){
+      const next=candidates.find(p=>p.slot==='BENCH'&&slotEligible(p,slot));
+      if(!next)break;
+      next.slot=slot;assigned.push(next.name+' ('+slot+')');filled++;
+    }
+  }
+  if(assigned.length)audit(s,'AUTO_LINEUP',managerId,'Filled empty starter slots: '+assigned.join(', '));
+  return assigned.length;
+}
 function recordPick(s,player,automatic=false){const d=ensureDraft(s),turn=currentPick(d);
   if(!turn)return failure(409,'Draft is complete');
   if(d.picks.some(p=>String(p.playerId)===String(player.id)))return failure(409,'Player already drafted');
@@ -489,6 +515,7 @@ function recordPick(s,player,automatic=false){const d=ensureDraft(s),turn=curren
     nflTeamId:player.nflTeamId,acquisitionType:'DRAFT',lastAcquisitionType:'DRAFT'});
   audit(s,automatic?'AUTO_PICK':'DRAFT_PICK',turn.manager,player.name+' selected at pick '+overall);
   if(d.picks.length>=d.order.length){d.status='completed';d.deadline=null;d.remainingSeconds=null;
+    for(const manager of new Set(d.order.map(p=>p.manager)))autoFillStarters(s,manager);
     audit(s,'DRAFT_COMPLETE',null,'Draft completed');setTimeout(activateLeagueSchedule,0);}else nextDeadline(d);
   return {ok:true,pick};}
 function eligibility(s,starter,bench){if(!starter||!bench||starter.owner!==bench.owner||
@@ -702,7 +729,22 @@ async function api(req,res,route){
     return send(res,result.status||200,result);}
   const current=await snapshot(),user=findUser(req,current.accounts);
   if(!user)return send(res,401,{error:'Please sign in'});
-  if(req.method==='GET'&&route==='/api/state')return send(res,200,safeState(current.state,current.accounts,user));
+  if(req.method==='GET'&&route==='/api/state'){
+    // One-time, non-destructive backfill for leagues drafted before auto-lineup existed.
+    if(ensureDraft(current.state).status==='completed'&&
+      current.state.players.some(p=>p.owner&&p.slot==='BENCH')&&
+      current.state.managers.some(m=>{
+        const mine=current.state.players.filter(p=>p.owner===m.id);
+        return mine.some(p=>p.slot==='BENCH')&&Object.entries(settingsOf(current.state).roster.starters)
+          .some(([slot,count])=>mine.filter(p=>p.slot===slot).length<count&&
+            mine.some(p=>p.slot==='BENCH'&&slotEligible(p,slot)));})){
+      await change(s=>{if(ensureDraft(s).status==='completed')
+        for(const m of s.managers)autoFillStarters(s,m.id);
+        return {ok:true};});
+      const fresh=await snapshot();return send(res,200,safeState(fresh.state,fresh.accounts,user));
+    }
+    return send(res,200,safeState(current.state,current.accounts,user));
+  }
   if(req.method==='GET'&&route==='/api/events'){
     res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache, no-transform',Connection:'keep-alive'});
     res.write('data: '+JSON.stringify(safeState(current.state,current.accounts,user))+'\n\n');
