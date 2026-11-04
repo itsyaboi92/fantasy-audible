@@ -957,12 +957,20 @@ async function deleteChatMessage(id){if(!confirm('Delete this message?'))return;
   try{await apiPost('/api/chat/delete',{id});await loadChat();}catch(e){toast(e.message);}}
 async function muteChatManager(id,muted){
   try{await apiPost('/api/chat/mute',{manager:id,muted});await loadChat();}catch(e){toast(e.message);}}
+function editorialView(){
+  const articles=state.editorial||[];
+  if(!articles.length)return card('🎙️ The Audible', '<p>League coverage is warming up. Verified game results and the scheduled editions will appear here automatically.</p>');
+  const article=articles[0];
+  const section=a=>`<article style="padding:12px 0;border-bottom:1px solid #ffffff20"><div class="muted small">${esc(a.kind.toUpperCase())} · WEEK ${a.week}</div><h3>${esc(a.title)}</h3>${a.lines.map(line=>`<p>${esc(line)}</p>`).join('')}</article>`;
+  return card('🎙️ The Audible · Latest Edition',section(article)+`<button onclick="changeTab('Locker Room')">Discuss in Locker Room</button><details style="margin-top:12px"><summary>Previous editions (${articles.length-1})</summary>${articles.slice(1).map(section).join('')||'<p>No previous editions yet.</p>'}</details>`);
+}
 function render(){if(!state||!manager)return;const mine=state.players.filter(x=>x.owner===manager),myTeam=m(manager);
   if(!myTeam)return;
   $('tabs').innerHTML=tabs.filter(t=>t!=='Commissioner'||state.viewer.commissioner)
     .map(t=>`<button class="${tab===t?'active':''}" onclick="changeTab('${t}')">${t==='Locker Room'&&chatLastId>chatSeenId?'💬 '+t+' •':t}</button>`).join('');
   let content='';
   if(tab==='Home')content=`<h1>${esc(state.league)}</h1><p>Week ${state.week} · ${esc(myTeam.team)}</p>
+    ${editorialView()}
     <div class="grid">${card('Your score',`<div class="stat">${fmt(total(manager))}</div>`)}
     ${card('Registered teams',`<div class="stat">${state.managers.filter(x=>x.claimed).length} / 12</div>`)}
     ${card('Draft status',`<p>${esc(draftData().status)}</p><button onclick="changeTab('Draft')">Open draft room</button>`)}</div>
