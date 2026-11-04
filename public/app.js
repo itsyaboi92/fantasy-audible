@@ -1,5 +1,5 @@
 let state=null,manager=null,tab='Home',token=localStorage.getItem('audibleToken');
-let chatMessages=[],chatMuted=false,chatMutedManagers=[],chatLastId=0,chatSeenId=Number(localStorage.getItem('audibleChatSeen')||0),chatLoading=false,chatError='',chatDraft='',chatPendingGif=null;
+let chatMessages=[],chatMuted=false,chatMutedManagers=[],chatLastId=0,chatSeenId=Number(localStorage.getItem('audibleChatSeen')||0),chatLoading=false,chatError='',chatDraft='',chatPendingGif=null,tenorOpen=false,tenorResults=[],tenorQuery='',tenorError='',tenorBusy=false,tenorRequest=0;
 let matchupWeek=null,matchupIndex=0,matchupTouchX=null;
 let espn=null,espnError='',draftSearch='',draftPosition='ALL',loadingESPN=false;
 let weeklyDirectory={},weeklyUpdatedAt=null,weeklyLoading=false,weeklyLastFetch=0;
@@ -580,6 +580,7 @@ function refreshChatDisplay(){
   const oldControls=document.querySelector('#chatModeration');
   const newControls=temporary.querySelector('#chatModeration');
   if(oldControls&&newControls&&oldControls.innerHTML!==newControls.innerHTML)oldControls.innerHTML=newControls.innerHTML;
+  const picker=$('tenorPicker');if(picker&&tenorOpen)renderTenorResults();
   const error=$('chatError');if(error)error.textContent=chatError;
   const composer=$('chatForm');
   if(composer&&chatMuted){
@@ -609,12 +610,36 @@ function updateChatTabBadge(){
   if(!buttons)return;
   for(const button of buttons){if(button.textContent.includes('Locker Room'))button.textContent=chatLastId>chatSeenId?'💬 Locker Room •':'Locker Room';}
 }
+// Render only HTTPS direct GIF media as images. Ordinary share pages remain links.
+function chatBodyHtml(body){
+  const value=String(body||'');
+  const urlPattern=/https:\/\/[^\s<>"']+/gi;
+  let html='',cursor=0,match;
+  while((match=urlPattern.exec(value))){
+    const raw=match[0],url=raw.replace(/[),.!?;]+$/,'');
+    html+=esc(value.slice(cursor,match.index));
+    let parsed=null;
+    try{parsed=new URL(url);}catch(e){}
+    if(parsed&&parsed.protocol==='https:'){
+      const host=parsed.hostname.toLowerCase();
+      const direct=/\.gif$/i.test(parsed.pathname);
+      const trustedGiphy=(host==='media.giphy.com'||/^media[0-9]+\.giphy\.com$/.test(host))&&/\.(gif|webp)$/i.test(parsed.pathname);
+      const trustedTenor=(host==='media.tenor.com'||host==='c.tenor.com')&&/\.(gif|webp)$/i.test(parsed.pathname);
+      const safe=esc(url);
+      html+=`<a href="${safe}" target="_blank" rel="noopener noreferrer">${safe}</a>`;
+      if(direct||trustedGiphy||trustedTenor)html+=`<div><img class="fa-chat-gif" src="${safe}" alt="Shared GIF" loading="lazy" referrerpolicy="no-referrer"></div>`;
+    }else html+=esc(url);
+    cursor=match.index+raw.length;
+    html+=esc(raw.slice(url.length));
+  }
+  return html+esc(value.slice(cursor));
+}
 function chatView(){
   const messages=chatMessages.map(x=>{
     const team=m(x.manager)?.team||'Former manager';
     return `<div class="fa-chat-msg"><div class="fa-chat-head">${teamPhoto(x.manager,30)} <b>${esc(team)}</b> <span class="muted small">${esc(new Date(x.created_at).toLocaleString())}</span>
     ${state.viewer.commissioner?`<button class="fa-chat-small" onclick="deleteChatMessage(${Number(x.id)})">Delete</button>`:''}</div>
-    <div class="fa-chat-body">${esc(x.body)}${x.has_media?`<div><img class="fa-chat-gif" src="/api/chat/media?id=${Number(x.id)}&token=${encodeURIComponent(token)}" alt="Animated GIF" loading="lazy"></div>`:''}</div></div>`;
+    <div class="fa-chat-body">${chatBodyHtml(x.body)}${x.has_media?`<div><img class="fa-chat-gif" src="/api/chat/media?id=${Number(x.id)}&token=${encodeURIComponent(token)}" alt="Animated GIF" loading="lazy"></div>`:''}</div></div>`;
   }).join('')||'<p class="muted">No messages yet. Start the trash talk!</p>';
   const controls=state.viewer.commissioner?`<section class="card"><h3>Commissioner moderation</h3>
     ${state.managers.filter(x=>x.claimed&&x.id!==manager).map(x=>`<div class="row"><span>${esc(x.team)}</span>
@@ -623,40 +648,57 @@ function chatView(){
     <section class="card"><div class="fa-chat-list" id="chatList">${messages}</div>
     <p id="chatError" class="muted">${esc(chatError)}</p>
     ${chatMuted?'<p>You have been muted by the commissioner.</p>':`<form id="chatForm" onsubmit="sendChatMessage(event)">
-      <textarea id="chatInput" maxlength="1000" rows="2" placeholder="Talk some trash..." onpaste="chatPaste(event)" oninput="chatDraft=this.value" onblur="setTimeout(()=>{refreshChatDisplay();updateChatTabBadge()},0)">${esc(chatDraft)}</textarea>
-      <div id="chatGifPreview"></div><label class="fa-chat-file-label">GIF file<input type="file" accept="image/gif" onchange="chatChooseGif(event)" style="display:none"></label>
-      <button type="submit">Send message</button></form>`}</section><div id="chatModeration">${controls}</div>`;
+      <textarea id="chatInput" maxlength="1000" rows="2" placeholder="Talk some trash..." oninput="chatDraft=this.value" onblur="setTimeout(()=>{refreshChatDisplay();updateChatTabBadge()},0)">${esc(chatDraft)}</textarea>
+      <button type="button" onclick="toggleTenorPicker()">GIF</button>
+      <button type="submit">Send message</button></form><div id="tenorPicker" class="fa-tenor-picker" style="display:${tenorOpen?'block':'none'}"><div class="fa-tenor-search"><input id="tenorSearch" type="search" placeholder="Search Tenor GIFs" maxlength="80" value="${esc(tenorQuery)}" onkeydown="if(event.key==='Enter'){event.preventDefault();searchTenor()}"><button type="button" onclick="searchTenor()">Search</button><button type="button" onclick="toggleTenorPicker()">Close</button></div><div id="tenorResults" class="fa-tenor-grid"></div><p class="muted small">GIFs powered by Tenor</p></div>`}</section><div id="chatModeration">${controls}</div>`;
 }
-function chatPaste(event){
-  const items=Array.from(event.clipboardData?.items||[]);
-  const image=items.find(x=>x.type==='image/gif')||items.find(x=>x.type.startsWith('image/'));
-  if(!image)return;
-  event.preventDefault();
-  const file=image.getAsFile();
-  if(file)chatSetGif(file);
+function toggleTenorPicker(){
+  tenorOpen=!tenorOpen;
+  const picker=$('tenorPicker');if(!picker)return;
+  picker.style.display=tenorOpen?'block':'none';
+  if(tenorOpen){renderTenorResults();if(!tenorResults.length)searchTenor();}
 }
-function chatChooseGif(event){const file=event.target.files?.[0];if(file)chatSetGif(file);}
-function chatSetGif(file){
-  if(file.type!=='image/gif'){toast('This keyboard provided a still image, not an animated GIF. Try copying a GIF file.');return;}
-  if(file.size>2*1024*1024){toast('GIF must be under 2 MB');return;}
-  chatPendingGif=file;
-  const preview=$('chatGifPreview');if(preview){
-    const url=URL.createObjectURL(file);
-    preview.innerHTML='<span class="muted small">GIF ready to send</span> <button type="button" onclick="chatClearGif()">Remove</button>';
-    const img=document.createElement('img');img.className='fa-chat-gif';img.alt='GIF preview';img.src=url;
-    img.onload=()=>URL.revokeObjectURL(url);preview.appendChild(img);
+function renderTenorResults(){
+  const grid=$('tenorResults');if(!grid)return;
+  if(tenorBusy){grid.textContent='Loading GIFs…';return;}
+  if(tenorError){grid.textContent=tenorError;return;}
+  if(!tenorResults.length){grid.textContent='No GIFs found.';return;}
+  grid.replaceChildren();
+  for(const result of tenorResults){
+    const button=document.createElement('button');button.type='button';button.className='fa-tenor-item';
+    button.title=result.title||'Send GIF';
+    const img=document.createElement('img');img.src=result.preview;img.alt=result.title||'GIF';img.loading='lazy';
+    button.appendChild(img);button.addEventListener('click',()=>sendTenorGif(result.url));grid.appendChild(button);
   }
 }
-function chatClearGif(){chatPendingGif=null;const preview=$('chatGifPreview');if(preview)preview.replaceChildren();}
-function gifBase64(file){return new Promise((resolve,reject)=>{const reader=new FileReader();
-  reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=()=>reject(Error('Could not read GIF'));
-  reader.readAsDataURL(file);});}
+async function searchTenor(){
+  tenorQuery=$('tenorSearch')?.value.trim()||'';
+  const request=++tenorRequest;tenorBusy=true;tenorError='';renderTenorResults();
+  try{
+    const r=await fetch('/api/chat/tenor?q='+encodeURIComponent(tenorQuery),{
+      headers:{Authorization:'Bearer '+token},cache:'no-store'});
+    const d=await r.json();if(!r.ok)throw Error(d.error||'GIF search unavailable');
+    if(request===tenorRequest)tenorResults=d.results||[];
+  }catch(e){if(request===tenorRequest)tenorError=e.message;}
+  finally{if(request===tenorRequest){tenorBusy=false;renderTenorResults();}}
+}
+async function sendTenorGif(url){
+  if(!/^https:\/\/(media|c)\.tenor\.com\//i.test(url))return;
+  const caption=$('chatInput')?.value.trim()||'';
+  const message=(caption?caption+'\n':'')+url;
+  if(message.length>1000){toast('Message is too long');return;}
+  try{
+    await apiPost('/api/chat',{message});
+    chatDraft='';const input=$('chatInput');if(input)input.value='';
+    tenorOpen=false;const picker=$('tenorPicker');if(picker)picker.style.display='none';
+    await loadChat();
+  }catch(e){toast(e.message);}
+}
 async function sendChatMessage(event){event.preventDefault();const value=$('chatInput')?.value.trim()||'';
-  if(!value&&!chatPendingGif)return;
+  if(!value)return;
   const sendButton=$('chatForm')?.querySelector('button[type="submit"]');if(sendButton)sendButton.disabled=true;
   try{
-    if(chatPendingGif){await apiPost('/api/chat/media',{mime:'image/gif',data:await gifBase64(chatPendingGif),caption:value});chatClearGif();}
-    else await apiPost('/api/chat',{message:value});
+    await apiPost('/api/chat',{message:value});
     chatDraft='';const input=$('chatInput');if(input)input.value='';await loadChat();
   }catch(e){toast(e.message);}finally{if(sendButton)sendButton.disabled=false;}
 }
