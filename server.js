@@ -290,7 +290,8 @@ function leagueStandings(s,accounts){
     .sort((a,b)=>(b.wins+b.ties/2)/(b.wins+b.losses+b.ties||1)-(a.wins+a.ties/2)/(a.wins+a.losses+a.ties||1)||b.pointsFor-a.pointsFor);
 }
 function safeState(s,accounts,user){return {...s,matchupSchedule:s.frozenMatchupSchedule||fantasySchedule(s,accounts),standings:leagueStandings(s,accounts),settings:settingsOf(s),managers:s.managers.map(m=>({...m,
-  claimed:accounts.some(a=>a.manager===m.id)})),draftPreferences:{[user.manager]:preferencesOf(s,user.manager)},
+  claimed:accounts.some(a=>a.manager===m.id),
+  ...(user.commissioner?{registeredEmail:accounts.find(a=>a.manager===m.id)?.email||null}: {})})),draftPreferences:{[user.manager]:preferencesOf(s,user.manager)},
   viewer:{manager:user.manager,commissioner:user.commissioner,name:user.name}};}
 function pushState(s,accounts){for(const [res,id] of clients){const a=accounts.find(x=>x.id===id);
   if(!a){clients.delete(res);try{res.end();}catch{}continue;}try{res.write('data: '+JSON.stringify(safeState(s,accounts,a))+'\n\n');}
