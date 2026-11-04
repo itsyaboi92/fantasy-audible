@@ -405,6 +405,33 @@ function draftPreferencesUI(){const x=prefs(),queue=x.queue||[];
 function queueFromInput(){const v=$('queueSearch')?.value.trim();if(!v)return;
   const player=espn?.players?.find(x=>String(x.id)===v)||espn?.players?.find(x=>x.name.toLowerCase()===v.toLowerCase());
   if(!player)return toast('Player not found. Load ESPN data or use exact name / ID.');addToQueue(player.id);}
+async function saveDraftSequence(order,randomize=false){
+  try{await apiPost('/api/draft/order',randomize?{randomize:true}:{order});await syncServerClock();
+    toast(randomize?'Draft order randomized':'Draft order saved');}
+  catch(e){toast(e.message);}
+}
+function moveDraftTeam(index,direction){
+  const ids=draftSequenceForUI();const target=index+direction;
+  if(target<0||target>=ids.length)return;
+  [ids[index],ids[target]]=[ids[target],ids[index]];
+  saveDraftSequence(ids);
+}
+function draftSequenceForUI(){
+  const registered=state.managers.filter(x=>x.claimed).map(x=>x.id);
+  const chosen=draftData().draftSequence;
+  return Array.isArray(chosen)&&chosen.length===registered.length&&
+    new Set(chosen).size===registered.length&&chosen.every(id=>registered.includes(id))
+    ?[...chosen]:registered;
+}
+function commissionerDraftOrderUI(){
+  if(!state.viewer.commissioner)return '';
+  const d=draftData(),ids=draftSequenceForUI(),waiting=d.status==='waiting';
+  return card('Commissioner draft order',`<p class="muted small">First-round selection order. Snake rounds automatically reverse the sequence every other round. ${waiting?'Move teams or randomize before starting.':'Locked because the draft has started.'}</p>
+    ${ids.map((id,i)=>`<div class="row"><span><b>#${i+1}</b> ${esc(m(id)?.team||id)}</span>
+      ${waiting?`<span><button type="button" onclick="moveDraftTeam(${i},-1)" ${i===0?'disabled':''} aria-label="Move team up">↑</button>
+      <button type="button" onclick="moveDraftTeam(${i},1)" ${i===ids.length-1?'disabled':''} aria-label="Move team down">↓</button></span>`:''}</div>`).join('')||'<p>No registered teams yet.</p>'}
+    ${waiting?`<button type="button" onclick="if(confirm('Randomize the first-round draft order?'))saveDraftSequence([],true)" ${ids.length<2?'disabled':''}>🎲 Randomize order</button>`:''}`);
+}
 function renderDraft(){const d=draftData(),turn=currentTurn(),myTurn=d.status==='active'&&turn?.manager===manager;
   const controls=state.viewer.commissioner?`<div class="actions">
     ${d.status==='waiting'?'<button onclick="draftAction(\'start\')">Start draft</button>':''}
@@ -418,7 +445,7 @@ function renderDraft(){const d=draftData(),turn=currentTurn(),myTurn=d.status===
     <p>${turn?`On the clock: <b>${esc(m(turn.manager)?.team||turn.manager)}</b>`:
       d.status==='completed'?'All draft selections are complete.':'Waiting for commissioner.'}</p>
     ${myTurn?'<p><b>Your turn! Select a player below.</b></p>':''}${controls}`)}
-    ${draftPreferencesUI()}${draftBoard()}${playerTable()}${draftHistory()}`;}
+    ${commissionerDraftOrderUI()}${draftPreferencesUI()}${draftBoard()}${playerTable()}${draftHistory()}`;}
 function ensureSettingsDraft(){if(!settingsDraft)settingsDraft=structuredClone(state.settings);return settingsDraft;}
 function editSetting(section,key,value,subkey){const x=ensureSettingsDraft();
   if(subkey)x[section][key][subkey]=Number(value);
@@ -836,6 +863,7 @@ function render(){if(!state||!manager)return;const mine=state.players.filter(x=>
     ${card('Transactions',state.transactions.slice(0,50).map(t=>`<div class="row">${esc(t.details)}</div>`).join('')||'<p>No transactions.</p>')}`;
   if(tab==='Commissioner'&&state.viewer.commissioner)content=`<h1>Commissioner Controls</h1>
     ${card('Draft management','<p>Manage the snake draft.</p><button onclick="changeTab(\'Draft\')">Open draft controls</button>')}
+    ${commissionerDraftOrderUI()}
     ${card('Restart league',`<p><b>Destructive action:</b> clear the current draft order, all picks, draft history, drafted rosters, and injuries. Keep manager accounts, team names, commissioner scoring/roster rules, and each manager's draft preferences.</p>
       <p>The next draft will use your configured roster size (16 rounds by default).</p>
       <button onclick="restartLeague()" style="background:#a32121;color:white">Restart league / New draft</button>`)}
