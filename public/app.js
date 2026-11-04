@@ -559,20 +559,50 @@ function matchupView(){const week=selectedMatchupWeek(),games=state.matchupSched
     <div class="fa-match-strip">${games.map((g,i)=>`<button class="fa-match-pill ${i===matchupIndex?'active':''}" onclick="selectMatchup(${i})">${teamPhoto(g.home,25)} ${esc(m(g.home)?.team||g.home)} vs ${teamPhoto(g.away,25)} ${esc(m(g.away)?.team||g.away)}</button>`).join('')}</div>
     <section class="card fa-match-surface" ontouchstart="matchupSwipeStart(event)" ontouchend="matchupSwipeEnd(event)"><div class="fa-head"><div>${teamPhoto(game.home,58)}<br><b>${esc(left?.team||'Team')}</b><div class="fa-total">${recorded?fmt(recorded.homeScore):'—'}</div></div><span>VS</span><div>${teamPhoto(game.away,58)}<br><b>${esc(right?.team||'Team')}</b><div class="fa-total">${recorded?fmt(recorded.awayScore):'—'}</div></div></div>
     ${byeTeams.length?`<p class="muted small">Bye: ${byeTeams.map(x=>esc(x.team||x.id)).join(', ')}</p>`:''}<p class="muted small">${recorded?(recorded.status==='final'?'Final · verified matchup result':'Provisional · not counted in standings'):'No recorded scores for this week'}</p>${cells}<p class="muted small" style="text-align:center">Swipe left or right to view other matchups</p></section><section class="card"><h3>League standings · verified finals only</h3><div style="overflow-x:auto"><table style="width:100%;text-align:left"><thead><tr><th>Team</th><th>W</th><th>L</th><th>T</th><th>PF</th></tr></thead><tbody>${(state.standings||[]).map(r=>`<tr><td>${esc(m(r.manager)?.team||r.manager)}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.ties}</td><td>${fmt(r.pointsFor)}</td></tr>`).join('')}</tbody></table></div></section>`;}
+function refreshChatDisplay(){
+  if(tab!=='Locker Room')return;
+  const list=$('chatList');
+  if(!list)return;
+  // Update the message list without replacing the form or its focused textarea.
+  const temporary=document.createElement('div');
+  temporary.innerHTML=chatView();
+  const nextList=temporary.querySelector('#chatList');
+  if(nextList&&list.innerHTML!==nextList.innerHTML){
+    const nearBottom=list.scrollHeight-list.scrollTop-list.clientHeight<90;
+    list.innerHTML=nextList.innerHTML;
+    if(nearBottom)list.scrollTop=list.scrollHeight;
+  }
+  // Moderation controls can change while the composer remains mounted.
+  const oldControls=document.querySelector('#chatModeration');
+  const newControls=temporary.querySelector('#chatModeration');
+  if(oldControls&&newControls&&oldControls.innerHTML!==newControls.innerHTML)oldControls.innerHTML=newControls.innerHTML;
+  const error=$('chatError');if(error)error.textContent=chatError;
+  const composer=$('chatForm');
+  if(composer&&chatMuted){
+    // A new mute must take effect immediately.
+    composer.replaceWith(document.createTextNode('You have been muted by the commissioner.'));
+  }
+}
 async function loadChat(){
   if(!token||!state||chatLoading)return;
   chatLoading=true;
   try{const r=await fetch('/api/chat',{headers:{Authorization:'Bearer '+token},cache:'no-store'});
     const d=await r.json();if(!r.ok)throw Error(d.error||'Chat unavailable');
+    const wasMuted=chatMuted;
     chatMessages=d.messages||[];chatMuted=!!d.muted;chatMutedManagers=d.mutedManagers||[];
     chatLastId=chatMessages.length?Number(chatMessages[chatMessages.length-1].id):0;
     chatError='';
     if(tab==='Locker Room'){
       chatSeenId=Math.max(chatSeenId,chatLastId);localStorage.setItem('audibleChatSeen',String(chatSeenId));
-    }
-    render();
-  }catch(e){chatError=e.message;if(tab==='Locker Room')render();}
+      if(wasMuted&&!chatMuted)render();else refreshChatDisplay();
+    }else updateChatTabBadge();
+  }catch(e){chatError=e.message;if(tab==='Locker Room')refreshChatDisplay();}
   finally{chatLoading=false;}
+}
+function updateChatTabBadge(){
+  const buttons=$('tabs')?.querySelectorAll('button');
+  if(!buttons)return;
+  for(const button of buttons){if(button.textContent.includes('Locker Room'))button.textContent=chatLastId>chatSeenId?'💬 Locker Room •':'Locker Room';}
 }
 function chatView(){
   const messages=chatMessages.map(x=>{
@@ -586,10 +616,10 @@ function chatView(){
     <button onclick='muteChatManager(${jsAttr(x.id)},${!chatMutedManagers.includes(x.id)})'>${chatMutedManagers.includes(x.id)?'Unmute':'Mute'}</button></div>`).join('')}</section>`:'';
   return `<h1>League Locker Room</h1><p class="muted small">Private league chat · Team names shown · Messages saved</p>
     <section class="card"><div class="fa-chat-list" id="chatList">${messages}</div>
-    ${chatError?`<p class="muted">${esc(chatError)}</p>`:''}
+    <p id="chatError" class="muted">${esc(chatError)}</p>
     ${chatMuted?'<p>You have been muted by the commissioner.</p>':`<form id="chatForm" onsubmit="sendChatMessage(event)">
       <textarea id="chatInput" maxlength="1000" rows="2" placeholder="Talk some trash..." oninput="chatDraft=this.value">${esc(chatDraft)}</textarea>
-      <button type="submit">Send message</button></form>`}</section>${controls}`;
+      <button type="submit">Send message</button></form>`}</section><div id="chatModeration">${controls}</div>`;
 }
 async function sendChatMessage(event){event.preventDefault();const value=$('chatInput')?.value.trim();if(!value)return;
   try{await apiPost('/api/chat',{message:value});chatDraft='';await loadChat();}
@@ -710,7 +740,7 @@ async function connect(){if(!token)return authForm();try{const response=await fe
     deadline=next.draft?.deadline??null,status=next.draft?.status??null;
     const changed=count!==previousPickCount||deadline!==previousDeadline||status!==previousStatus;
     previousPickCount=count;previousDeadline=deadline;previousStatus=status;
-    state=next;manager=state.viewer.manager;$('connection').textContent='● Live synced';render();
+    state=next;manager=state.viewer.manager;$('connection').textContent='● Live synced';if(tab==='Locker Room'){refreshChatDisplay();updateChatTabBadge();}else render();
     if(changed)syncServerClock();};
   events.onerror=()=>{$('connection').textContent='● Reconnecting…';};}
 setInterval(updateDraftClock,500);
