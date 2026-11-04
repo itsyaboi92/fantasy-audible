@@ -1,5 +1,5 @@
 let state=null,manager=null,tab='Home',token=localStorage.getItem('audibleToken');
-let chatMessages=[],chatMuted=false,chatMutedManagers=[],chatLastId=0,chatSeenId=Number(localStorage.getItem('audibleChatSeen')||0),chatLoading=false,chatError='',chatDraft='';
+let chatMessages=[],chatMuted=false,chatMutedManagers=[],chatLastId=0,chatSeenId=Number(localStorage.getItem('audibleChatSeen')||0),chatLoading=false,chatError='',chatDraft='',chatPendingGif=null;
 let matchupWeek=null,matchupIndex=0,matchupTouchX=null;
 let espn=null,espnError='',draftSearch='',draftPosition='ALL',loadingESPN=false;
 let weeklyDirectory={},weeklyUpdatedAt=null,weeklyLoading=false,weeklyLastFetch=0;
@@ -614,7 +614,7 @@ function chatView(){
     const team=m(x.manager)?.team||'Former manager';
     return `<div class="fa-chat-msg"><div class="fa-chat-head">${teamPhoto(x.manager,30)} <b>${esc(team)}</b> <span class="muted small">${esc(new Date(x.created_at).toLocaleString())}</span>
     ${state.viewer.commissioner?`<button class="fa-chat-small" onclick="deleteChatMessage(${Number(x.id)})">Delete</button>`:''}</div>
-    <div class="fa-chat-body">${esc(x.body)}</div></div>`;
+    <div class="fa-chat-body">${esc(x.body)}${x.has_media?`<div><img class="fa-chat-gif" src="/api/chat/media?id=${Number(x.id)}&token=${encodeURIComponent(token)}" alt="Animated GIF" loading="lazy"></div>`:''}</div></div>`;
   }).join('')||'<p class="muted">No messages yet. Start the trash talk!</p>';
   const controls=state.viewer.commissioner?`<section class="card"><h3>Commissioner moderation</h3>
     ${state.managers.filter(x=>x.claimed&&x.id!==manager).map(x=>`<div class="row"><span>${esc(x.team)}</span>
@@ -623,12 +623,43 @@ function chatView(){
     <section class="card"><div class="fa-chat-list" id="chatList">${messages}</div>
     <p id="chatError" class="muted">${esc(chatError)}</p>
     ${chatMuted?'<p>You have been muted by the commissioner.</p>':`<form id="chatForm" onsubmit="sendChatMessage(event)">
-      <textarea id="chatInput" maxlength="1000" rows="2" placeholder="Talk some trash..." oninput="chatDraft=this.value" onblur="setTimeout(()=>{refreshChatDisplay();updateChatTabBadge()},0)">${esc(chatDraft)}</textarea>
+      <textarea id="chatInput" maxlength="1000" rows="2" placeholder="Talk some trash..." onpaste="chatPaste(event)" oninput="chatDraft=this.value" onblur="setTimeout(()=>{refreshChatDisplay();updateChatTabBadge()},0)">${esc(chatDraft)}</textarea>
+      <div id="chatGifPreview"></div><label class="fa-chat-file-label">GIF file<input type="file" accept="image/gif" onchange="chatChooseGif(event)" style="display:none"></label>
       <button type="submit">Send message</button></form>`}</section><div id="chatModeration">${controls}</div>`;
 }
-async function sendChatMessage(event){event.preventDefault();const value=$('chatInput')?.value.trim();if(!value)return;
-  try{await apiPost('/api/chat',{message:value});chatDraft='';await loadChat();}
-  catch(e){toast(e.message);}}
+function chatPaste(event){
+  const items=Array.from(event.clipboardData?.items||[]);
+  const image=items.find(x=>x.type==='image/gif')||items.find(x=>x.type.startsWith('image/'));
+  if(!image)return;
+  event.preventDefault();
+  const file=image.getAsFile();
+  if(file)chatSetGif(file);
+}
+function chatChooseGif(event){const file=event.target.files?.[0];if(file)chatSetGif(file);}
+function chatSetGif(file){
+  if(file.type!=='image/gif'){toast('This keyboard provided a still image, not an animated GIF. Try copying a GIF file.');return;}
+  if(file.size>2*1024*1024){toast('GIF must be under 2 MB');return;}
+  chatPendingGif=file;
+  const preview=$('chatGifPreview');if(preview){
+    const url=URL.createObjectURL(file);
+    preview.innerHTML='<span class="muted small">GIF ready to send</span> <button type="button" onclick="chatClearGif()">Remove</button>';
+    const img=document.createElement('img');img.className='fa-chat-gif';img.alt='GIF preview';img.src=url;
+    img.onload=()=>URL.revokeObjectURL(url);preview.appendChild(img);
+  }
+}
+function chatClearGif(){chatPendingGif=null;const preview=$('chatGifPreview');if(preview)preview.replaceChildren();}
+function gifBase64(file){return new Promise((resolve,reject)=>{const reader=new FileReader();
+  reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=()=>reject(Error('Could not read GIF'));
+  reader.readAsDataURL(file);});}
+async function sendChatMessage(event){event.preventDefault();const value=$('chatInput')?.value.trim()||'';
+  if(!value&&!chatPendingGif)return;
+  const sendButton=$('chatForm')?.querySelector('button[type="submit"]');if(sendButton)sendButton.disabled=true;
+  try{
+    if(chatPendingGif){await apiPost('/api/chat/media',{mime:'image/gif',data:await gifBase64(chatPendingGif),caption:value});chatClearGif();}
+    else await apiPost('/api/chat',{message:value});
+    chatDraft='';const input=$('chatInput');if(input)input.value='';await loadChat();
+  }catch(e){toast(e.message);}finally{if(sendButton)sendButton.disabled=false;}
+}
 async function deleteChatMessage(id){if(!confirm('Delete this message?'))return;
   try{await apiPost('/api/chat/delete',{id});await loadChat();}catch(e){toast(e.message);}}
 async function muteChatManager(id,muted){
