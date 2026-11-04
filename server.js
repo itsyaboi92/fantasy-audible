@@ -815,6 +815,22 @@ async function api(req,res,route){
   if(req.method==='GET'&&route==='/api/espn/players'){
     try{const data=await draftPool();return send(res,200,{...data,count:data.players.length});}
     catch(e){return send(res,503,{error:'ESPN player data is not available yet',details:e.message});}}
+  if(req.method==='GET'&&route==='/api/nfl/week-matchups'){
+    const season=Number(url.searchParams.get('season')||current.state.nflDirectorySync?.season||process.env.NFL_SEASON||new Date().getUTCFullYear());
+    const week=Number(url.searchParams.get('week'));
+    if(!Number.isInteger(season)||season<2020||season>2100||!Number.isInteger(week)||week<1||week>18)
+      return send(res,400,{error:'Invalid NFL season or week'});
+    try{
+      const games=await liveNFL.loadWeek(season,week);
+      const teams={};
+      for(const game of games)for(const side of game.teams){
+        const opponent=game.teams.find(x=>x.id!==side.id);
+        teams[String(side.id)]={team:side.abbreviation,opponent:opponent?.abbreviation||null,
+          homeAway:side.homeAway,kickoff:game.kickoff,status:game.status,gameId:game.id};
+      }
+      return send(res,200,{season,week,teams,updatedAt:new Date().toISOString()});
+    }catch(e){return send(res,503,{error:'NFL weekly schedule unavailable',details:e.message});}
+  }
   if(req.method==='GET'&&route==='/api/players/weekly'){
     const weekly=current.state.nflWeeklyDirectory||{};
     return send(res,200,{season:current.state.nflSync?.season||null,
