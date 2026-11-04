@@ -692,6 +692,39 @@ async function api(req,res,route){
     res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache, no-transform',Connection:'keep-alive'});
     res.write('data: '+JSON.stringify(safeState(current.state,current.accounts,user))+'\n\n');
     clients.set(res,user.id);req.on('close',()=>clients.delete(res));return;}
+  // Tenor GIF picker proxy: keep the provider key on the server, never in public/app.js.
+  if(route==='/api/chat/tenor'&&req.method==='GET'){
+    const key=process.env.TENOR_API_KEY;
+    if(!key)return send(res,503,{error:'Tenor is not configured. Add TENOR_API_KEY in Render environment settings.'});
+    const query=String(url.searchParams.get('q')||'').trim().slice(0,80);
+    const endpoint=new URL('https://tenor.googleapis.com/v2/'+(query?'search':'featured'));
+    endpoint.searchParams.set('key',key);
+    endpoint.searchParams.set('client_key','fantasy_audible');
+    endpoint.searchParams.set('limit','18');
+    endpoint.searchParams.set('media_filter','gif,tinygif');
+    if(query)endpoint.searchParams.set('q',query);
+    try{
+      const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),6500);
+      let response;
+      try{response=await fetch(endpoint,{signal:controller.signal,headers:{Accept:'application/json'}});}
+      finally{clearTimeout(timeout);}
+      if(!response.ok)return send(res,502,{error:'Tenor search unavailable ('+response.status+'). Check the API key and API access.'});
+      const payload=await response.json();
+      const results=(Array.isArray(payload.results)?payload.results:[]).map(item=>{
+        const media=item.media_formats||{};
+        const gif=media.gif?.url||media.tinygif?.url;
+        const preview=media.tinygif?.url||gif;
+        if(!gif||!preview)return null;
+        try{
+          const valid=u=>{const parsed=new URL(u);return parsed.protocol==='https:'&&
+            (parsed.hostname==='media.tenor.com'||parsed.hostname==='c.tenor.com');};
+          if(!valid(gif)||!valid(preview))return null;
+        }catch{return null;}
+        return {id:String(item.id||''),title:String(item.content_description||'GIF').slice(0,120),url:gif,preview};
+      }).filter(Boolean);
+      return send(res,200,{results});
+    }catch{return send(res,502,{error:'Could not reach Tenor. Try again shortly.'});}
+  }
   // Private league chat. All endpoints require an active league account.
   if(route==='/api/chat'&&req.method==='GET'){
     const before=Number(url.searchParams.get('before')||0);
@@ -712,28 +745,9 @@ async function api(req,res,route){
       RETURNING id,manager,body,created_at`,[user.manager,message]);
     return send(res,201,{message:r.rows[0]});
   }
-  // Private GIF media: stored in PostgreSQL, never on Render's ephemeral filesystem.
-  if(route==='/api/chat/media'&&req.method==='POST'){
-    const body=await bodyOf(req,3000000);
-    const mime=String(body.mime||'');
-    if(mime!=='image/gif')return send(res,400,{error:'Only animated GIF files are supported'});
-    const encoded=String(body.data||'');
-    if(!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)||encoded.length>2800000)
-      return send(res,400,{error:'Invalid or oversized GIF'});
-    const bytes=Buffer.from(encoded,'base64');
-    if(bytes.length<20||bytes.length>2*1024*1024||
-      !['GIF87a','GIF89a'].includes(bytes.subarray(0,6).toString('ascii')))
-      return send(res,400,{error:'GIF must be under 2 MB'});
-    const mute=await pool.query('SELECT 1 FROM fantasy_audible_chat_mutes WHERE manager=$1',[user.manager]);
-    if(mute.rowCount)return send(res,403,{error:'You are muted by the commissioner'});
-    const caption=String(body.caption||'').trim().slice(0,1000);
-    const client=await pool.connect();
-    try{await client.query('BEGIN');
-      const result=await client.query(`INSERT INTO fantasy_audible_chat(manager,body) VALUES($1,$2) RETURNING id`,[user.manager,caption]);
-      await client.query('INSERT INTO fantasy_audible_chat_media(message_id,mime,bytes) VALUES($1,$2,$3)',[result.rows[0].id,mime,bytes]);
-      await client.query('COMMIT');return send(res,201,{ok:true});
-    }catch(e){await client.query('ROLLBACK');throw e;}finally{client.release();}
-  }
+  // Uploaded GIFs are disabled: use externally hosted Tenor GIFs instead.
+  if(route==='/api/chat/media'&&req.method==='POST')
+    return send(res,410,{error:'GIF uploads are disabled. Use the Tenor GIF picker.'});
   if(route==='/api/chat/media'&&req.method==='GET'){
     const id=Number(url.searchParams.get('id'));
     if(!Number.isSafeInteger(id)||id<1)return send(res,400,{error:'Invalid GIF'});
