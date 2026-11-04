@@ -559,8 +559,12 @@ function matchupView(){const week=selectedMatchupWeek(),games=state.matchupSched
     <div class="fa-match-strip">${games.map((g,i)=>`<button class="fa-match-pill ${i===matchupIndex?'active':''}" onclick="selectMatchup(${i})">${teamPhoto(g.home,25)} ${esc(m(g.home)?.team||g.home)} vs ${teamPhoto(g.away,25)} ${esc(m(g.away)?.team||g.away)}</button>`).join('')}</div>
     <section class="card fa-match-surface" ontouchstart="matchupSwipeStart(event)" ontouchend="matchupSwipeEnd(event)"><div class="fa-head"><div>${teamPhoto(game.home,58)}<br><b>${esc(left?.team||'Team')}</b><div class="fa-total">${recorded?fmt(recorded.homeScore):'—'}</div></div><span>VS</span><div>${teamPhoto(game.away,58)}<br><b>${esc(right?.team||'Team')}</b><div class="fa-total">${recorded?fmt(recorded.awayScore):'—'}</div></div></div>
     ${byeTeams.length?`<p class="muted small">Bye: ${byeTeams.map(x=>esc(x.team||x.id)).join(', ')}</p>`:''}<p class="muted small">${recorded?(recorded.status==='final'?'Final · verified matchup result':'Provisional · not counted in standings'):'No recorded scores for this week'}</p>${cells}<p class="muted small" style="text-align:center">Swipe left or right to view other matchups</p></section><section class="card"><h3>League standings · verified finals only</h3><div style="overflow-x:auto"><table style="width:100%;text-align:left"><thead><tr><th>Team</th><th>W</th><th>L</th><th>T</th><th>PF</th></tr></thead><tbody>${(state.standings||[]).map(r=>`<tr><td>${esc(m(r.manager)?.team||r.manager)}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.ties}</td><td>${fmt(r.pointsFor)}</td></tr>`).join('')}</tbody></table></div></section>`;}
+function chatComposerFocused(){
+  const composer=$('chatInput');
+  return !!(composer&&document.activeElement===composer);
+}
 function refreshChatDisplay(){
-  if(tab!=='Locker Room')return;
+  if(tab!=='Locker Room'||chatComposerFocused())return;
   const list=$('chatList');
   if(!list)return;
   // Update the message list without replacing the form or its focused textarea.
@@ -594,12 +598,13 @@ async function loadChat(){
     chatError='';
     if(tab==='Locker Room'){
       chatSeenId=Math.max(chatSeenId,chatLastId);localStorage.setItem('audibleChatSeen',String(chatSeenId));
-      if(wasMuted&&!chatMuted)render();else refreshChatDisplay();
+      if(wasMuted&&!chatMuted){if(!chatComposerFocused())render();}else refreshChatDisplay();
     }else updateChatTabBadge();
   }catch(e){chatError=e.message;if(tab==='Locker Room')refreshChatDisplay();}
   finally{chatLoading=false;}
 }
 function updateChatTabBadge(){
+  if(chatComposerFocused())return;
   const buttons=$('tabs')?.querySelectorAll('button');
   if(!buttons)return;
   for(const button of buttons){if(button.textContent.includes('Locker Room'))button.textContent=chatLastId>chatSeenId?'💬 Locker Room •':'Locker Room';}
@@ -618,7 +623,7 @@ function chatView(){
     <section class="card"><div class="fa-chat-list" id="chatList">${messages}</div>
     <p id="chatError" class="muted">${esc(chatError)}</p>
     ${chatMuted?'<p>You have been muted by the commissioner.</p>':`<form id="chatForm" onsubmit="sendChatMessage(event)">
-      <textarea id="chatInput" maxlength="1000" rows="2" placeholder="Talk some trash..." oninput="chatDraft=this.value">${esc(chatDraft)}</textarea>
+      <textarea id="chatInput" maxlength="1000" rows="2" placeholder="Talk some trash..." oninput="chatDraft=this.value" onblur="setTimeout(()=>{refreshChatDisplay();updateChatTabBadge()},0)">${esc(chatDraft)}</textarea>
       <button type="submit">Send message</button></form>`}</section><div id="chatModeration">${controls}</div>`;
 }
 async function sendChatMessage(event){event.preventDefault();const value=$('chatInput')?.value.trim();if(!value)return;
@@ -744,7 +749,7 @@ async function connect(){if(!token)return authForm();try{const response=await fe
     if(changed)syncServerClock();};
   events.onerror=()=>{$('connection').textContent='● Reconnecting…';};}
 setInterval(updateDraftClock,500);
-setInterval(()=>{if(token&&state&&!document.hidden)loadChat();},8000);
+setInterval(()=>{if(token&&state&&!document.hidden&&!chatComposerFocused())loadChat();},8000);
 setInterval(()=>{if(token&&state&&Date.now()-lastClockSync>30000)syncServerClock();},5000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&token&&state)syncServerClock();});
 connect();
