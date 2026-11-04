@@ -6,6 +6,11 @@ const { Pool } = require('pg');
 const { initializeESPN, getESPNPlayers } = require('./espn');
 const liveNFL = require('./live-nfl');
 const matchupAnalytics = require('./matchup-analytics');
+const webpush = require('web-push');
+const PUSH_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
+const PUSH_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
+const PUSH_READY = Boolean(PUSH_PUBLIC_KEY && PUSH_PRIVATE_KEY);
+if (PUSH_READY) webpush.setVapidDetails(process.env.VAPID_SUBJECT || 'mailto:admin@example.com', PUSH_PUBLIC_KEY, PUSH_PRIVATE_KEY);
 
 const PORT = process.env.PORT || 3000;
 const MAX_TEAMS = 12;
@@ -383,6 +388,9 @@ async function init(){await pool.query(`CREATE TABLE IF NOT EXISTS fantasy_audib
     mime TEXT NOT NULL, bytes BYTEA NOT NULL)`);
   await pool.query(`CREATE TABLE IF NOT EXISTS fantasy_audible_chat_mutes (
     manager TEXT PRIMARY KEY, muted_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS fantasy_audible_push (
+    endpoint TEXT PRIMARY KEY, manager TEXT NOT NULL, subscription JSONB NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW())`);
   await initializeESPN();}
 async function snapshot(){const r=await pool.query('SELECT state,accounts FROM fantasy_audible_store WHERE id=1');
   if(!r.rows.length)throw Error('Database not initialized');return r.rows[0];}
@@ -523,6 +531,16 @@ function recordPick(s,player,automatic=false){const d=ensureDraft(s),turn=curren
   return {ok:true,pick};}
 function eligibility(s,starter,bench){if(!starter||!bench||starter.owner!==bench.owner||
   starter.slot==='BENCH'||bench.slot!=='BENCH'||starter.pos!==bench.pos)return null;
+  // Real NFL schedule supersedes demo phase counters for drafted ESPN players.
+  if(starter.espnId&&bench.espnId){
+    const games=s.nflSync?.games||[];
+    const starterGame=games.find(g=>g.teams?.some(t=>String(t.id)===String(starter.nflTeamId)));
+    const benchGame=games.find(g=>g.teams?.some(t=>String(t.id)===String(bench.nflTeamId)));
+    if(!starterGame||!benchGame)return null; // Fail closed without authoritative games.
+    if(starterGame.id===benchGame.id)return bench.nflTeamId===starter.nflTeamId&&
+      starterGame.status==='live'?'handcuff':null;
+    return benchGame.status==='upcoming'&&Date.parse(benchGame.kickoff)>Date.now()?'later':null;
+  }
   if(starter.team===bench.team&&bench.kickoff<=s.phase)return 'handcuff';
   if(bench.kickoff>s.phase)return 'later';return null;}
 // Lineup moves are validated against the stored roster and game state.
@@ -736,6 +754,29 @@ async function api(req,res,route){
     return send(res,result.status||200,result);}
   const current=await snapshot(),user=findUser(req,current.accounts);
   if(!user)return send(res,401,{error:'Please sign in'});
+  if(req.method==='GET'&&route==='/api/push/config')
+    return send(res,200,{enabled:PUSH_READY,publicKey:PUSH_READY?PUSH_PUBLIC_KEY:null});
+  if(req.method==='POST'&&route==='/api/push/subscribe'){
+    if(!PUSH_READY)return send(res,503,{error:'Push is not configured on the server'});
+    const body=await bodyOf(req),sub=body.subscription;
+    if(!sub||typeof sub.endpoint!=='string'||!/^https:\/\//.test(sub.endpoint)||
+      sub.endpoint.length>2048||typeof sub.keys?.p256dh!=='string'||typeof sub.keys?.auth!=='string')
+      return send(res,400,{error:'Invalid push subscription'});
+    await pool.query(`INSERT INTO fantasy_audible_push(endpoint,manager,subscription) VALUES($1,$2,$3)
+      ON CONFLICT(endpoint) DO UPDATE SET manager=$2,subscription=$3`,[sub.endpoint,user.manager,JSON.stringify(sub)]);
+    return send(res,200,{ok:true});
+  }
+  if(req.method==='POST'&&route==='/api/push/unsubscribe'){
+    const body=await bodyOf(req);
+    if(typeof body.endpoint!=='string')return send(res,400,{error:'Invalid endpoint'});
+    await pool.query('DELETE FROM fantasy_audible_push WHERE endpoint=$1 AND manager=$2',[body.endpoint,user.manager]);
+    return send(res,200,{ok:true});
+  }
+  if(req.method==='POST'&&route==='/api/push/test'){
+    if(!PUSH_READY)return send(res,503,{error:'Push is not configured on the server'});
+    const result=await notifyManager(user.manager,{title:'Fantasy Audible test',body:'Push notifications are enabled.',url:'/'});
+    return send(res,result?200:409,result?{ok:true}:{error:'No active subscription or delivery failed'});
+  }
   if(req.method==='GET'&&route==='/api/state'){
     // One-time, non-destructive backfill for leagues drafted before auto-lineup existed.
     if(ensureDraft(current.state).status==='completed'&&
@@ -1317,6 +1358,91 @@ async function syncPlayerDirectory(){
   }catch(e){console.error('NFL player directory sync:',e.message);}
   finally{directorySyncBusy=false;}
 }
+// Web Push subscriptions are per device; failures remove expired endpoints.
+async function notifyManager(manager,payload){
+  if(!PUSH_READY)return false;
+  const r=await pool.query('SELECT endpoint,subscription FROM fantasy_audible_push WHERE manager=$1',[manager]);
+  let sent=false;
+  await Promise.all(r.rows.map(async row=>{
+    try{await webpush.sendNotification(row.subscription,JSON.stringify(payload),{TTL:300});sent=true;}
+    catch(e){if(e.statusCode===404||e.statusCode===410)
+      await pool.query('DELETE FROM fantasy_audible_push WHERE endpoint=$1',[row.endpoint]);
+      else console.error('Push delivery:',e.message);}
+  }));return sent;
+}
+const injuryStatuses=new Set(['QUESTIONABLE','DOUBTFUL','OUT','IR','INJURED_RESERVE']);
+let injuryPolling=false;
+async function pollLiveInjuries(){
+  if(injuryPolling)return;injuryPolling=true;
+  try{
+    const {state}=await snapshot();
+    if(ensureDraft(state).status!=='completed')return;
+    const games=await nflGames();
+    const liveTeams=new Set(games.filter(g=>g.state==='in'&&!g.completed).flatMap(g=>g.teams));
+    const starters=state.players.filter(p=>p.owner&&!['BENCH','IR'].includes(p.slot)&&p.espnId&&
+      liveTeams.has(String(p.nflTeamId||p.proTeamId||p.teamId||'')));
+    if(!starters.length)return;
+    const ids=new Set(starters.map(p=>String(p.espnId)));
+    const url=`https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${Number(process.env.ESPN_SEASON||2026)}/players?scoringPeriodId=0&view=kona_player_info`;
+    const response=await fetch(url,{headers:{Accept:'application/json',
+      'X-Fantasy-Filter':JSON.stringify({players:{limit:1500,offset:0}})},signal:AbortSignal.timeout(20000)});
+    if(!response.ok)throw Error('ESPN injury feed HTTP '+response.status);
+    const raw=await response.json(),entries=Array.isArray(raw)?raw:raw.players||[];
+    const statuses=new Map();for(const entry of entries){const p=entry.player||entry;
+      if(ids.has(String(p.id)))statuses.set(String(p.id),String(p.injuryStatus||'UNKNOWN').toUpperCase());}
+    if(!statuses.size)return;
+    const alerts=[];
+    await change(s=>{
+      s.injuryObservations=s.injuryObservations||{};
+      for(const player of s.players){if(!ids.has(String(player.espnId)))continue;
+        const status=statuses.get(String(player.espnId));if(!status)continue;
+        const previous=s.injuryObservations[player.id];
+        s.injuryObservations[player.id]=status;player.injuryStatus=status;
+        // Never treat a first observation as a new injury. Require a status transition
+        // while the player's game is live, preventing pre-existing injury false alerts.
+        if(!previous||previous===status||!injuryStatuses.has(status)||injuryStatuses.has(previous))continue;
+        if(s.injuries.some(i=>i.player===player.id&&i.active))continue;
+        const eligible=s.players.filter(b=>b.owner===player.owner&&eligibility(s,player,b));
+        if(!eligible.length)continue;
+        const event={id:crypto.randomUUID(),player:player.id,active:true,
+          description:`ESPN live injury designation: ${status}`,source:'ESPN',at:new Date().toISOString()};
+        s.injuries.push(event);
+        alerts.push({manager:player.owner,player:player.name,status,eventId:event.id});
+      }
+      return {ok:true};
+    });
+    for(const alert of alerts)await notifyManager(alert.manager,{title:`Injury alert: ${alert.player}`,
+      body:`${alert.status} during game. Review eligible substitution options.`,url:'/?tab=Notifications'});
+  }catch(e){console.error('Live injury monitoring:',e.message);}
+  finally{injuryPolling=false;}
+}
+let reminderBusy=false;
+async function remindPendingInjuries(){
+  if(reminderBusy)return;reminderBusy=true;
+  try{
+    const games=await nflGames(),now=Date.now(),alerts=[];
+    await change(s=>{
+      for(const injury of s.injuries||[]){
+        if(!injury.active||injury.reminderSent||injury.source!=='ESPN')continue;
+        const starter=s.players.find(p=>p.id===injury.player);
+        if(!starter)continue;
+        const next=s.players.filter(p=>p.owner===starter.owner&&p.slot==='BENCH'&&p.pos===starter.pos)
+          .map(p=>({player:p,game:games.find(g=>g.teams.includes(String(p.nflTeamId)))}))
+          .filter(x=>x.game?.state==='pre'&&Date.parse(x.game.kickoff)>now)
+          .sort((a,b)=>Date.parse(a.game.kickoff)-Date.parse(b.game.kickoff))[0];
+        if(!next)continue;
+        const until=Date.parse(next.game.kickoff)-now;
+        if(until>0&&until<=10*60000){injury.reminderSent=true;
+          alerts.push({manager:starter.owner,player:starter.name,replacement:next.player.name});}
+      }return {ok:true};
+    });
+    for(const a of alerts)await notifyManager(a.manager,{title:`Injury decision reminder: ${a.player}`,
+      body:`${a.replacement} kicks off soon. Review your substitution before kickoff.`,url:'/?tab=Notifications'});
+  }catch(e){console.error('Injury reminder:',e.message);}finally{reminderBusy=false;}
+}
+setInterval(remindPendingInjuries,60000);
+setInterval(pollLiveInjuries,120000);
+setTimeout(pollLiveInjuries,18000);
 setInterval(syncPlayerDirectory,15*60*1000);
 setTimeout(syncPlayerDirectory,12000);
 setInterval(activateLeagueSchedule,60000);
