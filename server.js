@@ -236,13 +236,13 @@ function settingsOf(s){
   };
 }
 function preferencesOf(s,id){return {...DEFAULT_PREFERENCES,...(s.draftPreferences?.[id]||{})};}
-// Deterministic round-robin schedule: all clients receive the same pairings.
-function fantasySchedule(s,accounts){
+// Schedule NFL weeks, not league-relative weeks. Odd team counts receive rotating byes.
+function fantasySchedule(s,accounts,startWeek=1){
   const ids=s.managers.filter(m=>accounts.some(a=>a.manager===m.id)).map(m=>m.id).sort((a,b)=>Number(a.slice(1))-Number(b.slice(1)));
   if(ids.length<2)return {};
   let rotation=[...ids];if(rotation.length%2)rotation.push(null);
-  const rounds=rotation.length-1, result={};
-  for(let week=1;week<=14;week++){
+  const rounds=rotation.length-1,result={};
+  for(let week=startWeek;week<=14;week++){
     const matches=[];
     for(let i=0;i<rotation.length/2;i++){
       const a=rotation[i],b=rotation[rotation.length-1-i];
@@ -253,6 +253,42 @@ function fantasySchedule(s,accounts){
   }
   return result;
 }
+// ESPN is authoritative for NFL week and the first kickoff, including Thursday games.
+async function currentNFLCalendar(){
+  const response=await fetch('https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?limit=100',
+    {signal:AbortSignal.timeout(9000)});
+  if(!response.ok)throw Error('NFL calendar HTTP '+response.status);
+  const data=await response.json();
+  const week=Number(data.week?.number),season=Number(data.season?.year);
+  if(!Number.isInteger(week)||week<1||week>18||!Number.isInteger(season)||!Array.isArray(data.events)||!data.events.length)
+    throw Error('NFL calendar missing week or games');
+  const kickoffs=data.events.map(g=>Date.parse(g.competitions?.[0]?.date||g.date)).filter(Number.isFinite);
+  if(!kickoffs.length)throw Error('NFL calendar missing kickoff times');
+  return {week,season,firstKickoff:Math.min(...kickoffs)};
+}
+let scheduleActivationBusy=false;
+async function activateLeagueSchedule(){
+  if(scheduleActivationBusy)return;scheduleActivationBusy=true;
+  try{
+    const {state}=await snapshot();
+    if(ensureDraft(state).status!=='completed'||state.frozenMatchupSchedule)return;
+    const calendar=await currentNFLCalendar();
+    const startWeek=calendar.week+(Date.now()>=calendar.firstKickoff?1:0);
+    await change((s,accounts)=>{
+      if(ensureDraft(s).status!=='completed'||s.frozenMatchupSchedule)return {ok:true};
+      if(startWeek>14){
+        s.matchupScheduleNotice='The regular-season scheduling window has ended; a new season is required.';
+        return {ok:true};
+      }
+      s.frozenMatchupSchedule=fantasySchedule(s,accounts,startWeek);
+      s.scheduleStartWeek=startWeek;s.scheduleSeason=calendar.season;s.week=startWeek;
+      delete s.matchupScheduleNotice;
+      audit(s,'MATCHUP_SCHEDULE_CREATED',null,'NFL Week '+startWeek+' through Week 14');
+      return {ok:true};
+    });
+  }catch(e){console.error('NFL schedule activation:',e.message);}
+  finally{scheduleActivationBusy=false;}
+}
 // Persisted week-specific ledger. Historical weeks are never inferred from today's roster.
 function ledgerScore(p){return Number(p.scoringMode==='handcuff'?(p.credited??0):p.points)||0;}
 function ledgerLineup(s,id){return s.players.filter(p=>p.owner===id&&!['BENCH','IR'].includes(p.slot)).map(p=>({id:p.id,name:p.name,team:p.team,pos:p.pos,slot:p.slot,status:p.status,points:ledgerScore(p),liveScoreStatus:p.liveScoreStatus||null}));}
@@ -260,7 +296,7 @@ function ledgerTotal(lineup){return Math.round(lineup.reduce((n,p)=>n+p.points,0
 function updateWeeklyLedger(s,accounts,week,games,failures){
   if(!Number.isInteger(week)||week<1||week>14)return;
   s.weeklyLedger ||= {};
-  const schedule=s.frozenMatchupSchedule ||= fantasySchedule(s,accounts);
+  const schedule=s.frozenMatchupSchedule||{};
   const matches=schedule[week]||[];
   const entry=s.weeklyLedger[week] ||= {week,createdAt:new Date().toISOString(),matchups:{}};
   const allFinal=games.length>0&&games.every(g=>g.status==='final')&&failures.length===0;
@@ -289,7 +325,7 @@ function leagueStandings(s,accounts){
   return Object.values(result).map(x=>({...x,pointsFor:Math.round(x.pointsFor*100)/100,pointsAgainst:Math.round(x.pointsAgainst*100)/100}))
     .sort((a,b)=>(b.wins+b.ties/2)/(b.wins+b.losses+b.ties||1)-(a.wins+a.ties/2)/(a.wins+a.losses+a.ties||1)||b.pointsFor-a.pointsFor);
 }
-function safeState(s,accounts,user){return {...s,matchupSchedule:s.frozenMatchupSchedule||fantasySchedule(s,accounts),standings:leagueStandings(s,accounts),settings:settingsOf(s),managers:s.managers.map(m=>({...m,
+function safeState(s,accounts,user){return {...s,matchupSchedule:s.frozenMatchupSchedule||{},standings:leagueStandings(s,accounts),settings:settingsOf(s),managers:s.managers.map(m=>({...m,
   claimed:accounts.some(a=>a.manager===m.id),
   ...(user.commissioner?{registeredEmail:accounts.find(a=>a.manager===m.id)?.email||null}: {})})),draftPreferences:{[user.manager]:preferencesOf(s,user.manager)},
   viewer:{manager:user.manager,commissioner:user.commissioner,name:user.name}};}
@@ -429,7 +465,7 @@ function recordPick(s,player,automatic=false){const d=ensureDraft(s),turn=curren
     nflTeamId:player.nflTeamId,acquisitionType:'DRAFT',lastAcquisitionType:'DRAFT'});
   audit(s,automatic?'AUTO_PICK':'DRAFT_PICK',turn.manager,player.name+' selected at pick '+overall);
   if(d.picks.length>=d.order.length){d.status='completed';d.deadline=null;d.remainingSeconds=null;
-    audit(s,'DRAFT_COMPLETE',null,'Draft completed');}else nextDeadline(d);
+    audit(s,'DRAFT_COMPLETE',null,'Draft completed');setTimeout(activateLeagueSchedule,0);}else nextDeadline(d);
   return {ok:true,pick};}
 function eligibility(s,starter,bench){if(!starter||!bench||starter.owner!==bench.owner||
   starter.slot==='BENCH'||bench.slot!=='BENCH'||starter.pos!==bench.pos)return null;
@@ -794,7 +830,8 @@ async function api(req,res,route){
       s.players=[];
       s.injuries=[];s.waiverClaims=[];s.waiverHolds={};s.waiverPriority=s.managers.map(m=>m.id);
       s.phase=0;
-      s.week=1;
+      s.week=1;delete s.frozenMatchupSchedule;delete s.scheduleStartWeek;delete s.scheduleSeason;
+      delete s.matchupScheduleNotice;delete s.weeklyLedger;
       // Remove draft-specific history while retaining non-draft audits.
       const draftEvents=new Set([
         'DRAFT_PICK','AUTO_PICK','DRAFT_STARTED','DRAFT_PAUSED',
@@ -964,8 +1001,11 @@ async function syncNFLScoring(){
   try{
     const {state}=await snapshot();
     const season=Number(process.env.NFL_SEASON||new Date().getUTCFullYear());
-    const week=Number(state.week);
-    if(!Number.isInteger(week)||week<1||week>18)return;
+    if(ensureDraft(state).status!=='completed'||!state.frozenMatchupSchedule)return;
+    const calendar=await currentNFLCalendar();
+    if(state.scheduleSeason&&calendar.season!==state.scheduleSeason)return;
+    const week=calendar.week;
+    if(week<Number(state.scheduleStartWeek||1)||week>14)return;
     const games=await liveNFL.loadWeek(season,week);
     const summaries=new Map(),failures=[];
     await Promise.all(games.filter(g=>g.status!=='upcoming').map(async g=>{
@@ -1003,6 +1043,7 @@ async function syncNFLScoring(){
         player.liveScoreStatus=calculated.unsupported.length?'PARTIAL':'UPDATED';
         player.liveScoreUpdatedAt=new Date().toISOString();changed++;
       }
+      s.week=week;
       updateWeeklyLedger(s,accounts,week,games,failures);
       s.nflSync={season,week,at:new Date().toISOString(),games:games.map(g=>({id:g.id,status:g.status,kickoff:g.kickoff,teams:g.teams})),failures,updatedPlayers:changed,warning:'Provisional: D/ST, play-level bonuses, field-goal distances, and injury substitutions remain unverified.'};
       return {ok:true};
@@ -1065,6 +1106,8 @@ async function syncPlayerDirectory(){
 }
 setInterval(syncPlayerDirectory,15*60*1000);
 setTimeout(syncPlayerDirectory,12000);
+setInterval(activateLeagueSchedule,60000);
+setTimeout(activateLeagueSchedule,3000);
 setInterval(syncNFLScoring,60000);
 setTimeout(syncNFLScoring,6000);
 let checkingWaivers=false;setInterval(async()=>{if(checkingWaivers)return;checkingWaivers=true;
