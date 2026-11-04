@@ -603,6 +603,47 @@ async function api(req,res,route){
       players:weekly,projectionStatus:'NOT_AVAILABLE',
       notice:'Weekly ESPN projections are not yet verified; unavailable projections are shown as —.'});
   }
+  if(req.method==='GET'&&route==='/api/players/history'){
+    const id=String(url.searchParams.get('id')||'');
+    if(!/^\d{1,12}$/.test(id))return send(res,400,{error:'Invalid player ID'});
+    try{
+      const pool=await draftPool();
+      const player=pool.players.find(x=>String(x.id)===id);
+      if(!player)return send(res,404,{error:'Player not found in ESPN directory'});
+      const season=Number(current.state.nflDirectorySync?.season||process.env.NFL_SEASON||new Date().getUTCFullYear());
+      const currentWeek=Math.min(18,Math.max(1,Number(current.state.nflDirectorySync?.currentWeek||1)));
+      const team=liveNFL.teamId(player);
+      if(!team)return send(res,200,{player:{id,name:player.name,position:player.position},season,weeks:[],notice:'No NFL team available'});
+      const key=`${season}:${currentWeek}:${team}:${id}:${JSON.stringify(settingsOf(current.state).scoring)}`;
+      const cached=playerHistoryCache.get(key);
+      if(cached&&Date.now()-cached.at<15*60*1000)return send(res,200,cached.value);
+      const boards=await Promise.all(Array.from({length:currentWeek},(_,i)=>i+1).map(async week=>{
+        try{return {week,games:await liveNFL.loadWeek(season,week)};}
+        catch(e){return {week,games:[],error:e.message};}
+      }));
+      const games=boards.flatMap(x=>x.games.map(g=>({...g,week:x.week})))
+        .filter(g=>g.status==='final'&&g.teams.some(t=>String(t.id)===String(team)));
+      const weeks=await Promise.all(games.map(async game=>{
+        try{
+          const stats=liveNFL.playerStats(await liveNFL.fetchGame(game.id));
+          const playerStats=stats.get(id);
+          if(!playerStats)return {week:game.week,gameId:game.id,status:'NO_STATS',opponent:game.teams.find(t=>String(t.id)!==String(team))?.abbreviation||null};
+          const result=liveNFL.scorePlayer(playerStats,settingsOf(current.state).scoring);
+          return {week:game.week,gameId:game.id,status:'final',opponent:game.teams.find(t=>String(t.id)!==String(team))?.abbreviation||null,
+            points:result.points,breakdown:result.breakdown,unsupported:result.unsupported,provisional:true};
+        }catch(e){return {week:game.week,gameId:game.id,status:'UNAVAILABLE',error:'Game statistics unavailable'};}
+      }));
+      weeks.sort((a,b)=>b.week-a.week);
+      const scored=weeks.filter(w=>w.status==='final');
+      const value={player:{id,name:player.name,position:player.position},season,weeks,
+        total:Math.round(scored.reduce((n,w)=>n+w.points,0)*100)/100,
+        average:scored.length?Math.round(scored.reduce((n,w)=>n+w.points,0)/scored.length*100)/100:null,
+        gamesPlayed:scored.length,partial:boards.some(b=>b.error)||weeks.some(w=>w.status!=='final')};
+      if(playerHistoryCache.size>250)playerHistoryCache.clear();
+      playerHistoryCache.set(key,{at:Date.now(),value});
+      return send(res,200,value);
+    }catch(e){return send(res,503,{error:'Player history unavailable',details:e.message});}
+  }
   if(req.method==='GET'&&route==='/api/transactions/players'){
     try{
       const games=await nflGames(),map=gameMapFrom(games),data=await draftPool();
@@ -892,6 +933,7 @@ async function syncNFLScoring(){
   }catch(e){console.error('NFL scoring sync:',e.message);}
   finally{scoringSyncBusy=false;}
 }
+const playerHistoryCache=new Map();
 // Independent player-directory game history. League state.week is not the NFL
 // calendar week: newly created leagues often remain on week 1.
 let directorySyncBusy=false;
