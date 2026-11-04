@@ -255,19 +255,18 @@ function fantasySchedule(s,accounts,startWeek=1){
 }
 // ESPN is authoritative for NFL week and the first kickoff, including Thursday games.
 async function currentNFLCalendar(){
-  const response=await fetch('https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?limit=100',
-    {signal:AbortSignal.timeout(9000)});
+  const base='https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard';
+  const response=await fetch(base+'?limit=100',{signal:AbortSignal.timeout(9000)});
   if(!response.ok)throw Error('NFL calendar HTTP '+response.status);
   const data=await response.json();
-  // ESPN has returned both top-level and event-level week metadata. Accept either.
   const events=Array.isArray(data.events)?data.events:[];
-  const week=Number(data.week?.number||events[0]?.week?.number);
   const season=Number(data.season?.year||events[0]?.season?.year);
+  // ESPN sometimes omits top-level week metadata. The calendar is allowed to
+  // fall back to event metadata, but never to the hard-coded demo league week.
+  const week=Number(data.week?.number||data.leagues?.[0]?.calendar?.find?.(x=>x?.value===data.week?.value)?.value||events.find(e=>e.week?.number)?.week?.number);
   if(!Number.isInteger(week)||week<1||week>18||!Number.isInteger(season))
-    throw Error('NFL calendar missing regular-season week metadata');
-  // Query the *specific* regular-season week, rather than assuming the default
-  // scoreboard's events belong to the advertised week.
-  const weekly=await fetch(`https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=${season}&seasontype=2&week=${week}&limit=100`,
+    throw Error('NFL calendar missing week/season metadata');
+  const weekly=await fetch(`${base}?dates=${season}&seasontype=2&week=${week}&limit=100`,
     {signal:AbortSignal.timeout(9000)});
   if(!weekly.ok)throw Error('NFL weekly schedule HTTP '+weekly.status);
   const weekData=await weekly.json();
@@ -275,28 +274,35 @@ async function currentNFLCalendar(){
   if(!kickoffs.length)throw Error('NFL calendar missing kickoff times for Week '+week);
   return {week,season,firstKickoff:Math.min(...kickoffs)};
 }
+function validSchedule(schedule){return schedule&&typeof schedule==='object'&&Object.values(schedule).some(v=>Array.isArray(v)&&v.length>0);}
 let scheduleActivationBusy=false;
 async function activateLeagueSchedule(){
   if(scheduleActivationBusy)return;scheduleActivationBusy=true;
   try{
     const {state}=await snapshot();
-    if(ensureDraft(state).status!=='completed'||state.frozenMatchupSchedule)return;
+    if(ensureDraft(state).status!=='completed'||validSchedule(state.frozenMatchupSchedule))return;
     const calendar=await currentNFLCalendar();
     const startWeek=calendar.week+(Date.now()>=calendar.firstKickoff?1:0);
     await change((s,accounts)=>{
-      if(ensureDraft(s).status!=='completed'||s.frozenMatchupSchedule)return {ok:true};
-      if(startWeek>14){
-        s.matchupScheduleNotice='The regular-season scheduling window has ended; a new season is required.';
-        return {ok:true};
-      }
-      s.frozenMatchupSchedule=fantasySchedule(s,accounts,startWeek);
+      if(ensureDraft(s).status!=='completed'||validSchedule(s.frozenMatchupSchedule))return {ok:true};
+      const count=s.managers.filter(m=>accounts.some(a=>a.manager===m.id)).length;
+      if(count<2){s.matchupScheduleNotice='Only '+count+' registered team(s) available for scheduling.';return {ok:true};}
+      if(startWeek>14){s.matchupScheduleNotice='The regular-season scheduling window has ended.';return {ok:true};}
+      const schedule=fantasySchedule(s,accounts,startWeek);
+      if(!validSchedule(schedule)){s.matchupScheduleNotice='Unable to pair registered teams; schedule not saved.';return {ok:true};}
+      s.frozenMatchupSchedule=schedule;
       s.scheduleStartWeek=startWeek;s.scheduleSeason=calendar.season;s.week=startWeek;
       delete s.matchupScheduleNotice;
       audit(s,'MATCHUP_SCHEDULE_CREATED',null,'NFL Week '+startWeek+' through Week 14');
+      console.log('MATCHUP_SCHEDULE_CREATED',JSON.stringify({startWeek,season:calendar.season,teams:count,matchups:schedule[startWeek].length}));
       return {ok:true};
     });
-  }catch(e){console.error('NFL schedule activation:',e.message);}
-  finally{scheduleActivationBusy=false;}
+  }catch(e){
+    console.error('NFL schedule activation:',e.stack||e.message);
+    // Expose a useful error to commissioner instead of silently polling forever.
+    try{await change(s=>{if(ensureDraft(s).status==='completed'&&!validSchedule(s.frozenMatchupSchedule))
+      s.matchupScheduleNotice='Scheduling failed: '+String(e.message||e).slice(0,180);return {ok:true};});}catch{}
+  }finally{scheduleActivationBusy=false;}
 }
 // Persisted week-specific ledger. Historical weeks are never inferred from today's roster.
 function ledgerScore(p){return Number(p.scoringMode==='handcuff'?(p.credited??0):p.points)||0;}
