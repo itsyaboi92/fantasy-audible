@@ -406,6 +406,78 @@ async function publishEditorial(){if(editorialBusy)return;editorialBusy=true;
     s.editorial=s.editorial.slice(0,48);return {ok:true};
   });}catch(e){console.error('Editorial publish:',e.message);}finally{editorialBusy=false;}
 }
+// v26: league-scoped Locker Room bot. This release still has one authenticated league;
+// its stable namespace prevents collisions and is ready for future per-league routing.
+const BOT_MANAGER='__the_audible__';
+function botLeagueId(s){return String(s.leagueId||'default').slice(0,100);}
+function botPick(key,options){const h=crypto.createHash('sha256').update(String(key)).digest();return options[h[0]%options.length];}
+function botSafeName(s,id){return editorialTeam(s,id).slice(0,80);}
+function botEditionText(edition){
+  const intro={recap:'🎙️ THE AUDIBLE | WEEKLY RECAP',rankings:'📊 THE AUDIBLE | POWER RANKINGS',preview:'🏈 THE AUDIBLE | MATCHUP PREVIEW',outlook:'🚨 THE AUDIBLE | SUNDAY OUTLOOK'};
+  const first=(edition.lines||[]).slice(0,3).join('\n');
+  return `${intro[edition.kind]||'🎙️ THE AUDIBLE'}\n${edition.title}\n${first}${edition.lines.length>3?'\nFull breakdown is on Home.':''}`.slice(0,1000);
+}
+function botEventText(s,event){
+  const manager=botSafeName(s,event.manager),details=String(event.details||'').slice(0,180);
+  switch(event.type){
+    case 'DRAFT_COMPLETE':return '🎙️ THE AUDIBLE: The draft is over. Every manager thinks they built a dynasty. At least one of them built a cautionary tale.';
+    case 'AUTO_PICK':return `🤖 THE AUDIBLE: ${manager} let autopick take the wheel. ${botPick(event.id,['Bold strategy. Let’s see if the algorithm can also coach.','The computer made the pick. The manager will still take credit.'])}`;
+    case 'SUBSTITUTION':return `🚑 THE AUDIBLE: ${manager} made an injury substitution. ${botPick(event.id,['The training room is officially part of the coaching staff.','Desperation? Strategy? We will know after the points settle.'])}`;
+    case 'RENAME':return `🪧 THE AUDIBLE: ${manager} changed the team name. ${botPick(event.id,['New branding. Same pressure to win.','A fresh coat of paint does not fix a bad lineup.'])}`;
+    case 'WAIVER_AWARDED':return `📋 THE AUDIBLE: ${manager} won a waiver claim. ${botPick(event.id,['The waiver wire is where optimism goes shopping.','A roster move with playoff-level confidence.'])}`;
+    case 'FREE_AGENT_ADD':return `🛒 THE AUDIBLE: ${manager} grabbed a free agent. ${botPick(event.id,['Either a steal or a future regret.','The bargain bin just got a headline.'])}`;
+    default:return null;
+  }
+}
+function botMatchupPosts(s){
+  const out=[];
+  for(const [week,record] of Object.entries(s.weeklyLedger||{})){
+    for(const m of Object.values(record.matchups||{})){
+      if(m.status!=='final'||!Number.isFinite(m.homeScore)||!Number.isFinite(m.awayScore))continue;
+      const margin=Math.abs(m.homeScore-m.awayScore),winner=m.homeScore===m.awayScore?null:m.homeScore>m.awayScore?m.home:m.away;
+      const loser=winner==null?null:winner===m.home?m.away:m.home;
+      const label=winner?`${botSafeName(s,winner)} over ${botSafeName(s,loser)}`:`${botSafeName(s,m.home)} and ${botSafeName(s,m.away)} tied`;
+      let remark;
+      if(!winner)remark='Nobody won. Somehow both teams still have to live with it.';
+      else if(margin>=40)remark=botPick(m.id,['That was not a matchup. That was a public demonstration.','Someone should have invoked the mercy rule.']);
+      else if(margin<=3)remark=botPick(m.id,['That finish needed a heart monitor.','One bad lineup decision away from a different headline.']);
+      else remark=botPick(m.id,['The scoreboard has spoken. The excuses are next.','A win is a win. The group chat will be unbearable.']);
+      out.push({key:`final:${week}:${m.id}`,body:`🏁 THE AUDIBLE | WEEK ${week}: ${label}, ${m.homeScore.toFixed(1)}–${m.awayScore.toFixed(1)}. ${remark}`});
+    }
+  }
+  return out;
+}
+let botBusy=false;
+async function publishLockerBot(){
+  if(botBusy)return;botBusy=true;
+  try{
+    const {state:s}=await snapshot(),leagueId=botLeagueId(s);
+    // New installations do not backfill years of historical transaction chatter.
+    await pool.query(`INSERT INTO fantasy_audible_bot_cursor(league_id,last_at)
+      VALUES($1,NOW()) ON CONFLICT(league_id) DO NOTHING`,[leagueId]);
+    const cursor=await pool.query('SELECT last_at FROM fantasy_audible_bot_cursor WHERE league_id=$1',[leagueId]);
+    const since=Date.parse(cursor.rows[0].last_at);
+    const posts=[];
+    for(const edition of s.editorial||[])posts.push({key:`edition:${edition.id}`,body:botEditionText(edition)});
+    for(const tx of s.transactions||[]){if(Date.parse(tx.at)<=since)continue;
+      const body=botEventText(s,tx);if(body)posts.push({key:`event:${tx.id}`,body});}
+    // Only final scores; skip retroactive historic matchups on initial deployment.
+    for(const post of botMatchupPosts(s)){
+      const parts=post.key.split(':'),m=s.weeklyLedger?.[parts[1]]?.matchups?.[parts.slice(2).join(':')];
+      if(m&&Date.parse(m.updatedAt)>since)posts.push(post);
+    }
+    const client=await pool.connect();
+    try{await client.query('BEGIN');
+      for(const post of posts.slice(0,120))await client.query(`WITH inserted AS (
+        INSERT INTO fantasy_audible_bot_events(league_id,event_key) VALUES($1,$2)
+        ON CONFLICT DO NOTHING RETURNING event_key)
+        INSERT INTO fantasy_audible_chat(league_id,manager,body)
+        SELECT $1,$3,$4 FROM inserted`,[leagueId,post.key,BOT_MANAGER,post.body.slice(0,1000)]);
+      await client.query('UPDATE fantasy_audible_bot_cursor SET last_at=NOW() WHERE league_id=$1',[leagueId]);
+      await client.query('COMMIT');
+    }catch(e){await client.query('ROLLBACK');throw e;}finally{client.release();}
+  }catch(e){console.error('Locker Room bot:',e.message);}finally{botBusy=false;}
+}
 function safeState(s,accounts,user){return {...s,editorial:(s.editorial||[]).slice(0,48),matchupSchedule:s.frozenMatchupSchedule||{},standings:leagueStandings(s,accounts),settings:settingsOf(s),managers:s.managers.map(m=>({...m,
   claimed:accounts.some(a=>a.manager===m.id),
   ...(user.commissioner?{registeredEmail:accounts.find(a=>a.manager===m.id)?.email||null}: {})})),draftPreferences:{[user.manager]:preferencesOf(s,user.manager)},
@@ -443,6 +515,12 @@ async function init(){await pool.query(`CREATE TABLE IF NOT EXISTS fantasy_audib
     id BIGSERIAL PRIMARY KEY, manager TEXT NOT NULL, body TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), deleted_at TIMESTAMPTZ,
     deleted_by TEXT)`);
+  await pool.query(`ALTER TABLE fantasy_audible_chat ADD COLUMN IF NOT EXISTS league_id TEXT NOT NULL DEFAULT 'default'`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS fantasy_audible_bot_events (
+    league_id TEXT NOT NULL,event_key TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY(league_id,event_key))`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS fantasy_audible_bot_cursor (
+    league_id TEXT PRIMARY KEY,last_at TIMESTAMPTZ NOT NULL)`);
   await pool.query(`CREATE TABLE IF NOT EXISTS fantasy_audible_chat_media (
     message_id BIGINT PRIMARY KEY REFERENCES fantasy_audible_chat(id) ON DELETE CASCADE,
     mime TEXT NOT NULL, bytes BYTEA NOT NULL)`);
@@ -606,10 +684,30 @@ function eligibility(s,starter,bench){if(!starter||!bench||starter.owner!==bench
 // Lineup moves are validated against the stored roster and game state.
 function lineupLocked(s,player){
   if(!player)return true;
+  // ESPN players use their current NFL game, never the old demo phase or a
+  // stale `playing` status left behind by a previous weekly sync.
+  if(player.espnId || player.nflGame){
+    const teamId=String(player.nflTeamId||'');
+    const games=s.nflSync?.games||[];
+    const game=games.find(g=>g.teams?.some(t=>String(t.id)===teamId));
+    const syncedWeek=Number(s.nflSync?.week);
+    const activeWeek=Number(s.nflDirectorySync?.currentWeek||s.week);
+    const current=Number.isFinite(syncedWeek)&&syncedWeek===activeWeek;
+    if(current&&game){
+      const at=Date.parse(game.kickoff);
+      return !Number.isFinite(at)||Date.now()>=at||['live','final','completed'].includes(String(game.status).toLowerCase());
+    }
+    // A valid per-player current-week kickoff can also be used when the
+    // full-week sync has not arrived. Never trust an older week's status.
+    if(current&&player.nflGame?.kickoff){
+      const at=Date.parse(player.nflGame.kickoff);
+      if(Number.isFinite(at))return Date.now()>=at;
+    }
+    // Missing current-week game information must not permit an unsafe swap.
+    return true;
+  }
   if(['playing','injured','finished','final','completed'].includes(String(player.status).toLowerCase()))return true;
   if(player.kickoffAt){const at=Date.parse(player.kickoffAt);if(Number.isFinite(at)&&Date.now()>=at)return true;}
-  // Older demo entries have phase-based kickoff values. ESPN draft entries
-  // currently use 99 as a placeholder, not an actual NFL kickoff time.
   if(typeof player.kickoff==='number'&&player.kickoff!==99&&player.kickoff<=s.phase)return true;
   return false;
 }
@@ -866,8 +964,8 @@ async function api(req,res,route){
   // Private league chat. All endpoints require an active league account.
   if(route==='/api/chat'&&req.method==='GET'){
     const before=Number(url.searchParams.get('before')||0);
-    const values=[];let where='WHERE deleted_at IS NULL';
-    if(Number.isSafeInteger(before)&&before>0){values.push(before);where+=' AND id < $1';}
+    const values=[botLeagueId(current.state)];let where='WHERE deleted_at IS NULL AND league_id=$1';
+    if(Number.isSafeInteger(before)&&before>0){values.push(before);where+=' AND id < $2';}
     const r=await pool.query(`SELECT id,manager,body,created_at, EXISTS(SELECT 1 FROM fantasy_audible_chat_media cm WHERE cm.message_id=fantasy_audible_chat.id) AS has_media FROM fantasy_audible_chat ${where} ORDER BY id DESC LIMIT 100`,values);
     const muted=await pool.query('SELECT manager FROM fantasy_audible_chat_mutes');
     return send(res,200,{messages:r.rows.reverse(),muted:muted.rows.some(x=>x.manager===user.manager),
@@ -879,8 +977,8 @@ async function api(req,res,route){
       return send(res,400,{error:'Message must be 1–1000 characters'});
     const mute=await pool.query('SELECT 1 FROM fantasy_audible_chat_mutes WHERE manager=$1',[user.manager]);
     if(mute.rowCount)return send(res,403,{error:'You are muted by the commissioner'});
-    const r=await pool.query(`INSERT INTO fantasy_audible_chat(manager,body) VALUES($1,$2)
-      RETURNING id,manager,body,created_at`,[user.manager,message]);
+    const r=await pool.query(`INSERT INTO fantasy_audible_chat(league_id,manager,body) VALUES($1,$2,$3)
+      RETURNING id,manager,body,created_at`,[botLeagueId(current.state),user.manager,message]);
     return send(res,201,{message:r.rows[0]});
   }
   // Uploaded GIFs are disabled: use externally hosted GIPHY GIFs instead.
@@ -890,7 +988,7 @@ async function api(req,res,route){
     const id=Number(url.searchParams.get('id'));
     if(!Number.isSafeInteger(id)||id<1)return send(res,400,{error:'Invalid GIF'});
     const result=await pool.query(`SELECT cm.mime,cm.bytes FROM fantasy_audible_chat_media cm
-      JOIN fantasy_audible_chat c ON c.id=cm.message_id WHERE cm.message_id=$1 AND c.deleted_at IS NULL`,[id]);
+      JOIN fantasy_audible_chat c ON c.id=cm.message_id WHERE cm.message_id=$1 AND c.deleted_at IS NULL AND c.league_id=$2`,[id,botLeagueId(current.state)]);
     if(!result.rowCount)return send(res,404,{error:'GIF not found'});
     res.writeHead(200,{'Content-Type':'image/gif','Cache-Control':'private, max-age=120',
       'X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'none'; sandbox"});
@@ -901,7 +999,7 @@ async function api(req,res,route){
     const body=await bodyOf(req),id=Number(body.id);
     if(!Number.isSafeInteger(id)||id<1)return send(res,400,{error:'Invalid message ID'});
     const r=await pool.query(`UPDATE fantasy_audible_chat SET deleted_at=NOW(),deleted_by=$2
-      WHERE id=$1 AND deleted_at IS NULL RETURNING id`,[id,user.manager]);
+      WHERE id=$1 AND league_id=$3 AND deleted_at IS NULL RETURNING id`,[id,user.manager,botLeagueId(current.state)]);
     return send(res,r.rowCount?200:404,r.rowCount?{ok:true}:{error:'Message not found'});
   }
   if(route==='/api/chat/mute'&&req.method==='POST'){
@@ -1501,6 +1599,8 @@ async function remindPendingInjuries(){
   }catch(e){console.error('Injury reminder:',e.message);}finally{reminderBusy=false;}
 }
 setInterval(publishEditorial,5*60000);
+setInterval(publishLockerBot,60000);
+setTimeout(publishLockerBot,35000);
 setTimeout(publishEditorial,25000);
 setInterval(remindPendingInjuries,60000);
 setInterval(pollLiveInjuries,120000);
