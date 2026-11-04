@@ -535,6 +535,89 @@ async function saveLineup(){
   }catch(e){toast(e.message);}
   finally{lineupSaving=false;render();}
 }
+// v21: Optimize the whole lineup (including FLEX) with slot-mask dynamic programming.
+// No roster changes occur until the manager confirms and saves the preview.
+function optimizeProjectedLineup(){
+  const mine=state.players.filter(p=>p.owner===manager);
+  ensureLineupDraft(mine);
+  const slots=lineupSlots();
+  if(slots.length>20){toast('Too many starting slots for lineup optimization');return;}
+  const season=Number(state?.nflDirectorySync?.season||new Date().getFullYear());
+  const week=Math.min(18,Math.max(1,Number(state?.nflDirectorySync?.currentWeek||state?.week||1)));
+  const key=season+':'+week;
+  const metadata=nflPlayerMetaCache[key]?.data?.players;
+  if(!metadata){toast('Matchup projections are still loading. Try again shortly.');fetchNFLMatchups(week);return;}
+  const eligible=(player,position)=>position==='FLEX'?['RB','WR','TE'].includes(player.pos):player.pos===position;
+  const playerProjection=player=>{
+    const espnId=String(player.espnId||String(player.id||'').replace(/^espn-/,''));
+    const value=metadata[espnId]?.weeklyProjectedPoints;
+    return value==null||!Number.isFinite(Number(value))?null:Math.max(0,Number(value));
+  };
+  // Preserve each existing locked starter in the exact slot; a bench player
+  // whose game started cannot be moved into the starting lineup.
+  const fixed={};const fixedIds=new Set();
+  for(const slot of slots){
+    const id=currentLineup(mine)[slot.key];
+    const player=mine.find(p=>p.id===id);
+    if(player&&(player.scoringMode||player.scoreAtSwap!==undefined||
+      state.injuries?.some(i=>i.active&&i.player===player.id)||playerGameLocked(player))){
+      fixed[slot.key]=player.id;fixedIds.add(player.id);
+    }
+  }
+  const available=mine.filter(p=>p.slot!=='IR'&&!fixedIds.has(p.id)&&!playerGameLocked(p)&&
+    !p.scoringMode&&p.scoreAtSwap===undefined&&!state.injuries?.some(i=>i.active&&i.player===p.id)&&
+    !['OUT','IR','INJURED_RESERVE','PUP','NFI'].includes(String(p.injuryStatus||'').toUpperCase())&&
+    playerProjection(p)!==null);
+  const open=slots.filter(slot=>!(slot.key in fixed));
+  // DP assigns at most one slot to each player, maximizing the global total.
+  let dp=new Map([[0,{score:0,assign:{}}]]);
+  for(const player of available){
+    const next=new Map(dp);const projected=playerProjection(player);
+    for(const [mask,entry] of dp){
+      for(let i=0;i<open.length;i++){
+        if(mask&(1<<i)||!eligible(player,open[i].position))continue;
+        const newMask=mask|(1<<i),newScore=entry.score+projected;
+        if(!next.has(newMask)||newScore>next.get(newMask).score+1e-8)
+          next.set(newMask,{score:newScore,assign:{...entry.assign,[open[i].key]:player.id}});
+      }
+    }
+    dp=next;
+  }
+  // Prefer filling every possible slot, then maximize projected points.
+  let best=null,bestCount=-1;
+  for(const [mask,entry] of dp){
+    const count=mask.toString(2).replace(/0/g,'').length;
+    if(count>bestCount||(count===bestCount&&(!best||entry.score>best.score))){best=entry;bestCount=count;}
+  }
+  const proposed=Object.fromEntries(slots.map(slot=>[slot.key,fixed[slot.key]||best?.assign[slot.key]||null]));
+  const total=lineup=>Object.values(lineup).reduce((sum,id)=>sum+(id?playerProjection(mine.find(p=>p.id===id)||{})||0:0),0);
+  const before=total(lineupDraft),after=total(proposed);
+  const changes=slots.filter(slot=>lineupDraft[slot.key]!==proposed[slot.key]).map(slot=>{
+    const from=mine.find(p=>p.id===lineupDraft[slot.key]);
+    const to=mine.find(p=>p.id===proposed[slot.key]);
+    return `${slot.position} ${slot.index+1}: ${from?.name||'Empty'} → ${to?.name||'Empty'}`;
+  });
+  if(!changes.length){toast('Your starting lineup is already optimized for available projections.');return;}
+  const message=`Current projected: ${fmt(before)} pts\nOptimized projected: ${fmt(after)} pts\nChange: ${after>=before?'+':''}${fmt(after-before)} pts\n\n${changes.join('\n')}\n\nPreview these changes? You will still need to select Save Starting Lineup.`;
+  if(!confirm(message))return;
+  lineupDraft=proposed;lineupDirty=true;render();
+  toast('Optimized lineup preview ready. Save to apply.');
+}
+function playerGameLocked(player){
+  if(['playing','injured','finished','final','completed'].includes(String(player.status||'').toLowerCase()))return true;
+  if(player.kickoffAt&&Number.isFinite(Date.parse(player.kickoffAt))&&Date.parse(player.kickoffAt)<=Date.now())return true;
+  if(typeof player.kickoff==='number'&&player.kickoff!==99&&player.kickoff<=state.phase)return true;
+  const season=Number(state?.nflDirectorySync?.season||new Date().getFullYear());
+  const week=Math.min(18,Math.max(1,Number(state?.nflDirectorySync?.currentWeek||state?.week||1)));
+  const key=season+':'+week;
+  const espnId=String(player.espnId||String(player.id||'').replace(/^espn-/,''));
+  const meta=nflPlayerMetaCache[key]?.data?.players?.[espnId];
+  const team=String(meta?.teamId||player.nflTeamId||player.team||'').toUpperCase();
+  const teamId=/^\d+$/.test(team)?team:NFL_TEAM_IDS[team];
+  const game=nflMatchupCache[key]?.data?.teams?.[teamId];
+  // Fail closed for uncertain kickoff data: server independently validates locks.
+  return !!(game?.kickoff&&Date.parse(game.kickoff)<=Date.now());
+}
 function rosterMatchupDetails(p){
   const season=Number(state?.nflDirectorySync?.season||new Date().getFullYear());
   const week=Math.min(18,Math.max(1,Number(state?.nflDirectorySync?.currentWeek||state?.week||1)));
@@ -581,7 +664,7 @@ function lineupManager(mine){
   const irRows=ir.map(p=>`<div class="row"><span>${esc(p.name)} · ${esc(p.pos)}
     ${injuryLabel(p.injuryStatus)}${rosterMatchupDetails(p)}</span>
     <button onclick="moveToSection(${jsAttr(p.id)},'BENCH')">Move to bench</button></div>`).join('');
-  return card('Set starting lineup',`<p class="muted small">Choose all your starters, then save once. Selecting a player in a different slot removes their earlier selection. Game locks are enforced by the server.</p>
+  return card('Set starting lineup',`<div class="actions"><button onclick="optimizeProjectedLineup()" ${lineupSaving?'disabled':''}>⚡ Maximize Projected Points</button></div><p class="muted small">Preview an optimized starting lineup using available weekly projections. Locked players remain in place. Confirm the preview, then save to apply.</p><p class="muted small">Choose all your starters, then save once. Selecting a player in a different slot removes their earlier selection. Game locks are enforced by the server.</p>
     ${rows}
     <div class="actions"><button onclick="saveLineup()" ${!lineupDirty||lineupSaving?'disabled':''}>
       ${lineupSaving?'Saving…':'Save Starting Lineup'+(lineupDirty?' *':'')}</button>
