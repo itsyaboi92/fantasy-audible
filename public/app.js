@@ -623,7 +623,7 @@ async function manageLeagueMember(managerId,terminate){
 function leagueMembersUI(){
   const rows=state.managers.filter(x=>x.id!==manager).map(x=>{
     const status=x.claimed?'Manager registered':'Vacant team — available for replacement';
-    return `<div class="row"><div><b>${esc(x.team)}</b><div class="muted small">${esc(status)}</div></div>
+    return `<div class="row"><div><b>${esc(x.team)}</b><div class="muted small">${esc(status)}</div><div class="muted small">Registered email: ${x.registeredEmail?esc(x.registeredEmail):'Not provided'}</div></div>
       <div class="actions">${x.claimed?`<button onclick='manageLeagueMember(${jsAttr(x.id)},false)'>Remove Manager</button>`:''}
       <button style="background:#a32121;color:white" onclick='manageLeagueMember(${jsAttr(x.id)},true)'>Terminate Roster</button></div></div>`;
   }).join('');
