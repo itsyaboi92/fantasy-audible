@@ -122,7 +122,7 @@ async function loadWeeklyDirectory(force=false){
     weeklyUpdatedAt=data.updatedAt||null;
     weeklyLastFetch=Date.now();
   }catch(e){weeklyLastFetch=Date.now();console.warn('Weekly player directory:',e.message);}
-  finally{weeklyLoading=false;if(tab==='Players')render();}
+  finally{weeklyLoading=false;if(tab==='Players'||tab==='My Team')render();}
 }
 function playerNextProjection(x){
   const season=Number(state?.nflDirectorySync?.season||new Date().getFullYear());
@@ -535,6 +535,28 @@ async function saveLineup(){
   }catch(e){toast(e.message);}
   finally{lineupSaving=false;render();}
 }
+function rosterMatchupDetails(p){
+  const season=Number(state?.nflDirectorySync?.season||new Date().getFullYear());
+  const week=Math.min(18,Math.max(1,Number(state?.nflDirectorySync?.currentWeek||state?.week||1)));
+  const key=season+':'+week;
+  const espnId=String(p.espnId||String(p.id||'').replace(/^espn-/,''));
+  const meta=nflPlayerMetaCache[key]?.data?.players?.[espnId];
+  const team=String(meta?.teamId||p.nflTeamId||p.team||'').toUpperCase();
+  const teamId=/^\d+$/.test(team)?team:NFL_TEAM_IDS[team];
+  const game=nflMatchupCache[key]?.data?.teams?.[teamId];
+  const loaded=!!nflMatchupCache[key];
+  const opponent=game?.opponent?(game.homeAway==='home'?'vs ':'@ ')+game.opponent:(loaded?'Bye / no matchup':'Matchup loading…');
+  const kickoff=game?.kickoff&&!Number.isNaN(Date.parse(game.kickoff))?new Date(game.kickoff).toLocaleString(undefined,{weekday:'short',hour:'numeric',minute:'2-digit'}):null;
+  const projection=meta?.weeklyProjectedPoints==null?null:Number(meta.weeklyProjectedPoints);
+  const rank=meta?.oprk==null?null:Number(meta.oprk);
+  const rankLabel=Number.isInteger(rank)&&rank>=1&&rank<=32?rank+' / 32':'—';
+  // Lower OPRK is tougher; high OPRK is a more favorable matchup.
+  const strength=Number.isInteger(rank)&&rank>=1&&rank<=32?(rank<=10?'Difficult':rank>=23?'Easy':'Average'):'Unrated';
+  const live=weeklyDirectory[espnId]?.gameStatus==='playing'?Number(weeklyDirectory[espnId].points):null;
+  return `<div class="muted small">Next: ${esc(opponent)}${kickoff?' · '+esc(kickoff):''} · Wk ${week}</div>
+    <div class="muted small">Projected PPR: ${game?.status==='final'?'—':Number.isFinite(projection)&&projection>=0?fmt(projection)+' est.':'—'} · OPRK: ${rankLabel} · ${strength}</div>
+    ${live!==null&&Number.isFinite(live)?`<div class="muted small">Live: ${fmt(live)} pts</div>`:''}`;
+}
 function lineupManager(mine){
   ensureLineupDraft(mine);
   const roster=state.settings?.roster||{bench:7,ir:1};
@@ -542,7 +564,7 @@ function lineupManager(mine){
     const selected=lineupDraft[key];
     const choices=mine.filter(p=>p.slot!=='IR'&&
       (position==='FLEX'?['RB','WR','TE'].includes(p.pos):p.pos===position));
-    return `<div class="row"><div><b>${esc(position)} ${index+1}</b></div>
+    return `<div class="row"><div><b>${esc(position)} ${index+1}</b>${selected?rosterMatchupDetails(mine.find(p=>String(p.id)===String(selected))||{}):''}</div>
       <select style="max-width:70%;min-width:170px" onchange="updateLineupSelection(${jsAttr(key)},this.value)">
         <option value="" ${!selected?'selected':''}>Empty starting slot</option>
         ${choices.map(p=>`<option value="${esc(p.id)}" ${selected===p.id?'selected':''}>
@@ -552,12 +574,12 @@ function lineupManager(mine){
   const bench=mine.filter(p=>p.slot==='BENCH');
   const ir=mine.filter(p=>p.slot==='IR');
   const benchRows=bench.map(p=>`<div class="row"><span>${esc(p.name)} · ${esc(p.pos)}
-    ${injuryLabel(p.injuryStatus)}</span>
+    ${injuryLabel(p.injuryStatus)}${rosterMatchupDetails(p)}</span>
     ${['OUT','IR','INJURED_RESERVE','PUP','NFI'].includes(String(p.injuryStatus||'').toUpperCase())?
       `<button onclick="moveToSection(${jsAttr(p.id)},'IR')">Move to IR</button>`:''}
     ${draftData().status==='completed'?`<button onclick="dropRosterPlayer(${jsAttr(p.id)})">Drop</button>`:''}</div>`).join('');
   const irRows=ir.map(p=>`<div class="row"><span>${esc(p.name)} · ${esc(p.pos)}
-    ${injuryLabel(p.injuryStatus)}</span>
+    ${injuryLabel(p.injuryStatus)}${rosterMatchupDetails(p)}</span>
     <button onclick="moveToSection(${jsAttr(p.id)},'BENCH')">Move to bench</button></div>`).join('');
   return card('Set starting lineup',`<p class="muted small">Choose all your starters, then save once. Selecting a player in a different slot removes their earlier selection. Game locks are enforced by the server.</p>
     ${rows}
@@ -588,7 +610,7 @@ async function fetchNFLMatchups(week){
       if(meta.ok)nflPlayerMetaCache[key]={at:Date.now(),data:await meta.json()};
     }catch(e){console.warn('NFL player metadata:',e.message);}
   }catch(e){console.warn('NFL matchup metadata:',e.message);nflMatchupCache[key]={at:Date.now(),data:{teams:{}}};}
-  finally{nflMatchupPending.delete(key);if((tab==='Matchup'||tab==='Players')&&selectedMatchupWeek()===week)render();}
+  finally{nflMatchupPending.delete(key);if((tab==='Matchup'||tab==='Players'||tab==='My Team')&&(tab==='My Team'||selectedMatchupWeek()===week))render();}
 }
 function nflPlayerGame(x){
   const week=selectedMatchupWeek(),season=Number(state?.nflDirectorySync?.season||new Date().getFullYear());
@@ -933,6 +955,7 @@ function leagueTeamRosterView(){
 }
 function changeTab(next){if(next==='Matchup'&&tab!=='Matchup'){matchupWeek=null;matchupIndex=0;}tab=next;render();if(tab==='Draft')syncServerClock();
   if(tab==='Draft'||tab==='Players')loadESPN();
+  if(tab==='My Team'){loadWeeklyDirectory();fetchNFLMatchups(Math.min(18,Math.max(1,Number(state?.nflDirectorySync?.currentWeek||state?.week||1))));}
   if(tab==='Players'){loadWeeklyDirectory();fetchNFLMatchups(Math.min(18,Math.max(1,Number(state?.nflDirectorySync?.currentWeek||state?.week||selectedMatchupWeek()))));}
   if(tab==='Matchup')fetchNFLMatchups(selectedMatchupWeek());
   if(tab==='Players'||tab==='My Waivers')loadTransactions();
