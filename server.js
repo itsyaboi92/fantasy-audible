@@ -692,38 +692,11 @@ async function api(req,res,route){
     res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache, no-transform',Connection:'keep-alive'});
     res.write('data: '+JSON.stringify(safeState(current.state,current.accounts,user))+'\n\n');
     clients.set(res,user.id);req.on('close',()=>clients.delete(res));return;}
-  // Tenor GIF picker proxy: keep the provider key on the server, never in public/app.js.
-  if(route==='/api/chat/tenor'&&req.method==='GET'){
-    const key=process.env.TENOR_API_KEY;
-    if(!key)return send(res,503,{error:'Tenor is not configured. Add TENOR_API_KEY in Render environment settings.'});
-    const query=String(url.searchParams.get('q')||'').trim().slice(0,80);
-    const endpoint=new URL('https://tenor.googleapis.com/v2/'+(query?'search':'featured'));
-    endpoint.searchParams.set('key',key);
-    endpoint.searchParams.set('client_key','fantasy_audible');
-    endpoint.searchParams.set('limit','18');
-    endpoint.searchParams.set('media_filter','gif,tinygif');
-    if(query)endpoint.searchParams.set('q',query);
-    try{
-      const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),6500);
-      let response;
-      try{response=await fetch(endpoint,{signal:controller.signal,headers:{Accept:'application/json'}});}
-      finally{clearTimeout(timeout);}
-      if(!response.ok)return send(res,502,{error:'Tenor search unavailable ('+response.status+'). Check the API key and API access.'});
-      const payload=await response.json();
-      const results=(Array.isArray(payload.results)?payload.results:[]).map(item=>{
-        const media=item.media_formats||{};
-        const gif=media.gif?.url||media.tinygif?.url;
-        const preview=media.tinygif?.url||gif;
-        if(!gif||!preview)return null;
-        try{
-          const valid=u=>{const parsed=new URL(u);return parsed.protocol==='https:'&&
-            (parsed.hostname==='media.tenor.com'||parsed.hostname==='c.tenor.com');};
-          if(!valid(gif)||!valid(preview))return null;
-        }catch{return null;}
-        return {id:String(item.id||''),title:String(item.content_description||'GIF').slice(0,120),url:gif,preview};
-      }).filter(Boolean);
-      return send(res,200,{results});
-    }catch{return send(res,502,{error:'Could not reach Tenor. Try again shortly.'});}
+  // GIPHY Web API key is delivered to authenticated clients; GIPHY requires client-side searches.
+  if(route==='/api/chat/giphy/config'&&req.method==='GET'){
+    const key=String(process.env.GIPHY_API_KEY||'').trim();
+    if(!key)return send(res,503,{error:'GIPHY is not configured. Add GIPHY_API_KEY in Render environment settings.'});
+    return send(res,200,{apiKey:key});
   }
   // Private league chat. All endpoints require an active league account.
   if(route==='/api/chat'&&req.method==='GET'){
@@ -745,9 +718,9 @@ async function api(req,res,route){
       RETURNING id,manager,body,created_at`,[user.manager,message]);
     return send(res,201,{message:r.rows[0]});
   }
-  // Uploaded GIFs are disabled: use externally hosted Tenor GIFs instead.
+  // Uploaded GIFs are disabled: use externally hosted GIPHY GIFs instead.
   if(route==='/api/chat/media'&&req.method==='POST')
-    return send(res,410,{error:'GIF uploads are disabled. Use the Tenor GIF picker.'});
+    return send(res,410,{error:'GIF uploads are disabled. Use the GIPHY GIF picker.'});
   if(route==='/api/chat/media'&&req.method==='GET'){
     const id=Number(url.searchParams.get('id'));
     if(!Number.isSafeInteger(id)||id<1)return send(res,400,{error:'Invalid GIF'});
