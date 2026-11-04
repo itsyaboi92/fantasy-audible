@@ -1,4 +1,4 @@
-let state=null,manager=null,tab='Home',token=localStorage.getItem('audibleToken');
+let state=null,manager=null,tab=new URLSearchParams(location.search).get('tab')==='Notifications'?'Notifications':'Home',token=localStorage.getItem('audibleToken');
 let chatMessages=[],chatMuted=false,chatMutedManagers=[],chatLastId=0,chatSeenId=Number(localStorage.getItem('audibleChatSeen')||0),chatLoading=false,chatError='',chatDraft='',chatPendingGif=null,giphyOpen=false,giphyResults=[],giphyQuery='',giphyError='',giphyBusy=false,giphyRequest=0;
 let matchupWeek=null,matchupIndex=0,matchupTouchX=null;
 let viewedLeagueTeamId=null;
@@ -43,6 +43,28 @@ const score=x=>x.scoringMode==='handcuff'?(x.credited??0):x.points;
 const total=id=>state.players.filter(x=>x.owner===id&&!['BENCH','IR'].includes(x.slot))
   .reduce((sum,x)=>sum+score(x),0);
 const card=(title,body)=>`<section class="card"><h2>${title}</h2>${body}</section>`;
+async function enablePush(){
+  try{
+    if(!('serviceWorker' in navigator)||!('PushManager' in window)||!('Notification' in window))
+      throw Error('This browser does not support Web Push. On iPhone, install Fantasy Audible to your Home Screen.');
+    const config=await fetch('/api/push/config',{headers:{Authorization:'Bearer '+token}}).then(r=>r.json());
+    if(!config.enabled)throw Error('Server push keys are not configured yet.');
+    const permission=await Notification.requestPermission();
+    if(permission!=='granted')throw Error('Notification permission was not granted.');
+    const registration=await navigator.serviceWorker.register('/sw.js');
+    const key=Uint8Array.from(atob(config.publicKey.replace(/-/g,'+').replace(/_/g,'/')),c=>c.charCodeAt(0));
+    let subscription=await registration.pushManager.getSubscription();
+    if(!subscription)subscription=await registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:key});
+    await apiPost('/api/push/subscribe',{subscription:subscription.toJSON()});
+    toast('Injury push notifications enabled');
+  }catch(e){toast(e.message);}
+}
+async function testPush(){try{await apiPost('/api/push/test',{});toast('Test notification sent');}
+  catch(e){toast(e.message);}}
+async function disablePush(){try{const registration=await navigator.serviceWorker.ready;
+  const subscription=await registration.pushManager.getSubscription();
+  if(subscription){await apiPost('/api/push/unsubscribe',{endpoint:subscription.endpoint});await subscription.unsubscribe();}
+  toast('Push notifications disabled');}catch(e){toast(e.message);}}
 function toast(message){const el=$('toast');if(!el)return;el.textContent=message;el.style.display='block';
   setTimeout(()=>el.style.display='none',3500);}
 function playerRow(x){return `<div class="row"><div><b>${esc(x.name)}</b><div class="muted small">
@@ -965,6 +987,7 @@ function render(){if(!state||!manager)return;const mine=state.players.filter(x=>
   if(tab==='Locker Room')content=chatView();
   if(tab==='Notifications')content=`<h1>Notifications</h1>${card('Injury alerts',state.injuries.map(i=>
     `<div class="row"><b>${esc(p(i.player)?.name||'Player')}</b><span>${i.active?'Pending':'Resolved'}</span></div>`).join('')||'<p>No alerts.</p>')}
+    ${card('Push notifications',`<p>On iPhone, add Fantasy Audible to your Home Screen before enabling alerts. Notifications require permission and server configuration.</p><div class="actions"><button onclick="enablePush()">Enable injury alerts</button><button onclick="testPush()">Test notification</button><button onclick="disablePush()">Disable on this device</button></div>`)}
     ${card('Transactions',state.transactions.slice(0,50).map(t=>`<div class="row">${esc(t.details)}</div>`).join('')||'<p>No transactions.</p>')}`;
   if(tab==='Commissioner'&&state.viewer.commissioner)content=`<h1>Commissioner Controls</h1>
     ${card('Draft management','<p>Manage the snake draft.</p><button onclick="changeTab(\'Draft\')">Open draft controls</button>')}
