@@ -815,6 +815,30 @@ async function api(req,res,route){
   if(req.method==='GET'&&route==='/api/espn/players'){
     try{const data=await draftPool();return send(res,200,{...data,count:data.players.length});}
     catch(e){return send(res,503,{error:'ESPN player data is not available yet',details:e.message});}}
+  if(req.method==='GET'&&route==='/api/nfl/player-metadata'){
+    const season=Number(url.searchParams.get('season')||current.state.nflDirectorySync?.season||new Date().getUTCFullYear());
+    const week=Number(url.searchParams.get('week'));
+    if(!Number.isInteger(season)||season<2020||season>2100||!Number.isInteger(week)||week<1||week>18)
+      return send(res,400,{error:'Invalid NFL season or week'});
+    try{
+      // ESPN fantasy directory carries the athlete's current proTeamId and injury
+      // designation. The roster's old team ID is not authoritative after trades.
+      const directory=await draftPool();
+      const byId=new Map(directory.players.map(p=>[String(p.id),p]));
+      const players={};
+      for(const roster of current.state.players){
+        const id=String(roster.espnId||String(roster.id||'').replace(/^espn-/,''));
+        const p=byId.get(id);if(!p)continue;
+        players[id]={teamId:p.nflTeamId==null?null:String(p.nflTeamId),
+          injuryStatus:p.injuryStatus||'UNKNOWN',position:p.position,
+          // Season projections must not masquerade as week projections.
+          weeklyProjectedPoints:null};
+      }
+      return send(res,200,{season,week,players,updatedAt:new Date().toISOString(),
+        projectionStatus:'UNAVAILABLE',oprkStatus:'UNAVAILABLE',
+        notice:'Team identities and injury designations from ESPN fantasy directory. No unverified weekly projections or OPRK.'});
+    }catch(e){return send(res,503,{error:'NFL player metadata unavailable',details:e.message});}
+  }
   if(req.method==='GET'&&route==='/api/nfl/week-matchups'){
     const season=Number(url.searchParams.get('season')||current.state.nflDirectorySync?.season||process.env.NFL_SEASON||new Date().getUTCFullYear());
     const week=Number(url.searchParams.get('week'));
