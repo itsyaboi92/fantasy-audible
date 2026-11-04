@@ -1032,6 +1032,23 @@ async function api(req,res,route){
         'Commissioner restarted league; cleared '+priorPicks+' draft picks');
       return {ok:true,clearedPicks:priorPicks};
     }
+    if(route==='/api/draft/order'){
+      if(!actor.commissioner)return failure(403,'Commissioner only');
+      if(d.status!=='waiting')return failure(409,'Draft order is locked after draft starts');
+      const registered=s.managers.filter(m=>accounts.some(a=>a.manager===m.id)).map(m=>m.id);
+      if(body.randomize===true){
+        const shuffled=[...registered];
+        for(let i=shuffled.length-1;i>0;i--){const j=crypto.randomInt(i+1);[shuffled[i],shuffled[j]]=[shuffled[j],shuffled[i]];}
+        d.draftSequence=shuffled;
+      }else{
+        const seq=body.order;
+        if(!Array.isArray(seq)||seq.length!==registered.length||new Set(seq).size!==registered.length||
+           !seq.every(id=>registered.includes(id)))return failure(400,'Order must include every registered manager exactly once');
+        d.draftSequence=[...seq];
+      }
+      audit(s,'DRAFT_ORDER_SET',actor.manager,body.randomize===true?'Randomized draft order':'Saved manual draft order');
+      return {ok:true,order:d.draftSequence};
+    }
     if(route==='/api/draft/start'){
       if(!actor.commissioner)return failure(403,'Commissioner only');
       if(d.status!=='waiting')return failure(409,'Draft already started');
@@ -1040,7 +1057,13 @@ async function api(req,res,route){
       const roster=settingsOf(s).roster;
       const rounds=Object.values(roster.starters).reduce((n,v)=>n+v,0)+roster.bench;
       if(espnData.players.length<registered.length*rounds)return failure(503,'Not enough ESPN players for draft');
-      d.order=createDraftOrder(registered.map(m=>m.id),rounds);d.picks=[];d.status='active';
+      const registeredIds=registered.map(m=>m.id);
+      const chosen=d.draftSequence;
+      const sequence=Array.isArray(chosen)&&chosen.length===registeredIds.length&&
+        new Set(chosen).size===registeredIds.length&&chosen.every(id=>registeredIds.includes(id))
+        ?chosen:registeredIds;
+      d.draftSequence=[...sequence];
+      d.order=createDraftOrder(sequence,rounds);d.picks=[];d.status='active';
       d.rounds=rounds;d.secondsPerPick=PICK_SECONDS;d.remainingSeconds=null;nextDeadline(d);
       s.players=[];s.injuries=[];
       audit(s,'DRAFT_STARTED',actor.manager,registered.length+'-team '+rounds+'-round snake draft started');
