@@ -1,6 +1,7 @@
 let state=null,manager=null,tab='Home',token=localStorage.getItem('audibleToken');
 let chatMessages=[],chatMuted=false,chatMutedManagers=[],chatLastId=0,chatSeenId=Number(localStorage.getItem('audibleChatSeen')||0),chatLoading=false,chatError='',chatDraft='',chatPendingGif=null,giphyOpen=false,giphyResults=[],giphyQuery='',giphyError='',giphyBusy=false,giphyRequest=0;
 let matchupWeek=null,matchupIndex=0,matchupTouchX=null;
+let viewedLeagueTeamId=null;
 let espn=null,espnError='',draftSearch='',draftPosition='ALL',loadingESPN=false;
 let weeklyDirectory={},weeklyUpdatedAt=null,weeklyLoading=false,weeklyLastFetch=0;
 let playerSort='rank';
@@ -737,7 +738,7 @@ function render(){if(!state||!manager)return;const mine=state.players.filter(x=>
       ${lineupManager(mine)}`;}
   if(tab==='Matchup')content=matchupView();
   if(tab==='League')content=`<h1>League</h1>${card('Teams',state.managers.filter(x=>x.claimed).map(x=>
-    `<div class="row"><b>${teamPhoto(x.id,36)} ${esc(x.team)}</b><span>${fmt(total(x.id))} pts</span></div>`).join(''))}
+    `<div class="row"><button type="button" style="display:inline-flex;align-items:center;text-align:left;gap:7px;background:transparent;border:0;padding:6px 0;color:inherit;text-decoration:underline;text-underline-offset:3px" onclick='viewLeagueTeam(${jsAttr(x.id)})' aria-label="View ${esc(x.team)} roster">${teamPhoto(x.id,36)} <b>${esc(x.team)}</b></button><span>${fmt(total(x.id))} pts</span></div>`).join(''))}${leagueTeamRosterView()}
     ${card('League roster rules',state.settings?`<p>Starters: ${Object.entries(state.settings.roster.starters).map(([k,v])=>`${k} ${v}`).join(' · ')}</p>
       <p>Bench: ${state.settings.roster.bench} · IR: ${state.settings.roster.ir}</p>`:'<p>Not yet configured.</p>')}`;
   if((tab==='Players'||tab==='My Waivers')&&Date.now()-lastTransactionFetch>90000)loadTransactions();
@@ -793,6 +794,29 @@ function leagueMembersUI(){
       <button style="background:#a32121;color:white" onclick='manageLeagueMember(${jsAttr(x.id)},true)'>Terminate Roster</button></div></div>`;
   }).join('');
   return card('League Members',`<p class="muted small">Remove Manager revokes access but keeps the roster for a replacement. Terminate Roster removes the team and places its players on waivers. Both actions require two confirmations.</p>${rows||'<p>No other teams.</p>'}`);
+}
+function viewLeagueTeam(id){
+  if(!state?.managers.some(x=>x.id===id&&x.claimed))return;
+  viewedLeagueTeamId=id;render();
+  document.getElementById('leagueRosterDetail')?.scrollIntoView({behavior:'smooth',block:'start'});
+}
+function closeLeagueTeam(){viewedLeagueTeamId=null;render();}
+function leagueTeamRosterView(){
+  if(viewedLeagueTeamId==null)return '';
+  const team=state.managers.find(x=>x.id===viewedLeagueTeamId&&x.claimed);
+  if(!team)return '';
+  const players=state.players.filter(x=>x.owner===team.id);
+  const starters=players.filter(x=>!['BENCH','IR'].includes(x.slot));
+  const bench=players.filter(x=>x.slot==='BENCH');
+  const ir=players.filter(x=>x.slot==='IR');
+  const order=['QB','RB','WR','TE','FLEX','D/ST','K'];
+  starters.sort((a,b)=>order.indexOf(a.slot)-order.indexOf(b.slot)||a.name.localeCompare(b.name));
+  const rows=items=>items.map(x=>`<div class="row"><div><b>${esc(x.name)}</b><div class="muted small">${esc(x.slot)} · ${esc(x.pos)} · ${esc(x.team)}${x.injuryStatus?' · '+esc(x.injuryStatus):''}</div></div><b>${fmt(score(x))} pts</b></div>`).join('');
+  return `<section id="leagueRosterDetail" class="card"><div class="row"><h2>${teamPhoto(team.id,42)} ${esc(team.team)} · Roster</h2><button onclick="closeLeagueTeam()">Close</button></div>
+    <p class="muted small">${players.length} rostered players · Current lineup and scores</p>
+    <h3>Starters (${starters.length})</h3>${rows(starters)||'<p class="muted">No starters assigned yet.</p>'}
+    <h3>Bench (${bench.length})</h3>${rows(bench)||'<p class="muted">No bench players yet.</p>'}
+    <h3>Injured Reserve (${ir.length})</h3>${rows(ir)||'<p class="muted">No players on IR.</p>'}</section>`;
 }
 function changeTab(next){if(next==='Matchup'&&tab!=='Matchup'){matchupWeek=null;matchupIndex=0;}tab=next;render();if(tab==='Draft')syncServerClock();
   if(tab==='Draft'||tab==='Players')loadESPN();
