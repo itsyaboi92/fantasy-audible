@@ -626,19 +626,27 @@ function optimizeProjectedLineup(){
   toast('Optimized lineup preview ready. Save to apply.');
 }
 function playerGameLocked(player){
+  if(player.espnId||player.nflGame){
+    const season=Number(state?.nflDirectorySync?.season||new Date().getFullYear());
+    const week=Math.min(18,Math.max(1,Number(state?.nflDirectorySync?.currentWeek||state?.week||1)));
+    const key=season+':'+week;
+    const espnId=String(player.espnId||String(player.id||'').replace(/^espn-/,''));
+    const meta=nflPlayerMetaCache[key]?.data?.players?.[espnId];
+    const team=String(meta?.teamId||player.nflTeamId||player.team||'').toUpperCase();
+    const teamId=/^\d+$/.test(team)?team:NFL_TEAM_IDS[team];
+    const game=nflMatchupCache[key]?.data?.teams?.[teamId];
+    if(game?.kickoff&&Number.isFinite(Date.parse(game.kickoff)))return Date.now()>=Date.parse(game.kickoff);
+    const synced=state?.nflSync;
+    if(Number(synced?.week)===week){
+      const stored=synced.games?.find(g=>g.teams?.some(t=>String(t.id)===String(teamId)));
+      if(stored?.kickoff&&Number.isFinite(Date.parse(stored.kickoff)))return Date.now()>=Date.parse(stored.kickoff);
+      if(player.nflGame?.kickoff&&Number.isFinite(Date.parse(player.nflGame.kickoff)))return Date.now()>=Date.parse(player.nflGame.kickoff);
+    }
+    return true; // Cannot safely verify an individual kickoff yet.
+  }
   if(['playing','injured','finished','final','completed'].includes(String(player.status||'').toLowerCase()))return true;
   if(player.kickoffAt&&Number.isFinite(Date.parse(player.kickoffAt))&&Date.parse(player.kickoffAt)<=Date.now())return true;
-  if(typeof player.kickoff==='number'&&player.kickoff!==99&&player.kickoff<=state.phase)return true;
-  const season=Number(state?.nflDirectorySync?.season||new Date().getFullYear());
-  const week=Math.min(18,Math.max(1,Number(state?.nflDirectorySync?.currentWeek||state?.week||1)));
-  const key=season+':'+week;
-  const espnId=String(player.espnId||String(player.id||'').replace(/^espn-/,''));
-  const meta=nflPlayerMetaCache[key]?.data?.players?.[espnId];
-  const team=String(meta?.teamId||player.nflTeamId||player.team||'').toUpperCase();
-  const teamId=/^\d+$/.test(team)?team:NFL_TEAM_IDS[team];
-  const game=nflMatchupCache[key]?.data?.teams?.[teamId];
-  // Fail closed for uncertain kickoff data: server independently validates locks.
-  return !!(game?.kickoff&&Date.parse(game.kickoff)<=Date.now());
+  return typeof player.kickoff==='number'&&player.kickoff!==99&&player.kickoff<=state.phase;
 }
 function rosterMatchupDetails(p){
   const season=Number(state?.nflDirectorySync?.season||new Date().getFullYear());
@@ -876,8 +884,9 @@ function chatBodyHtml(body){
 }
 function chatView(){
   const messages=chatMessages.map(x=>{
-    const team=m(x.manager)?.team||'Former manager';
-    return `<div class="fa-chat-msg"><div class="fa-chat-head">${teamPhoto(x.manager,30)} <b>${esc(team)}</b> <span class="muted small">${esc(new Date(x.created_at).toLocaleString())}</span>
+    const isBot=x.manager==='__the_audible__';
+    const team=isBot?'🎙️ The Audible':m(x.manager)?.team||'Former manager';
+    return `<div class="fa-chat-msg"><div class="fa-chat-head">${isBot?'🎙️':teamPhoto(x.manager,30)} <b>${esc(team)}</b> <span class="muted small">${esc(new Date(x.created_at).toLocaleString())}</span>
     ${state.viewer.commissioner?`<button class="fa-chat-small" onclick="deleteChatMessage(${Number(x.id)})">Delete</button>`:''}</div>
     <div class="fa-chat-body">${chatBodyHtml(x.body)}${x.has_media?`<div><img class="fa-chat-gif" src="/api/chat/media?id=${Number(x.id)}&token=${encodeURIComponent(token)}" alt="Animated GIF" loading="lazy"></div>`:''}</div></div>`;
   }).join('')||'<p class="muted">No messages yet. Start the trash talk!</p>';
