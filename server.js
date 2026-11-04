@@ -236,7 +236,24 @@ function settingsOf(s){
   };
 }
 function preferencesOf(s,id){return {...DEFAULT_PREFERENCES,...(s.draftPreferences?.[id]||{})};}
-function safeState(s,accounts,user){return {...s,settings:settingsOf(s),managers:s.managers.map(m=>({...m,
+// Deterministic round-robin schedule: all clients receive the same pairings.
+function fantasySchedule(s,accounts){
+  const ids=s.managers.filter(m=>accounts.some(a=>a.manager===m.id)).map(m=>m.id).sort((a,b)=>Number(a.slice(1))-Number(b.slice(1)));
+  if(ids.length<2)return {};
+  let rotation=[...ids];if(rotation.length%2)rotation.push(null);
+  const rounds=rotation.length-1, result={};
+  for(let week=1;week<=14;week++){
+    const matches=[];
+    for(let i=0;i<rotation.length/2;i++){
+      const a=rotation[i],b=rotation[rotation.length-1-i];
+      if(a&&b)matches.push({id:`${week}-${[a,b].sort().join('-')}`,home:a,away:b});
+    }
+    result[week]=matches;
+    rotation=[rotation[0],rotation[rotation.length-1],...rotation.slice(1,-1)];
+  }
+  return result;
+}
+function safeState(s,accounts,user){return {...s,matchupSchedule:fantasySchedule(s,accounts),settings:settingsOf(s),managers:s.managers.map(m=>({...m,
   claimed:accounts.some(a=>a.manager===m.id)})),draftPreferences:{[user.manager]:preferencesOf(s,user.manager)},
   viewer:{manager:user.manager,commissioner:user.commissioner,name:user.name}};}
 function pushState(s,accounts){for(const [res,id] of clients){const a=accounts.find(x=>x.id===id);
