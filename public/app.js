@@ -535,8 +535,29 @@ async function moveToSection(playerId,slot){
   catch(e){toast(e.message);}
 }
 const STARTER_ORDER=['QB','RB','RB','WR','WR','TE','FLEX','D/ST','K'];
+const NFL_TEAM_IDS={ARI:'22',ATL:'1',BAL:'33',BUF:'2',CAR:'29',CHI:'3',CIN:'4',CLE:'5',DAL:'6',DEN:'7',DET:'8',GB:'9',HOU:'34',IND:'11',JAX:'30',JAC:'30',KC:'12',LV:'13',LAR:'14',LA:'14',MIA:'15',MIN:'16',NE:'17',NO:'18',NYG:'19',NYJ:'20',PHI:'21',PIT:'23',SF:'25',SEA:'26',TB:'27',TEN:'10',WAS:'28'};
+const nflMatchupCache={};const nflMatchupPending=new Set();
+async function fetchNFLMatchups(week){
+  const season=Number(state?.nflDirectorySync?.season||new Date().getFullYear());
+  const key=season+':'+week;
+  if(nflMatchupPending.has(key)||(nflMatchupCache[key]&&Date.now()-nflMatchupCache[key].at<300000))return;
+  nflMatchupPending.add(key);
+  try{
+    const response=await fetch('/api/nfl/week-matchups?season='+season+'&week='+week,{headers:{Authorization:'Bearer '+token}});
+    if(!response.ok)throw Error('NFL schedule unavailable');
+    nflMatchupCache[key]={at:Date.now(),data:await response.json()};
+  }catch(e){console.warn('NFL matchup metadata:',e.message);nflMatchupCache[key]={at:Date.now(),data:{teams:{}}};}
+  finally{nflMatchupPending.delete(key);if(tab==='Matchup'&&selectedMatchupWeek()===week)render();}
+}
+function nflPlayerGame(x){
+  const week=selectedMatchupWeek(),season=Number(state?.nflDirectorySync?.season||new Date().getFullYear());
+  const board=nflMatchupCache[season+':'+week]?.data;
+  const team=String(x.nflTeamId||x.team||'').trim().toUpperCase();
+  const id=/^\d+$/.test(team)?team:NFL_TEAM_IDS[team];
+  return {game:board?.teams?.[id]||null,loaded:!!board};
+}
 function selectedMatchupWeek(){return Math.min(14,Math.max(1,matchupWeek??Number(state.scheduleStartWeek||state.nflDirectorySync?.currentWeek||state.week||1)));}
-function setMatchupWeek(week){matchupWeek=Math.min(14,Math.max(1,Number(week)||1));matchupIndex=0;render();}
+function setMatchupWeek(week){matchupWeek=Math.min(14,Math.max(1,Number(week)||1));matchupIndex=0;render();fetchNFLMatchups(matchupWeek);}
 function selectMatchup(index){const games=state.matchupSchedule?.[selectedMatchupWeek()]||[];if(!games.length)return;matchupIndex=(index+games.length)%games.length;render();}
 function matchupSwipeStart(e){matchupTouchX=e.touches?.[0]?.clientX??null;}
 function matchupSwipeEnd(e){if(matchupTouchX===null)return;const diff=(e.changedTouches?.[0]?.clientX??matchupTouchX)-matchupTouchX;matchupTouchX=null;if(Math.abs(diff)>55)selectMatchup(matchupIndex+(diff<0?1:-1));}
@@ -551,15 +572,17 @@ function matchupPlayerCell(x){
   const injury=String(x.injuryStatus||directoryPlayer?.injuryStatus||'').toUpperCase();
   const designation=({QUESTIONABLE:'Q',DOUBTFUL:'D',OUT:'O',INJURED_RESERVE:'IR',IR:'IR',PROBABLE:'P'})[injury]||'';
   const injuryBadge=designation?`<span class="fa-injury" title="${esc(injury)}">${esc(designation)}</span>`:'';
-  const opponent=x.opponent||directoryPlayer?.opponent||null;
-  const gameTime=x.gameTime||x.kickoffAt||directoryPlayer?.gameTime||directoryPlayer?.kickoffAt||null;
-  const kickoff=gameTime&&!Number.isNaN(Date.parse(gameTime))?new Date(gameTime).toLocaleString(undefined,{weekday:'short',hour:'numeric',minute:'2-digit',timeZoneName:'short'}):null;
+  const {game,loaded}=nflPlayerGame(x);
+  const opponent=game?.opponent||null;
+  const kickoff=game?.kickoff&&!Number.isNaN(Date.parse(game.kickoff))?new Date(game.kickoff).toLocaleString(undefined,{weekday:'short',hour:'numeric',minute:'2-digit',timeZoneName:'short'}):null;
+  const nflTeam=game?.team||(/^[A-Z]{2,3}$/.test(String(x.team||''))?x.team:null);
+  const gameLabel=game?`${nflTeam||''} ${game.homeAway==='home'?'vs':'@'} ${opponent||'TBD'}`:nflTeam||'NFL team unavailable';
+  const gameStatus=game?.status|| (loaded?'Bye / no game':'Schedule loading');
   const oprk=Number(x.oprk||directoryPlayer?.opponentPositionRank);
-  const oppLabel=opponent?` · ${esc(opponent)}`:'';
   const projected=Number(x.weeklyProjectedPoints||directoryPlayer?.weeklyProjectedPoints);
   return `<div class="fa-match-player-title">${name} ${injuryBadge}</div>
-    <div class="muted small">${esc(x.team||'')}${oppLabel}</div>
-    <div class="muted small">${kickoff?esc(kickoff):'Kickoff TBD'} · ${esc(x.status||'upcoming')}</div>
+    <div class="muted small">${esc(gameLabel)}</div>
+    <div class="muted small">${kickoff?esc(kickoff):(loaded?'No kickoff':'Loading kickoff…')} · ${esc(gameStatus)}</div>
     <div class="muted small">OPRK: ${Number.isInteger(oprk)&&oprk>=1&&oprk<=32?oprk+'th':'—'} · Proj: ${Number.isFinite(projected)&&projected>0?fmt(projected):'—'}</div>
     <strong>${fmt(Number(x.points??score(x))||0)} <span class="muted small">pts</span></strong>`;
 }
@@ -579,7 +602,7 @@ function matchupView(){
   const leftPlayers=recorded?.homeLineup?lineupBySlot(recorded.homeLineup):(isCurrent?matchupStarters(game.home):[]);
   const rightPlayers=recorded?.awayLineup?lineupBySlot(recorded.awayLineup):(isCurrent?matchupStarters(game.away):[]);
   const cells=STARTER_ORDER.map((slot,i)=>`<div class="fa-match-row"><div class="fa-player">${leftPlayers[i]?matchupPlayerCell(leftPlayers[i]):'<span class="muted">Open slot</span>'}</div><div class="fa-position">${slot}</div><div class="fa-player fa-right">${rightPlayers[i]?matchupPlayerCell(rightPlayers[i]):'<span class="muted">Open slot</span>'}</div></div>`).join('');
-  const status=recorded?(recorded.status==='final'?'Final':'Live / provisional'):(week>current?'Upcoming':'Not started');
+  const status=recorded?.status==='final'?'Final':week>current?'Upcoming':week<current?'Past week · provisional':(Object.values(nflMatchupCache[(Number(state.nflDirectorySync?.season||new Date().getFullYear()))+':'+week]?.data?.teams||{}).some(g=>g.status==='playing')?'Live / provisional':'Upcoming / awaiting kickoff');
   const total=(id,side)=>recorded?fmt(Number(recorded[side+'Score'])||0):fmt(matchupStarters(id).reduce((sum,p)=>sum+(Number(p?.points)||0),0));
   return `<style>
   .fa-week{display:flex;align-items:center;justify-content:center;gap:12px;margin:14px 0}.fa-week select{padding:8px;background:#202d43;color:inherit;border-radius:8px}
@@ -866,6 +889,7 @@ function leagueTeamRosterView(){
 function changeTab(next){if(next==='Matchup'&&tab!=='Matchup'){matchupWeek=null;matchupIndex=0;}tab=next;render();if(tab==='Draft')syncServerClock();
   if(tab==='Draft'||tab==='Players')loadESPN();
   if(tab==='Players')loadWeeklyDirectory();
+  if(tab==='Matchup')fetchNFLMatchups(selectedMatchupWeek());
   if(tab==='Players'||tab==='My Waivers')loadTransactions();
   if(tab==='Locker Room')loadChat();}
 function logout(){localStorage.removeItem('audibleToken');location.reload();}
