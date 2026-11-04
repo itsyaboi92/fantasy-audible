@@ -358,6 +358,12 @@ async function init(){await pool.query(`CREATE TABLE IF NOT EXISTS fantasy_audib
     SET state=jsonb_set(state,'{settings}', $1::jsonb || COALESCE(state->'settings','{}'::jsonb),true)
     WHERE id=1 AND (NOT (state ? 'settings') OR NOT (state->'settings' ? 'roster'))`,
     [JSON.stringify(DEFAULT_SETTINGS)]);
+  await pool.query(`CREATE TABLE IF NOT EXISTS fantasy_audible_chat (
+    id BIGSERIAL PRIMARY KEY, manager TEXT NOT NULL, body TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), deleted_at TIMESTAMPTZ,
+    deleted_by TEXT)`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS fantasy_audible_chat_mutes (
+    manager TEXT PRIMARY KEY, muted_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
   await initializeESPN();}
 async function snapshot(){const r=await pool.query('SELECT state,accounts FROM fantasy_audible_store WHERE id=1');
   if(!r.rows.length)throw Error('Database not initialized');return r.rows[0];}
@@ -683,6 +689,44 @@ async function api(req,res,route){
     res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache, no-transform',Connection:'keep-alive'});
     res.write('data: '+JSON.stringify(safeState(current.state,current.accounts,user))+'\n\n');
     clients.set(res,user.id);req.on('close',()=>clients.delete(res));return;}
+  // Private league chat. All endpoints require an active league account.
+  if(route==='/api/chat'&&req.method==='GET'){
+    const before=Number(url.searchParams.get('before')||0);
+    const values=[];let where='WHERE deleted_at IS NULL';
+    if(Number.isSafeInteger(before)&&before>0){values.push(before);where+=' AND id < $1';}
+    const r=await pool.query(`SELECT id,manager,body,created_at FROM fantasy_audible_chat ${where} ORDER BY id DESC LIMIT 100`,values);
+    const muted=await pool.query('SELECT manager FROM fantasy_audible_chat_mutes');
+    return send(res,200,{messages:r.rows.reverse(),muted:muted.rows.some(x=>x.manager===user.manager),
+      mutedManagers:user.commissioner?muted.rows.map(x=>x.manager):undefined});
+  }
+  if(route==='/api/chat'&&req.method==='POST'){
+    const body=await bodyOf(req),message=String(body.message||'').trim();
+    if(!message||message.length>1000||/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(message))
+      return send(res,400,{error:'Message must be 1–1000 characters'});
+    const mute=await pool.query('SELECT 1 FROM fantasy_audible_chat_mutes WHERE manager=$1',[user.manager]);
+    if(mute.rowCount)return send(res,403,{error:'You are muted by the commissioner'});
+    const r=await pool.query(`INSERT INTO fantasy_audible_chat(manager,body) VALUES($1,$2)
+      RETURNING id,manager,body,created_at`,[user.manager,message]);
+    return send(res,201,{message:r.rows[0]});
+  }
+  if(route==='/api/chat/delete'&&req.method==='POST'){
+    if(!user.commissioner)return send(res,403,{error:'Commissioner only'});
+    const body=await bodyOf(req),id=Number(body.id);
+    if(!Number.isSafeInteger(id)||id<1)return send(res,400,{error:'Invalid message ID'});
+    const r=await pool.query(`UPDATE fantasy_audible_chat SET deleted_at=NOW(),deleted_by=$2
+      WHERE id=$1 AND deleted_at IS NULL RETURNING id`,[id,user.manager]);
+    return send(res,r.rowCount?200:404,r.rowCount?{ok:true}:{error:'Message not found'});
+  }
+  if(route==='/api/chat/mute'&&req.method==='POST'){
+    if(!user.commissioner)return send(res,403,{error:'Commissioner only'});
+    const body=await bodyOf(req),target=String(body.manager||''),muted=body.muted===true;
+    if(target===user.manager||!current.state.managers.some(x=>x.id===target)||
+      !current.accounts.some(x=>x.manager===target))return send(res,400,{error:'Invalid active manager'});
+    if(muted)await pool.query(`INSERT INTO fantasy_audible_chat_mutes(manager,muted_by)
+      VALUES($1,$2) ON CONFLICT(manager) DO UPDATE SET muted_by=$2,created_at=NOW()`,[target,user.manager]);
+    else await pool.query('DELETE FROM fantasy_audible_chat_mutes WHERE manager=$1',[target]);
+    return send(res,200,{ok:true});
+  }
   if(req.method==='GET'&&route==='/api/espn/players'){
     try{const data=await draftPool();return send(res,200,{...data,count:data.players.length});}
     catch(e){return send(res,503,{error:'ESPN player data is not available yet',details:e.message});}}
