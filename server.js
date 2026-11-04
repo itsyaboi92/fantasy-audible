@@ -432,8 +432,8 @@ function legalPosition(s,id,pos){if(!POSITIONS.includes(pos))return false;
 }
 function availableFor(s,players,id){const selected=new Set(ensureDraft(s).picks.map(p=>String(p.playerId)));
   return rankedPlayers(players).filter(p=>!selected.has(String(p.id))&&legalPosition(s,id,p.position));}
-function injuryOut(p){return ['OUT','IR','INJURED_RESERVE','DOUBTFUL','SUSPENSION','SUSPENDED'].includes(
-  String(p.injuryStatus||'').toUpperCase());}
+function injuryOut(p){return ['OUT','IR','INJURED_RESERVE','INJURY_RESERVE','INJURED_RESERVE_DESIGNATED_TO_RETURN','RESERVE_INJURED','DOUBTFUL','SUSPENSION','SUSPENDED','PUP','PHYSICALLY_UNABLE_TO_PERFORM','NFI','NON_FOOTBALL_INJURY'].includes(
+  String(p.injuryStatus||'').toUpperCase().replace(/[\s-]+/g,'_'));}
 function chooseAutomatic(s,players,id){let available=availableFor(s,players,id);
   if(!available.length)return null;const pref=preferencesOf(s,id);
   if(pref.avoidOut){const healthy=available.filter(p=>!injuryOut(p));if(healthy.length)available=healthy;}
@@ -825,11 +825,9 @@ async function api(req,res,route){
       // ESPN fantasy directory carries the athlete's current proTeamId and injury
       // designation. The roster's old team ID is not authoritative after trades.
       const directory=await draftPool();
-      const byId=new Map(directory.players.map(p=>[String(p.id),p]));
       const players={};
-      for(const roster of current.state.players){
-        const id=String(roster.espnId||String(roster.id||'').replace(/^espn-/,''));
-        const p=byId.get(id);if(!p)continue;
+      for(const p of directory.players){
+        const id=String(p.id);
         players[id]={teamId:p.nflTeamId==null?null:String(p.nflTeamId),
           injuryStatus:p.injuryStatus||'UNKNOWN',position:p.position,
           // Season projections must not masquerade as week projections.
