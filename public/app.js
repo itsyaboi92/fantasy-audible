@@ -1,5 +1,5 @@
 let state=null,manager=null,tab='Home',token=localStorage.getItem('audibleToken');
-let chatMessages=[],chatMuted=false,chatMutedManagers=[],chatLastId=0,chatSeenId=Number(localStorage.getItem('audibleChatSeen')||0),chatLoading=false,chatError='',chatDraft='',chatPendingGif=null,tenorOpen=false,tenorResults=[],tenorQuery='',tenorError='',tenorBusy=false,tenorRequest=0;
+let chatMessages=[],chatMuted=false,chatMutedManagers=[],chatLastId=0,chatSeenId=Number(localStorage.getItem('audibleChatSeen')||0),chatLoading=false,chatError='',chatDraft='',chatPendingGif=null,giphyOpen=false,giphyResults=[],giphyQuery='',giphyError='',giphyBusy=false,giphyRequest=0;
 let matchupWeek=null,matchupIndex=0,matchupTouchX=null;
 let espn=null,espnError='',draftSearch='',draftPosition='ALL',loadingESPN=false;
 let weeklyDirectory={},weeklyUpdatedAt=null,weeklyLoading=false,weeklyLastFetch=0;
@@ -580,7 +580,7 @@ function refreshChatDisplay(){
   const oldControls=document.querySelector('#chatModeration');
   const newControls=temporary.querySelector('#chatModeration');
   if(oldControls&&newControls&&oldControls.innerHTML!==newControls.innerHTML)oldControls.innerHTML=newControls.innerHTML;
-  const picker=$('tenorPicker');if(picker&&tenorOpen)renderTenorResults();
+  const picker=$('giphyPicker');if(picker&&giphyOpen)renderGiphyResults();
   const error=$('chatError');if(error)error.textContent=chatError;
   const composer=$('chatForm');
   if(composer&&chatMuted){
@@ -649,48 +649,59 @@ function chatView(){
     <p id="chatError" class="muted">${esc(chatError)}</p>
     ${chatMuted?'<p>You have been muted by the commissioner.</p>':`<form id="chatForm" onsubmit="sendChatMessage(event)">
       <textarea id="chatInput" maxlength="1000" rows="2" placeholder="Talk some trash..." oninput="chatDraft=this.value" onblur="setTimeout(()=>{refreshChatDisplay();updateChatTabBadge()},0)">${esc(chatDraft)}</textarea>
-      <button type="button" onclick="toggleTenorPicker()">GIF</button>
-      <button type="submit">Send message</button></form><div id="tenorPicker" class="fa-tenor-picker" style="display:${tenorOpen?'block':'none'}"><div class="fa-tenor-search"><input id="tenorSearch" type="search" placeholder="Search Tenor GIFs" maxlength="80" value="${esc(tenorQuery)}" onkeydown="if(event.key==='Enter'){event.preventDefault();searchTenor()}"><button type="button" onclick="searchTenor()">Search</button><button type="button" onclick="toggleTenorPicker()">Close</button></div><div id="tenorResults" class="fa-tenor-grid"></div><p class="muted small">GIFs powered by Tenor</p></div>`}</section><div id="chatModeration">${controls}</div>`;
+      <button type="button" onclick="toggleGiphyPicker()">GIF</button>
+      <button type="submit">Send message</button></form><div id="giphyPicker" class="fa-giphy-picker" style="display:${giphyOpen?'block':'none'}"><div class="fa-giphy-search"><input id="giphySearch" type="search" placeholder="Search GIPHY GIFs" maxlength="80" value="${esc(giphyQuery)}" onkeydown="if(event.key==='Enter'){event.preventDefault();searchGiphy()}"><button type="button" onclick="searchGiphy()">Search</button><button type="button" onclick="toggleGiphyPicker()">Close</button></div><div id="giphyResults" class="fa-giphy-grid"></div><p class="muted small">Powered by GIPHY</p></div>`}</section><div id="chatModeration">${controls}</div>`;
 }
-function toggleTenorPicker(){
-  tenorOpen=!tenorOpen;
-  const picker=$('tenorPicker');if(!picker)return;
-  picker.style.display=tenorOpen?'block':'none';
-  if(tenorOpen){renderTenorResults();if(!tenorResults.length)searchTenor();}
+function toggleGiphyPicker(){
+  giphyOpen=!giphyOpen;
+  const picker=$('giphyPicker');if(!picker)return;
+  picker.style.display=giphyOpen?'block':'none';
+  if(giphyOpen){renderGiphyResults();if(!giphyResults.length)searchGiphy();}
 }
-function renderTenorResults(){
-  const grid=$('tenorResults');if(!grid)return;
-  if(tenorBusy){grid.textContent='Loading GIFs…';return;}
-  if(tenorError){grid.textContent=tenorError;return;}
-  if(!tenorResults.length){grid.textContent='No GIFs found.';return;}
+function renderGiphyResults(){
+  const grid=$('giphyResults');if(!grid)return;
+  if(giphyBusy){grid.textContent='Loading GIFs…';return;}
+  if(giphyError){grid.textContent=giphyError;return;}
+  if(!giphyResults.length){grid.textContent='No GIFs found.';return;}
   grid.replaceChildren();
-  for(const result of tenorResults){
-    const button=document.createElement('button');button.type='button';button.className='fa-tenor-item';
+  for(const result of giphyResults){
+    const button=document.createElement('button');button.type='button';button.className='fa-giphy-item';
     button.title=result.title||'Send GIF';
     const img=document.createElement('img');img.src=result.preview;img.alt=result.title||'GIF';img.loading='lazy';
-    button.appendChild(img);button.addEventListener('click',()=>sendTenorGif(result.url));grid.appendChild(button);
+    button.appendChild(img);button.addEventListener('click',()=>sendGiphyGif(result.url));grid.appendChild(button);
   }
 }
-async function searchTenor(){
-  tenorQuery=$('tenorSearch')?.value.trim()||'';
-  const request=++tenorRequest;tenorBusy=true;tenorError='';renderTenorResults();
+async function searchGiphy(){
+  giphyQuery=$('giphySearch')?.value.trim()||'';
+  const request=++giphyRequest;giphyBusy=true;giphyError='';renderGiphyResults();
   try{
-    const r=await fetch('/api/chat/tenor?q='+encodeURIComponent(tenorQuery),{
-      headers:{Authorization:'Bearer '+token},cache:'no-store'});
-    const d=await r.json();if(!r.ok)throw Error(d.error||'GIF search unavailable');
-    if(request===tenorRequest)tenorResults=d.results||[];
-  }catch(e){if(request===tenorRequest)tenorError=e.message;}
-  finally{if(request===tenorRequest){tenorBusy=false;renderTenorResults();}}
+    const configResponse=await fetch('/api/chat/giphy/config',{headers:{Authorization:'Bearer '+token},cache:'no-store'});
+    const config=await configResponse.json();
+    if(!configResponse.ok)throw Error(config.error||'GIPHY is unavailable');
+    const endpoint=new URL('https://api.giphy.com/v1/gifs/'+(giphyQuery?'search':'trending'));
+    endpoint.searchParams.set('api_key',config.apiKey);
+    endpoint.searchParams.set('limit','18');endpoint.searchParams.set('rating','pg');
+    if(giphyQuery)endpoint.searchParams.set('q',giphyQuery.slice(0,50));
+    const response=await fetch(endpoint.toString());
+    if(!response.ok)throw Error('GIPHY search failed ('+response.status+')');
+    const payload=await response.json();
+    if(request===giphyRequest)giphyResults=(payload.data||[]).map(item=>({
+      id:String(item.id||''),title:String(item.title||'GIF'),
+      url:item.images?.fixed_height?.url||item.images?.original?.url,
+      preview:item.images?.fixed_width_small?.url||item.images?.fixed_width?.url
+    })).filter(item=>item.url&&item.preview&&/^https:\/\/media\d*\.giphy\.com\//i.test(item.url));
+  }catch(e){if(request===giphyRequest)giphyError=e.message;}
+  finally{if(request===giphyRequest){giphyBusy=false;renderGiphyResults();}}
 }
-async function sendTenorGif(url){
-  if(!/^https:\/\/(media|c)\.tenor\.com\//i.test(url))return;
+async function sendGiphyGif(url){
+  if(!/^https:\/\/media\d*\.giphy\.com\//i.test(url))return;
   const caption=$('chatInput')?.value.trim()||'';
   const message=(caption?caption+'\n':'')+url;
   if(message.length>1000){toast('Message is too long');return;}
   try{
     await apiPost('/api/chat',{message});
     chatDraft='';const input=$('chatInput');if(input)input.value='';
-    tenorOpen=false;const picker=$('tenorPicker');if(picker)picker.style.display='none';
+    giphyOpen=false;const picker=$('giphyPicker');if(picker)picker.style.display='none';
     await loadChat();
   }catch(e){toast(e.message);}
 }
