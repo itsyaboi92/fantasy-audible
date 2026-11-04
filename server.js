@@ -362,6 +362,9 @@ async function init(){await pool.query(`CREATE TABLE IF NOT EXISTS fantasy_audib
     id BIGSERIAL PRIMARY KEY, manager TEXT NOT NULL, body TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), deleted_at TIMESTAMPTZ,
     deleted_by TEXT)`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS fantasy_audible_chat_media (
+    message_id BIGINT PRIMARY KEY REFERENCES fantasy_audible_chat(id) ON DELETE CASCADE,
+    mime TEXT NOT NULL, bytes BYTEA NOT NULL)`);
   await pool.query(`CREATE TABLE IF NOT EXISTS fantasy_audible_chat_mutes (
     manager TEXT PRIMARY KEY, muted_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
   await initializeESPN();}
@@ -376,8 +379,8 @@ async function change(fn){const c=await pool.connect();try{await c.query('BEGIN'
     [JSON.stringify(state),JSON.stringify(accounts)]);
   await c.query('COMMIT');pushState(state,accounts);return result;
   }catch(e){try{await c.query('ROLLBACK');}catch{}throw e;}finally{c.release();}}
-function bodyOf(req){return new Promise((resolve,reject)=>{let raw='';let done=false;
-  req.on('data',chunk=>{if(done)return;raw+=chunk;if(raw.length>100000){done=true;
+function bodyOf(req,maxLength=100000){return new Promise((resolve,reject)=>{let raw='';let done=false;
+  req.on('data',chunk=>{if(done)return;raw+=chunk;if(raw.length>maxLength){done=true;
     reject(Error('Request too large'));req.destroy();}});
   req.on('end',()=>{if(done)return;try{resolve(JSON.parse(raw||'{}'));}catch{reject(Error('Invalid JSON'));}});
   req.on('error',reject);});}
@@ -694,7 +697,7 @@ async function api(req,res,route){
     const before=Number(url.searchParams.get('before')||0);
     const values=[];let where='WHERE deleted_at IS NULL';
     if(Number.isSafeInteger(before)&&before>0){values.push(before);where+=' AND id < $1';}
-    const r=await pool.query(`SELECT id,manager,body,created_at FROM fantasy_audible_chat ${where} ORDER BY id DESC LIMIT 100`,values);
+    const r=await pool.query(`SELECT id,manager,body,created_at, EXISTS(SELECT 1 FROM fantasy_audible_chat_media cm WHERE cm.message_id=fantasy_audible_chat.id) AS has_media FROM fantasy_audible_chat ${where} ORDER BY id DESC LIMIT 100`,values);
     const muted=await pool.query('SELECT manager FROM fantasy_audible_chat_mutes');
     return send(res,200,{messages:r.rows.reverse(),muted:muted.rows.some(x=>x.manager===user.manager),
       mutedManagers:user.commissioner?muted.rows.map(x=>x.manager):undefined});
@@ -708,6 +711,38 @@ async function api(req,res,route){
     const r=await pool.query(`INSERT INTO fantasy_audible_chat(manager,body) VALUES($1,$2)
       RETURNING id,manager,body,created_at`,[user.manager,message]);
     return send(res,201,{message:r.rows[0]});
+  }
+  // Private GIF media: stored in PostgreSQL, never on Render's ephemeral filesystem.
+  if(route==='/api/chat/media'&&req.method==='POST'){
+    const body=await bodyOf(req,3000000);
+    const mime=String(body.mime||'');
+    if(mime!=='image/gif')return send(res,400,{error:'Only animated GIF files are supported'});
+    const encoded=String(body.data||'');
+    if(!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)||encoded.length>2800000)
+      return send(res,400,{error:'Invalid or oversized GIF'});
+    const bytes=Buffer.from(encoded,'base64');
+    if(bytes.length<20||bytes.length>2*1024*1024||
+      !['GIF87a','GIF89a'].includes(bytes.subarray(0,6).toString('ascii')))
+      return send(res,400,{error:'GIF must be under 2 MB'});
+    const mute=await pool.query('SELECT 1 FROM fantasy_audible_chat_mutes WHERE manager=$1',[user.manager]);
+    if(mute.rowCount)return send(res,403,{error:'You are muted by the commissioner'});
+    const caption=String(body.caption||'').trim().slice(0,1000);
+    const client=await pool.connect();
+    try{await client.query('BEGIN');
+      const result=await client.query(`INSERT INTO fantasy_audible_chat(manager,body) VALUES($1,$2) RETURNING id`,[user.manager,caption]);
+      await client.query('INSERT INTO fantasy_audible_chat_media(message_id,mime,bytes) VALUES($1,$2,$3)',[result.rows[0].id,mime,bytes]);
+      await client.query('COMMIT');return send(res,201,{ok:true});
+    }catch(e){await client.query('ROLLBACK');throw e;}finally{client.release();}
+  }
+  if(route==='/api/chat/media'&&req.method==='GET'){
+    const id=Number(url.searchParams.get('id'));
+    if(!Number.isSafeInteger(id)||id<1)return send(res,400,{error:'Invalid GIF'});
+    const result=await pool.query(`SELECT cm.mime,cm.bytes FROM fantasy_audible_chat_media cm
+      JOIN fantasy_audible_chat c ON c.id=cm.message_id WHERE cm.message_id=$1 AND c.deleted_at IS NULL`,[id]);
+    if(!result.rowCount)return send(res,404,{error:'GIF not found'});
+    res.writeHead(200,{'Content-Type':'image/gif','Cache-Control':'private, max-age=120',
+      'X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'none'; sandbox"});
+    return res.end(result.rows[0].bytes);
   }
   if(route==='/api/chat/delete'&&req.method==='POST'){
     if(!user.commissioner)return send(res,403,{error:'Commissioner only'});
