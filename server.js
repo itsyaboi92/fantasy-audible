@@ -968,7 +968,8 @@ async function syncNFLScoring(){
     const games=await liveNFL.loadWeek(season,week);
     const summaries=new Map(),failures=[];
     await Promise.all(games.filter(g=>g.status!=='upcoming').map(async g=>{
-      try{summaries.set(g.id,liveNFL.playerStats(await liveNFL.fetchGame(g.id)));}
+      try{const summary=await liveNFL.fetchGame(g.id);
+        summaries.set(g.id,{players:liveNFL.playerStats(summary),defenses:liveNFL.defenseStats(summary,g)});}
       catch(e){failures.push(g.id+': '+e.message);}
     }));
     await change((s,accounts)=>{
@@ -977,19 +978,23 @@ async function syncNFLScoring(){
       const ids=new Map();for(const game of games)for(const t of game.teams)ids.set(t.id,game);
       let changed=0;
       for(const player of s.players){
-        if(!player.espnId)continue; // Demo data must never be overwritten.
+        if(!player.espnId&&player.pos!=='D/ST')continue; // Demo data must never be overwritten.
         const game=ids.get(liveNFL.teamId(player));
         if(!game)continue; // Bye week.
         player.nflGame={id:game.id,kickoff:game.kickoff,status:game.status};
         player.status=game.status;
         if(game.status==='upcoming')continue;
         const box=summaries.get(game.id);if(!box)continue;
-        const stats=box.get(String(player.espnId));
-        if(!stats){player.liveScoreStatus='NO_BOX_SCORE_ENTRY';continue;}
+        let calculated;
         if(player.pos==='D/ST'){
-          player.liveScoreStatus='DEFENSE_SCORING_NOT_VERIFIED';continue;
+          const teamStats=box.defenses.get(liveNFL.teamId(player));
+          if(!teamStats){player.liveScoreStatus='DEFENSE_BOX_SCORE_UNAVAILABLE';continue;}
+          calculated=liveNFL.scoreDefense(teamStats,settingsOf(s).scoring);
+        }else{
+          const stats=box.players.get(String(player.espnId));
+          if(!stats){player.liveScoreStatus='NO_BOX_SCORE_ENTRY';continue;}
+          calculated=liveNFL.scorePlayer(stats,settingsOf(s).scoring);
         }
-        const calculated=liveNFL.scorePlayer(stats,settingsOf(s).scoring);
         // Preserve known kicker PAT points; mark unverified FG distance as partial.
         // Do not overwrite an in-progress injury handcuff's credited points.
         if(player.scoringMode){player.liveScoreStatus='INJURY_SUBSTITUTION_REQUIRES_EVENT_SCORING';continue;}
