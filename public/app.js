@@ -578,19 +578,19 @@ function matchupPlayerCell(x){
   const {game,loaded,verified}=nflPlayerGame(x);
   const injury=String(verified?.injuryStatus||directoryPlayer?.injuryStatus||x.injuryStatus||'').toUpperCase();
   const designation=({QUESTIONABLE:'Q',DOUBTFUL:'D',OUT:'O',INJURED_RESERVE:'IR',IR:'IR',PROBABLE:'P'})[injury]||'';
-  const injuryBadge=designation?`<span class="fa-injury" title="${esc(injury)}">${esc(designation)}</span>`:'';
+  const injuryBadge=designation?`<span class="fa-injury" title="${esc(injury)} · Latest available ESPN designation">${esc(designation)}</span>`:'';
   const opponent=game?.opponent||null;
   const kickoff=game?.kickoff&&!Number.isNaN(Date.parse(game.kickoff))?new Date(game.kickoff).toLocaleString(undefined,{weekday:'short',hour:'numeric',minute:'2-digit',timeZoneName:'short'}):null;
   const nflTeam=game?.team||(/^[A-Z]{2,3}$/.test(String(x.team||''))?x.team:null);
   const gameLabel=game?`${nflTeam||''} ${game.homeAway==='home'?'vs':'@'} ${opponent||'TBD'}`:nflTeam||'NFL team unavailable';
   const gameStatus=game?.status|| (loaded?'Bye / no game':'Schedule loading');
   // Do not treat season-long projections as weekly projections.
-  const oprk=Number(verified?.oprk);
-  const projected=Number(verified?.weeklyProjectedPoints);
+  const oprk=verified?.oprk==null?NaN:Number(verified.oprk);
+  const projected=verified?.weeklyProjectedPoints==null?NaN:Number(verified.weeklyProjectedPoints);
   return `<div class="fa-match-player-title">${name} ${injuryBadge}</div>
     <div class="muted small">${esc(gameLabel)}</div>
     <div class="muted small">${kickoff?esc(kickoff):(loaded?'No kickoff':'Loading kickoff…')} · ${esc(gameStatus)}</div>
-    <div class="muted small">OPRK: ${Number.isInteger(oprk)&&oprk>=1&&oprk<=32?oprk+(oprk%10===1&&oprk!==11?'st':oprk%10===2&&oprk!==12?'nd':oprk%10===3&&oprk!==13?'rd':'th'):'—'} · Proj: ${Number.isFinite(projected)&&projected>0?fmt(projected):'—'}</div>
+    <div class="muted small">OPRK: ${Number.isInteger(oprk)&&oprk>=1&&oprk<=32?oprk+(oprk%10===1&&oprk!==11?'st':oprk%10===2&&oprk!==12?'nd':oprk%10===3&&oprk!==13?'rd':'th'):'—'} · Proj: ${Number.isFinite(projected)&&projected>=0?fmt(projected)+' est.':'—'}</div>
     <strong>${fmt(Number(x.points??score(x))||0)} <span class="muted small">pts</span></strong>`;
 }
 function matchupView(){
