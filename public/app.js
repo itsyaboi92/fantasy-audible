@@ -536,7 +536,7 @@ async function moveToSection(playerId,slot){
 }
 const STARTER_ORDER=['QB','RB','RB','WR','WR','TE','FLEX','D/ST','K'];
 const NFL_TEAM_IDS={ARI:'22',ATL:'1',BAL:'33',BUF:'2',CAR:'29',CHI:'3',CIN:'4',CLE:'5',DAL:'6',DEN:'7',DET:'8',GB:'9',HOU:'34',IND:'11',JAX:'30',JAC:'30',KC:'12',LV:'13',LAR:'14',LA:'14',MIA:'15',MIN:'16',NE:'17',NO:'18',NYG:'19',NYJ:'20',PHI:'21',PIT:'23',SF:'25',SEA:'26',TB:'27',TEN:'10',WAS:'28'};
-const nflMatchupCache={};const nflMatchupPending=new Set();
+const nflMatchupCache={};const nflMatchupPending=new Set();const nflPlayerMetaCache={};
 async function fetchNFLMatchups(week){
   const season=Number(state?.nflDirectorySync?.season||new Date().getFullYear());
   const key=season+':'+week;
@@ -546,15 +546,21 @@ async function fetchNFLMatchups(week){
     const response=await fetch('/api/nfl/week-matchups?season='+season+'&week='+week,{headers:{Authorization:'Bearer '+token}});
     if(!response.ok)throw Error('NFL schedule unavailable');
     nflMatchupCache[key]={at:Date.now(),data:await response.json()};
+    try{
+      const meta=await fetch('/api/nfl/player-metadata?season='+season+'&week='+week,{headers:{Authorization:'Bearer '+token}});
+      if(meta.ok)nflPlayerMetaCache[key]={at:Date.now(),data:await meta.json()};
+    }catch(e){console.warn('NFL player metadata:',e.message);}
   }catch(e){console.warn('NFL matchup metadata:',e.message);nflMatchupCache[key]={at:Date.now(),data:{teams:{}}};}
   finally{nflMatchupPending.delete(key);if(tab==='Matchup'&&selectedMatchupWeek()===week)render();}
 }
 function nflPlayerGame(x){
   const week=selectedMatchupWeek(),season=Number(state?.nflDirectorySync?.season||new Date().getFullYear());
   const board=nflMatchupCache[season+':'+week]?.data;
-  const team=String(x.nflTeamId||x.team||'').trim().toUpperCase();
+  const espnId=String(x.espnId||String(x.id||'').replace(/^espn-/,''));
+  const verified=nflPlayerMetaCache[season+':'+week]?.data?.players?.[espnId];
+  const team=String(verified?.teamId||x.nflTeamId||x.team||'').trim().toUpperCase();
   const id=/^\d+$/.test(team)?team:NFL_TEAM_IDS[team];
-  return {game:board?.teams?.[id]||null,loaded:!!board};
+  return {game:board?.teams?.[id]||null,loaded:!!board,verified};
 }
 function selectedMatchupWeek(){return Math.min(14,Math.max(1,matchupWeek??Number(state.scheduleStartWeek||state.nflDirectorySync?.currentWeek||state.week||1)));}
 function setMatchupWeek(week){matchupWeek=Math.min(14,Math.max(1,Number(week)||1));matchupIndex=0;render();fetchNFLMatchups(matchupWeek);}
@@ -566,24 +572,25 @@ function matchupStarters(id){const starters=state.players.filter(x=>x.owner===id
 function matchupPlayerCell(x){
   if(!x)return '<span class="muted">Open slot</span>';
   const playerId=String(x.id||'');
-  const directoryPlayer=espn?.players?.find(p=>String(p.id)===playerId);
+  const directoryPlayer=espn?.players?.find(p=>String(p.id)===String(x.espnId||playerId.replace(/^espn-/,'')));
   const clickable=!!directoryPlayer;
   const name=clickable?`<button class="fa-match-player-link" onclick='openPlayerProfile(${jsAttr(playerId)})'>${esc(x.name)}</button>`:`<b>${esc(x.name)}</b>`;
-  const injury=String(x.injuryStatus||directoryPlayer?.injuryStatus||'').toUpperCase();
+  const {game,loaded,verified}=nflPlayerGame(x);
+  const injury=String(verified?.injuryStatus||directoryPlayer?.injuryStatus||x.injuryStatus||'').toUpperCase();
   const designation=({QUESTIONABLE:'Q',DOUBTFUL:'D',OUT:'O',INJURED_RESERVE:'IR',IR:'IR',PROBABLE:'P'})[injury]||'';
   const injuryBadge=designation?`<span class="fa-injury" title="${esc(injury)}">${esc(designation)}</span>`:'';
-  const {game,loaded}=nflPlayerGame(x);
   const opponent=game?.opponent||null;
   const kickoff=game?.kickoff&&!Number.isNaN(Date.parse(game.kickoff))?new Date(game.kickoff).toLocaleString(undefined,{weekday:'short',hour:'numeric',minute:'2-digit',timeZoneName:'short'}):null;
   const nflTeam=game?.team||(/^[A-Z]{2,3}$/.test(String(x.team||''))?x.team:null);
   const gameLabel=game?`${nflTeam||''} ${game.homeAway==='home'?'vs':'@'} ${opponent||'TBD'}`:nflTeam||'NFL team unavailable';
   const gameStatus=game?.status|| (loaded?'Bye / no game':'Schedule loading');
-  const oprk=Number(x.oprk||directoryPlayer?.opponentPositionRank);
-  const projected=Number(x.weeklyProjectedPoints||directoryPlayer?.weeklyProjectedPoints);
+  // Do not treat season-long projections as weekly projections.
+  const oprk=Number(verified?.oprk);
+  const projected=Number(verified?.weeklyProjectedPoints);
   return `<div class="fa-match-player-title">${name} ${injuryBadge}</div>
     <div class="muted small">${esc(gameLabel)}</div>
     <div class="muted small">${kickoff?esc(kickoff):(loaded?'No kickoff':'Loading kickoff…')} · ${esc(gameStatus)}</div>
-    <div class="muted small">OPRK: ${Number.isInteger(oprk)&&oprk>=1&&oprk<=32?oprk+'th':'—'} · Proj: ${Number.isFinite(projected)&&projected>0?fmt(projected):'—'}</div>
+    <div class="muted small">OPRK: ${Number.isInteger(oprk)&&oprk>=1&&oprk<=32?oprk+(oprk%10===1&&oprk!==11?'st':oprk%10===2&&oprk!==12?'nd':oprk%10===3&&oprk!==13?'rd':'th'):'—'} · Proj: ${Number.isFinite(projected)&&projected>0?fmt(projected):'—'}</div>
     <strong>${fmt(Number(x.points??score(x))||0)} <span class="muted small">pts</span></strong>`;
 }
 function matchupView(){
