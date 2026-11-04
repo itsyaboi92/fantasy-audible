@@ -259,11 +259,20 @@ async function currentNFLCalendar(){
     {signal:AbortSignal.timeout(9000)});
   if(!response.ok)throw Error('NFL calendar HTTP '+response.status);
   const data=await response.json();
-  const week=Number(data.week?.number),season=Number(data.season?.year);
-  if(!Number.isInteger(week)||week<1||week>18||!Number.isInteger(season)||!Array.isArray(data.events)||!data.events.length)
-    throw Error('NFL calendar missing week or games');
-  const kickoffs=data.events.map(g=>Date.parse(g.competitions?.[0]?.date||g.date)).filter(Number.isFinite);
-  if(!kickoffs.length)throw Error('NFL calendar missing kickoff times');
+  // ESPN has returned both top-level and event-level week metadata. Accept either.
+  const events=Array.isArray(data.events)?data.events:[];
+  const week=Number(data.week?.number||events[0]?.week?.number);
+  const season=Number(data.season?.year||events[0]?.season?.year);
+  if(!Number.isInteger(week)||week<1||week>18||!Number.isInteger(season))
+    throw Error('NFL calendar missing regular-season week metadata');
+  // Query the *specific* regular-season week, rather than assuming the default
+  // scoreboard's events belong to the advertised week.
+  const weekly=await fetch(`https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=${season}&seasontype=2&week=${week}&limit=100`,
+    {signal:AbortSignal.timeout(9000)});
+  if(!weekly.ok)throw Error('NFL weekly schedule HTTP '+weekly.status);
+  const weekData=await weekly.json();
+  const kickoffs=(weekData.events||[]).map(g=>Date.parse(g.competitions?.[0]?.date||g.date)).filter(Number.isFinite);
+  if(!kickoffs.length)throw Error('NFL calendar missing kickoff times for Week '+week);
   return {week,season,firstKickoff:Math.min(...kickoffs)};
 }
 let scheduleActivationBusy=false;
