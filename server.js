@@ -346,7 +346,67 @@ function leagueStandings(s,accounts){
   return Object.values(result).map(x=>({...x,pointsFor:Math.round(x.pointsFor*100)/100,pointsAgainst:Math.round(x.pointsAgainst*100)/100}))
     .sort((a,b)=>(b.wins+b.ties/2)/(b.wins+b.losses+b.ties||1)-(a.wins+a.ties/2)/(a.wins+a.losses+a.ties||1)||b.pointsFor-a.pointsFor);
 }
-function safeState(s,accounts,user){return {...s,matchupSchedule:s.frozenMatchupSchedule||{},standings:leagueStandings(s,accounts),settings:settingsOf(s),managers:s.managers.map(m=>({...m,
+// V24: Persisted, league-scoped editorial editions. No invented game results.
+function editorialWeek(s){return Math.max(1,Math.min(18,Number(s.week)||1));}
+function editorialTeam(s,id){return s.managers.find(m=>m.id===id)?.team||'Unknown team';}
+function editorialEdition(s,kind,week){
+  const fixtures=(s.frozenMatchupSchedule||{})[week]||[];
+  const ledger=s.weeklyLedger?.[week]?.matchups||{};
+  const title=kind==='recap'?`Week ${week}: The Final Whistle`:kind==='rankings'?`Week ${week}: Power Rankings`:kind==='preview'?`Week ${week}: Matchup Preview`:`Week ${week}: Sunday Outlook`;
+  const lines=[];
+  if(kind==='recap'){
+    const finals=Object.values(ledger).filter(x=>x.status==='final');
+    if(!finals.length)return null; // Never fabricate completed games.
+    const sorted=[...finals].sort((a,b)=>Math.abs(b.homeScore-b.awayScore)-Math.abs(a.homeScore-a.awayScore));
+    for(const m of sorted){const h=editorialTeam(s,m.home),a=editorialTeam(s,m.away);
+      const margin=Math.abs(m.homeScore-m.awayScore).toFixed(1);
+      lines.push(`${h} ${m.homeScore.toFixed(1)} – ${a} ${m.awayScore.toFixed(1)}. ${m.winner?`${editorialTeam(s,m.winner)} takes it by ${margin}. ${Number(margin)<5?'That one needed a seatbelt.':'Somebody check the group chat.'}`:'A tie. Even the scoreboard refused to pick a side.'}`);}
+    const biggest=sorted[0];if(biggest)lines.unshift(`Biggest margin: ${editorialTeam(s,biggest.winner||biggest.home)} in a ${Math.abs(biggest.homeScore-biggest.awayScore).toFixed(1)}-point decision.`);
+    if(finals.length<fixtures.length)lines.push('Some matchups are still awaiting verified final scoring; this edition covers confirmed results only.');
+  }else if(kind==='rankings'){
+    const standings=leagueStandings(s,[]).filter(x=>s.managers.some(m=>m.id===x.manager));
+    if(!standings.length||!Object.values(s.weeklyLedger||{}).some(w=>Object.values(w.matchups||{}).some(m=>m.status==='final')))return null;
+    standings.forEach((r,i)=>lines.push(`#${i+1} ${editorialTeam(s,r.manager)} — ${r.wins}-${r.losses}${r.ties?`-${r.ties}`:''}, ${r.pointsFor.toFixed(1)} points for. ${i===0?'Top of the mountain. Everybody else has homework.':i===standings.length-1?'The comeback tour better start soon.':'The standings do not negotiate.'}`));
+  }else if(kind==='preview'){
+    if(!fixtures.length)return null;
+    for(const f of fixtures)lines.push(`${editorialTeam(s,f.home)} vs ${editorialTeam(s,f.away)}. Bragging rights are on the line; the projections do not play the games.`);
+  }else if(kind==='outlook'){
+    if(!fixtures.length)return null;
+    lines.push('Sunday check-in: Thursday results are in the mix. These are snapshots, not final predictions; remaining games can change everything.');
+    for(const f of fixtures){
+      const m=ledger[f.id];
+      if(m && Number.isFinite(m.homeScore) && Number.isFinite(m.awayScore)){
+        const leader=m.homeScore===m.awayScore?'Nobody':editorialTeam(s,m.homeScore>m.awayScore?f.home:f.away);
+        lines.push(`${editorialTeam(s,f.home)} ${m.homeScore.toFixed(1)} – ${editorialTeam(s,f.away)} ${m.awayScore.toFixed(1)} (current recorded points; ${m.status==='final'?'final':'provisional'}). ${leader==='Nobody'?'Dead even for now.':`${leader} is ahead for now.`} The remaining slate still matters.`);
+      }else lines.push(`${editorialTeam(s,f.home)} vs ${editorialTeam(s,f.away)}: no current matchup scores recorded yet. Sunday is where the plot thickens.`);
+    }
+  }
+  return {id:`${kind}-${week}`,kind,week,title,lines,publishedAt:new Date().toISOString()};
+}
+function easternEditorialNow(now=new Date()){
+  const parts=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',weekday:'short',hour:'2-digit',hourCycle:'h23'}).formatToParts(now);
+  const fields=Object.fromEntries(parts.map(p=>[p.type,p.value]));return {day:fields.weekday,hour:Number(fields.hour)};
+}
+let editorialBusy=false;
+async function publishEditorial(){if(editorialBusy)return;editorialBusy=true;
+  try{const {state:preview}=await snapshot();
+    const {day,hour}=easternEditorialNow();
+    const previewKind=day==='Tue'&&hour>=9?'recap':day==='Wed'&&hour>=9?'rankings':day==='Thu'&&hour>=9?'preview':day==='Sun'&&hour>=8?'outlook':null;
+    const previewWeek=previewKind==='recap'?Math.max(1,editorialWeek(preview)-1):editorialWeek(preview);
+    if(!previewKind||(preview.editorial||[]).some(e=>e.id===`${previewKind}-${previewWeek}`))return;
+    await change(s=>{
+    const {day,hour}=easternEditorialNow();
+    const kind=day==='Tue'&&hour>=9?'recap':day==='Wed'&&hour>=9?'rankings':day==='Thu'&&hour>=9?'preview':day==='Sun'&&hour>=8?'outlook':null;
+    if(!kind)return {ok:true};
+    // Tuesday recap uses the previous week; Wednesday rankings and Thursday/Sunday coverage use the current week.
+    const week=kind==='recap'?Math.max(1,editorialWeek(s)-1):editorialWeek(s);
+    s.editorial ||= [];
+    if(s.editorial.some(e=>e.id===`${kind}-${week}`))return {ok:true};
+    const edition=editorialEdition(s,kind,week);if(edition)s.editorial.unshift(edition);
+    s.editorial=s.editorial.slice(0,48);return {ok:true};
+  });}catch(e){console.error('Editorial publish:',e.message);}finally{editorialBusy=false;}
+}
+function safeState(s,accounts,user){return {...s,editorial:(s.editorial||[]).slice(0,48),matchupSchedule:s.frozenMatchupSchedule||{},standings:leagueStandings(s,accounts),settings:settingsOf(s),managers:s.managers.map(m=>({...m,
   claimed:accounts.some(a=>a.manager===m.id),
   ...(user.commissioner?{registeredEmail:accounts.find(a=>a.manager===m.id)?.email||null}: {})})),draftPreferences:{[user.manager]:preferencesOf(s,user.manager)},
   viewer:{manager:user.manager,commissioner:user.commissioner,name:user.name}};}
@@ -1440,6 +1500,8 @@ async function remindPendingInjuries(){
       body:`${a.replacement} kicks off soon. Review your substitution before kickoff.`,url:'/?tab=Notifications'});
   }catch(e){console.error('Injury reminder:',e.message);}finally{reminderBusy=false;}
 }
+setInterval(publishEditorial,5*60000);
+setTimeout(publishEditorial,25000);
 setInterval(remindPendingInjuries,60000);
 setInterval(pollLiveInjuries,120000);
 setTimeout(pollLiveInjuries,18000);
