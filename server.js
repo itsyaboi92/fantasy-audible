@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const { Pool } = require('pg');
 const { initializeESPN, getESPNPlayers } = require('./espn');
 const liveNFL = require('./live-nfl');
+const matchupAnalytics = require('./matchup-analytics');
 
 const PORT = process.env.PORT || 3000;
 const MAX_TEAMS = 12;
@@ -834,9 +835,31 @@ async function api(req,res,route){
           // Season projections must not masquerade as week projections.
           weeklyProjectedPoints:null};
       }
+      // Historical projections are estimates, calculated from completed games with
+      // the league's configured scoring; never present them as ESPN forecasts.
+      let historical=null;
+      try{
+        const positions=new Map(directory.players.map(p=>[String(p.id),p.position]));
+        historical=await matchupAnalytics.analytics(season,week,settingsOf(current.state).scoring,positions);
+        for(const [id,entry] of Object.entries(players)){
+          const h=historical.players[id];if(h){entry.weeklyProjectedPoints=h.weeklyProjectedPoints;
+            entry.projectionMethod=h.projectionMethod;entry.projectionSample=h.projectionSample;}
+        }
+        const games=await liveNFL.loadWeek(season,week);
+        const opponents={};for(const g of games)for(const side of g.teams){
+          const opp=g.teams.find(t=>String(t.id)!==String(side.id));
+          if(opp)opponents[String(side.id)]=String(opp.id);
+        }
+        for(const entry of Object.values(players)){
+          const opponentId=opponents[String(entry.teamId)];
+          const rank=historical.rankings[opponentId+':'+entry.position];
+          if(rank){entry.oprk=rank.rank;entry.oprkAverageAllowed=rank.averageAllowed;entry.oprkSample=rank.sample;}
+        }
+      }catch(e){console.warn('Historical matchup analytics unavailable:',e.message);}
       return send(res,200,{season,week,players,updatedAt:new Date().toISOString(),
-        projectionStatus:'UNAVAILABLE',oprkStatus:'UNAVAILABLE',
-        notice:'Team identities and injury designations from ESPN fantasy directory. No unverified weekly projections or OPRK.'});
+        historicalMethod:historical?.method||'Unavailable',historicalGames:historical?.gamesProcessed||0,
+        projectionStatus:historical?'HISTORICAL_ESTIMATE':'UNAVAILABLE',oprkStatus:historical&&Object.keys(historical.rankings).length?'HISTORICAL_32_TEAM_RANK':'UNAVAILABLE',
+        notice:'Projections are weighted historical estimates using league scoring, not ESPN forecasts. OPRK shown only when a complete 32-defense sample is available.'});
     }catch(e){return send(res,503,{error:'NFL player metadata unavailable',details:e.message});}
   }
   if(req.method==='GET'&&route==='/api/nfl/week-matchups'){
