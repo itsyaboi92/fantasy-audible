@@ -3,6 +3,7 @@ let espn=null,espnError='',draftSearch='',draftPosition='ALL',loadingESPN=false;
 let weeklyDirectory={},weeklyUpdatedAt=null,weeklyLoading=false,weeklyLastFetch=0;
 let playerSort='rank';
 let breakdownPlayerId=null;
+let profilePlayerId=null,profileHistory=null,profileError="",profileLoading=false,expandedProfileWeek=null;
 let transactionData=null,transactionError='',loadingTransactions=false,lastTransactionFetch=0;
 let serverOffsetMs=0,clockSynchronized=false,clockSyncInProgress=false,lastClockSync=0;
 let settingsDraft=null,prefsDraft=null,settingsDirty=false,prefsDirty=false;
@@ -116,6 +117,41 @@ function sortDirectory(players){
   });
 }
 function updatePlayerSort(value){playerSort=value;render();}
+async function openPlayerProfile(id){
+  profilePlayerId=String(id);profileHistory=null;profileError='';profileLoading=true;
+  expandedProfileWeek=null;render();
+  try{
+    const response=await fetch('/api/players/history?id='+encodeURIComponent(id),
+      {headers:{Authorization:'Bearer '+token}});
+    const data=await response.json();
+    if(!response.ok)throw Error(data.error||'History unavailable');
+    if(profilePlayerId===String(id))profileHistory=data;
+  }catch(e){if(profilePlayerId===String(id))profileError=e.message;}
+  finally{if(profilePlayerId===String(id)){profileLoading=false;render();}}
+}
+function closePlayerProfile(){profilePlayerId=null;profileHistory=null;expandedProfileWeek=null;render();}
+function toggleProfileWeek(week){expandedProfileWeek=expandedProfileWeek===week?null:week;render();}
+function playerProfileCard(){
+  if(!profilePlayerId)return '';
+  const x=espn?.players?.find(p=>String(p.id)===profilePlayerId);
+  const h=profileHistory;
+  const title=esc(x?.name||h?.player?.name||'Player');
+  if(profileLoading)return card(title,`<p>Loading 2026 season history…</p><button onclick="closePlayerProfile()">Close</button>`);
+  if(profileError)return card(title,`<p>${esc(profileError)}</p><button onclick='openPlayerProfile(${jsAttr(profilePlayerId)})'>Retry</button> <button onclick="closePlayerProfile()">Close</button>`);
+  if(!h)return '';
+  const rows=h.weeks.map(w=>{
+    const detail=expandedProfileWeek===w.week?`<div style="padding:8px 0">
+      ${(w.breakdown||[]).map(r=>`<div class="row"><span>${esc(r.label)} (${esc(r.quantity)} × ${esc(r.rate)})</span><b>${fmt(r.points)}</b></div>`).join('')||'<p class="muted small">No scoring statistics reported.</p>'}
+      ${w.unsupported?.length?`<p class="muted small">Not fully verified: ${esc(w.unsupported.join(', '))}</p>`:''}
+      </div>`:'';
+    return `<div><button type="button" style="width:100%;text-align:left" onclick="toggleProfileWeek(${w.week})">Week ${w.week} · ${esc(w.opponent?'vs '+w.opponent:'Opponent unavailable')} — ${w.status==='final'?fmt(w.points)+'*':esc(w.status)} ${expandedProfileWeek===w.week?'▴':'▾'}</button>${detail}</div>`;
+  }).join('');
+  return card(title+' — '+esc(h.season)+' season',
+    `<p><b>Season points:</b> ${fmt(h.total)}* · <b>Per game:</b> ${h.average==null?'—':fmt(h.average)}* · <b>Games:</b> ${h.gamesPlayed}</p>
+    ${rows||'<p>No completed games found for this season.</p>'}
+    <p class="muted small">* Provisional totals calculated using current commissioner settings. Some event-level scoring categories are not yet supported. Missing games or unavailable statistics are not counted as zero.</p>
+    <button onclick="closePlayerProfile()">Close profile</button>`);
+}
 function showPlayerBreakdown(id){breakdownPlayerId=String(id);render();}
 function hidePlayerBreakdown(){breakdownPlayerId=null;render();}
 function breakdownCard(){
@@ -275,8 +311,8 @@ function playerTable(){if(!espn)return card('ESPN player data',`<p>${esc(espnErr
     <p class="muted small">Showing ${players.length} players. Missing ranks and projections show —.</p>
     ${transactionsOpen?(transactionError?`<p>${esc(transactionError)} <button onclick="loadTransactions()">Retry</button></p>`:
       `<p class="muted small">Free agents: Add immediately · Locked: game in progress · Waivers: claim after final. Waiver priority: ${esc((transactionData?.priority||[]).join(' → ')||'Not initialized')}</p>`):''}
-    ${breakdownCard()}<div id="draftPlayerRows">${players.map(x=>{const legal=canDraftPosition(x.position);
-      return `<div class="row"><div><b>${x.rank==null?'—':'#'+x.rank} ${esc(x.name)}</b>
+    ${playerProfileCard()}${breakdownCard()}<div id="draftPlayerRows">${players.map(x=>{const legal=canDraftPosition(x.position);
+      return `<div class="row"><div><b>${x.rank==null?'—':'#'+x.rank} <button type="button" style="border:0;background:transparent;padding:0;text-decoration:underline;font:inherit;color:inherit;cursor:pointer" onclick='openPlayerProfile(${jsAttr(String(x.id))})'>${esc(x.name)}</button></b>
         <div class="muted small">${esc(x.position)} · ESPN ADP ${x.averageDraftPosition==null?'—':fmt(x.averageDraftPosition)}</div>
         ${injuryLabel(x.injuryStatus)}</div><div style="text-align:right"><b>${x.projectedPoints==null?'—':fmt(x.projectedPoints)}</b>
         <div class="muted small">Season projected PPR</div>
