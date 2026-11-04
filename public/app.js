@@ -542,24 +542,54 @@ function matchupSwipeStart(e){matchupTouchX=e.touches?.[0]?.clientX??null;}
 function matchupSwipeEnd(e){if(matchupTouchX===null)return;const diff=(e.changedTouches?.[0]?.clientX??matchupTouchX)-matchupTouchX;matchupTouchX=null;if(Math.abs(diff)>55)selectMatchup(matchupIndex+(diff<0?1:-1));}
 function matchupStarters(id){const starters=state.players.filter(x=>x.owner===id&&!['BENCH','IR'].includes(x.slot));
   const used=new Set();return STARTER_ORDER.map(slot=>{const player=starters.find(x=>!used.has(x.id)&&(x.slot===slot||(slot==='FLEX'&&['FLEX','RB','WR','TE'].includes(x.slot))));if(player)used.add(player.id);return player||null;});}
-function matchupPlayerCell(x){if(!x)return '<span class="muted">Empty</span>';
-  return `<b>${esc(x.name)}</b><div class="muted small">${esc(x.team||'')} · ${esc(x.status||'')}</div><strong>${fmt(score(x))}</strong>`;}
-function matchupView(){const week=selectedMatchupWeek(),games=state.matchupSchedule?.[week]||[];
+function matchupPlayerCell(x){
+  if(!x)return '<span class="muted">Empty</span>';
+  const playerId=String(x.id||'');
+  const clickable=playerId&&espn?.players?.some(p=>String(p.id)===playerId);
+  const name=clickable?`<button class="fa-match-player-link" onclick='openPlayerProfile(${jsAttr(playerId)})'>${esc(x.name)}</button>`:`<b>${esc(x.name)}</b>`;
+  return `${name}<div class="muted small">${esc(x.team||'')} · ${esc(x.status||'upcoming')}</div><strong>${fmt(Number(x.points??score(x))||0)}</strong>`;
+}
+function matchupView(){
+  const week=selectedMatchupWeek(),games=state.matchupSchedule?.[week]||[];
   if(!games.length){const count=state.managers.filter(x=>x.claimed).length;
-    const reason=count<2?'At least two registered teams are required.':state.draft?.status!=='completed'?'Matchups will be generated automatically when the draft finishes.':state.matchupScheduleNotice||(!state.scheduleStartWeek?'Draft completed. Waiting for ESPN to confirm the first eligible NFL week.':week<state.scheduleStartWeek?'Your league begins in NFL Week '+state.scheduleStartWeek+'.': 'No matchup scheduled for this week.');
-    return `<h1>Week ${week} Matchups</h1>${card('League matchups',esc(reason))}`;}
+    const reason=count<2?'At least two registered teams are required.':state.draft?.status!=='completed'?'Matchups will be generated automatically when the draft finishes.':state.matchupScheduleNotice||(!state.scheduleStartWeek?'Draft completed. Automatic schedule activation pending; checking ESPN NFL kickoff calendar.':week<state.scheduleStartWeek?'Your league begins in NFL Week '+state.scheduleStartWeek+'.':'No matchup scheduled for this week.');
+    return `<h1>Week ${week} Matchups</h1>${card('League matchups',esc(reason))}`;
+  }
   if(matchupIndex>=games.length)matchupIndex=0;
   if(matchupWeek===null){matchupWeek=week;const mine=games.findIndex(g=>g.home===manager||g.away===manager);if(mine>=0)matchupIndex=mine;}
   const game=games[matchupIndex],left=m(game.home),right=m(game.away);
   const byeTeams=state.managers.filter(x=>x.claimed&&!games.some(g=>g.home===x.id||g.away===x.id));
   const current=Number(state.nflDirectorySync?.currentWeek||state.week||1),isCurrent=week===current;
   const recorded=state.weeklyLedger?.[week]?.matchups?.[game.id];
-  const leftPlayers=recorded?.homeLineup|| (isCurrent?matchupStarters(game.home):[]),rightPlayers=recorded?.awayLineup||(isCurrent?matchupStarters(game.away):[]);
-  const cells=STARTER_ORDER.map((slot,i)=>`<div class="fa-match-row"><div class="fa-player">${leftPlayers[i]?matchupPlayerCell(leftPlayers[i]):'<span class="muted">No saved lineup</span>'}</div><div class="fa-position">${slot}</div><div class="fa-player fa-right">${rightPlayers[i]?matchupPlayerCell(rightPlayers[i]):'<span class="muted">No saved lineup</span>'}</div></div>`).join('');
-  return `<style>.fa-week{display:flex;align-items:center;justify-content:center;gap:12px;margin:14px 0}.fa-week select{padding:8px;background:#202d43;color:inherit;border-radius:8px}.fa-match-strip{display:flex;overflow-x:auto;gap:8px;padding:8px 0 16px;scroll-snap-type:x mandatory}.fa-match-pill{flex:0 0 auto;max-width:220px;white-space:normal;scroll-snap-align:center}.fa-match-pill.active{outline:2px solid #66da8c}.fa-head{display:grid;grid-template-columns:minmax(0,1fr) 36px minmax(0,1fr);align-items:center;text-align:center;gap:6px;padding:12px 0}.fa-head b{overflow-wrap:anywhere}.fa-total{font-size:26px;font-weight:700;margin:8px}.fa-match-row{display:grid;grid-template-columns:minmax(0,1fr) 46px minmax(0,1fr);gap:5px;align-items:stretch;border-top:1px solid #384357;min-height:66px}.fa-player{padding:10px 4px;min-width:0;overflow-wrap:anywhere}.fa-player strong{display:block;margin-top:5px}.fa-right{text-align:right}.fa-position{display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:bold;background:#101824}.fa-match-surface{touch-action:pan-y}</style><h1>Week ${week} Matchups</h1><div class="fa-week"><button onclick="setMatchupWeek(${week-1})" ${week===1?'disabled':''}>‹</button><label>Week <select onchange="setMatchupWeek(this.value)">${Array.from({length:14},(_,i)=>`<option value="${i+1}" ${week===i+1?'selected':''}>${i+1}</option>`).join('')}</select></label><button onclick="setMatchupWeek(${week+1})" ${week===14?'disabled':''}>›</button></div>
-    <div class="fa-match-strip">${games.map((g,i)=>`<button class="fa-match-pill ${i===matchupIndex?'active':''}" onclick="selectMatchup(${i})">${teamPhoto(g.home,25)} ${esc(m(g.home)?.team||g.home)} vs ${teamPhoto(g.away,25)} ${esc(m(g.away)?.team||g.away)}</button>`).join('')}</div>
-    <section class="card fa-match-surface" ontouchstart="matchupSwipeStart(event)" ontouchend="matchupSwipeEnd(event)"><div class="fa-head"><div>${teamPhoto(game.home,58)}<br><b>${esc(left?.team||'Team')}</b><div class="fa-total">${recorded?fmt(recorded.homeScore):'—'}</div></div><span>VS</span><div>${teamPhoto(game.away,58)}<br><b>${esc(right?.team||'Team')}</b><div class="fa-total">${recorded?fmt(recorded.awayScore):'—'}</div></div></div>
-    ${byeTeams.length?`<p class="muted small">Bye: ${byeTeams.map(x=>esc(x.team||x.id)).join(', ')}</p>`:''}<p class="muted small">${recorded?(recorded.status==='final'?'Final · verified matchup result':'Provisional · not counted in standings'):'No recorded scores for this week'}</p>${cells}<p class="muted small" style="text-align:center">Swipe left or right to view other matchups</p></section><section class="card"><h3>League standings · verified finals only</h3><div style="overflow-x:auto"><table style="width:100%;text-align:left"><thead><tr><th>Team</th><th>W</th><th>L</th><th>T</th><th>PF</th></tr></thead><tbody>${(state.standings||[]).map(r=>`<tr><td>${esc(m(r.manager)?.team||r.manager)}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.ties}</td><td>${fmt(r.pointsFor)}</td></tr>`).join('')}</tbody></table></div></section>`;}
+  const lineupBySlot=rows=>{const used=new Set();return STARTER_ORDER.map(slot=>{const p=(rows||[]).find(x=>!used.has(x.id)&&(x.slot===slot||(slot==='FLEX'&&['RB','WR','TE'].includes(x.slot))));if(p)used.add(p.id);return p||null;});};
+  const leftPlayers=recorded?.homeLineup?lineupBySlot(recorded.homeLineup):(isCurrent?matchupStarters(game.home):[]);
+  const rightPlayers=recorded?.awayLineup?lineupBySlot(recorded.awayLineup):(isCurrent?matchupStarters(game.away):[]);
+  const cells=STARTER_ORDER.map((slot,i)=>`<div class="fa-match-row"><div class="fa-player">${leftPlayers[i]?matchupPlayerCell(leftPlayers[i]):'<span class="muted">Open slot</span>'}</div><div class="fa-position">${slot}</div><div class="fa-player fa-right">${rightPlayers[i]?matchupPlayerCell(rightPlayers[i]):'<span class="muted">Open slot</span>'}</div></div>`).join('');
+  const status=recorded?(recorded.status==='final'?'Final':'Live / provisional'):(week>current?'Upcoming':'Not started');
+  const total=(id,side)=>recorded?fmt(Number(recorded[side+'Score'])||0):fmt(matchupStarters(id).reduce((sum,p)=>sum+(Number(p?.points)||0),0));
+  return `<style>
+  .fa-week{display:flex;align-items:center;justify-content:center;gap:12px;margin:14px 0}.fa-week select{padding:8px;background:#202d43;color:inherit;border-radius:8px}
+  .fa-match-strip{display:flex;overflow-x:auto;gap:8px;padding:10px 0 16px;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch}
+  .fa-match-pill{flex:0 0 auto;max-width:210px;white-space:normal;scroll-snap-align:center;min-height:50px}.fa-match-pill.active{outline:2px solid #66da8c}
+  .fa-match-surface{touch-action:pan-y;overflow:hidden}.fa-head{display:grid;grid-template-columns:minmax(0,1fr) 36px minmax(0,1fr);align-items:center;text-align:center;gap:6px;padding:12px 0 20px}
+  .fa-head b{overflow-wrap:anywhere}.fa-total{font-size:32px;font-weight:800;margin:8px 0 3px;font-variant-numeric:tabular-nums}
+  .fa-match-row{display:grid;grid-template-columns:minmax(0,1fr) 44px minmax(0,1fr);gap:5px;align-items:stretch;border-top:1px solid #384357;min-height:72px}
+  .fa-match-row:nth-child(even){background:rgba(255,255,255,.025)}.fa-player{padding:12px 5px;min-width:0;overflow-wrap:anywhere;font-size:14px}
+  .fa-player strong{display:block;margin-top:7px;font-size:18px}.fa-right{text-align:right}.fa-position{display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:bold;background:#101824}
+  .fa-match-player-link{background:transparent;border:0;padding:0;text-align:inherit;color:#77dbb6;font:inherit;font-weight:700;text-decoration:underline}
+  .fa-match-meta{text-align:center;margin:4px 0 16px}.fa-match-nav{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:10px 0}
+  @media(max-width:420px){.fa-head .fa-total{font-size:26px}.fa-player{font-size:12px}.fa-position{font-size:11px}}
+  </style>
+  <h1>Week ${week} Matchups</h1><div class="fa-week"><button onclick="setMatchupWeek(${week-1})" ${week===1?'disabled':''}>‹</button><label>NFL Week <select onchange="setMatchupWeek(this.value)">${Array.from({length:14},(_,i)=>`<option value="${i+1}" ${week===i+1?'selected':''}>${i+1}</option>`).join('')}</select></label><button onclick="setMatchupWeek(${week+1})" ${week===14?'disabled':''}>›</button></div>
+  <div class="fa-match-strip">${games.map((g,i)=>`<button class="fa-match-pill ${i===matchupIndex?'active':''}" onclick="selectMatchup(${i})">${teamPhoto(g.home,24)} ${esc(m(g.home)?.team||g.home)} vs ${teamPhoto(g.away,24)} ${esc(m(g.away)?.team||g.away)}</button>`).join('')}</div>
+  <section class="card fa-match-surface" ontouchstart="matchupSwipeStart(event)" ontouchend="matchupSwipeEnd(event)">
+    <div class="fa-match-nav"><button onclick="selectMatchup(${matchupIndex-1})">‹ Previous</button><span class="muted small">Matchup ${matchupIndex+1} of ${games.length}</span><button onclick="selectMatchup(${matchupIndex+1})">Next ›</button></div>
+    <div class="fa-head"><div>${teamPhoto(game.home,54)}<br><b>${esc(left?.team||'Team')}</b><div class="fa-total">${total(game.home,'home')}</div></div><span>VS</span><div>${teamPhoto(game.away,54)}<br><b>${esc(right?.team||'Team')}</b><div class="fa-total">${total(game.away,'away')}</div></div></div>
+    <div class="fa-match-meta muted small">${esc(status)} · ${recorded?.status==='final'?'Verified final':'Scores remain provisional until verified'}</div>
+    ${cells}<p class="muted small" style="text-align:center">Swipe left/right for other matchups · Scroll down for players</p>
+  </section>${byeTeams.length?card('This week’s bye',byeTeams.map(x=>esc(x.team||x.id)).join(', ')):''}
+  <section class="card"><h3>League standings · verified finals only</h3><div style="overflow-x:auto"><table style="width:100%;text-align:left"><thead><tr><th>Team</th><th>W</th><th>L</th><th>T</th><th>PF</th></tr></thead><tbody>${(state.standings||[]).map(r=>`<tr><td>${esc(m(r.manager)?.team||r.manager)}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.ties}</td><td>${fmt(r.pointsFor)}</td></tr>`).join('')}</tbody></table></div></section>`;
+}
 function chatComposerFocused(){
   const composer=$('chatInput');
   return !!(composer&&document.activeElement===composer);
