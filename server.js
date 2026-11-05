@@ -682,29 +682,22 @@ function eligibility(s,starter,bench){if(!starter||!bench||starter.owner!==bench
   if(starter.team===bench.team&&bench.kickoff<=s.phase)return 'handcuff';
   if(bench.kickoff>s.phase)return 'later';return null;}
 // Lineup moves are validated against the stored roster and game state.
-function lineupLocked(s,player){
+// A lineup edit uses a freshly verified NFL-week schedule, not the optional
+// scoring snapshot (which may not exist until the draft is complete).
+function lineupLocked(s,player,verifiedSchedule){
   if(!player)return true;
-  // ESPN players use their current NFL game, never the old demo phase or a
-  // stale `playing` status left behind by a previous weekly sync.
-  if(player.espnId || player.nflGame){
-    const teamId=String(player.nflTeamId||'');
-    const games=s.nflSync?.games||[];
-    const game=games.find(g=>g.teams?.some(t=>String(t.id)===teamId));
-    const syncedWeek=Number(s.nflSync?.week);
-    const activeWeek=Number(s.nflDirectorySync?.currentWeek||s.week);
-    const current=Number.isFinite(syncedWeek)&&syncedWeek===activeWeek;
-    if(current&&game){
-      const at=Date.parse(game.kickoff);
-      return !Number.isFinite(at)||Date.now()>=at||['live','final','completed'].includes(String(game.status).toLowerCase());
+  if(player.espnId||player.nflGame){
+    if(!verifiedSchedule||!Array.isArray(verifiedSchedule.games))return true;
+    const id=liveNFL.teamId(player);
+    if(!id)return true;
+    const game=verifiedSchedule.games.find(g=>g.teams?.some(t=>String(t.id)===String(id)));
+    if(!game){
+      // A team not scheduled in a complete NFL week has a bye.
+      return verifiedSchedule.games.length<10;
     }
-    // A valid per-player current-week kickoff can also be used when the
-    // full-week sync has not arrived. Never trust an older week's status.
-    if(current&&player.nflGame?.kickoff){
-      const at=Date.parse(player.nflGame.kickoff);
-      if(Number.isFinite(at))return Date.now()>=at;
-    }
-    // Missing current-week game information must not permit an unsafe swap.
-    return true;
+    const kickoff=Date.parse(game.kickoff);
+    if(!Number.isFinite(kickoff))return true;
+    return Date.now()>=kickoff||['playing','live','final','completed'].includes(String(game.status).toLowerCase());
   }
   if(['playing','injured','finished','final','completed'].includes(String(player.status).toLowerCase()))return true;
   if(player.kickoffAt){const at=Date.parse(player.kickoffAt);if(Number.isFinite(at)&&Date.now()>=at)return true;}
@@ -716,7 +709,7 @@ function lineupCapacity(s,slot){return slot==='BENCH'?settingsOf(s).roster.bench
   slot==='IR'?settingsOf(s).roster.ir:settingsOf(s).roster.starters[slot];}
 function eligibleIR(player){return ['OUT','IR','INJURED_RESERVE','PUP','NFI'].includes(
   String(player.injuryStatus||'').toUpperCase());}
-function assignLineup(s,actor,body){
+function assignLineup(s,actor,body,verifiedSchedule){
   const player=s.players.find(p=>p.id===body.playerId&&p.owner===actor.manager);
   const target=String(body.slot||'');
   const allowed=['QB','RB','WR','TE','FLEX','D/ST','K','BENCH','IR'];
@@ -724,7 +717,7 @@ function assignLineup(s,actor,body){
   if(!allowed.includes(target)||!Number.isInteger(lineupCapacity(s,target))||lineupCapacity(s,target)<1)
     return failure(400,'Invalid or disabled roster slot');
   if(player.slot===target)return {ok:true};
-  if(lineupLocked(s,player))return failure(409,'This player is locked after kickoff');
+  if(lineupLocked(s,player,verifiedSchedule))return failure(409,'This player is locked after kickoff');
   if(target==='IR'&&!eligibleIR(player))return failure(409,'Only IR/out-designated players can enter IR');
   if(!['BENCH','IR'].includes(target)&&!slotEligible(player,target))
     return failure(409,'Player is not eligible for this starting position');
@@ -741,7 +734,7 @@ function assignLineup(s,actor,body){
     const displacedId=String(body.displacedId||'');
     const displaced=occupied.find(p=>p.id===displacedId);
     if(!displaced)return failure(409,'Choose which starter to replace');
-    if(lineupLocked(s,displaced))return failure(409,'The current starter is locked');
+    if(lineupLocked(s,displaced,verifiedSchedule))return failure(409,'The current starter is locked');
     if(s.injuries?.some(i=>i.active&&i.player===displaced.id)||displaced.scoringMode)
       return failure(409,'The current starter cannot be moved');
     if(player.slot==='IR'&&!eligibleIR(displaced))return failure(409,'Cannot swap a healthy player into IR');
@@ -756,7 +749,7 @@ function assignLineup(s,actor,body){
   return {ok:true};
 }
 // Save a complete starting lineup atomically. No partial moves are committed.
-function saveStartingLineup(s,actor,body){
+function saveStartingLineup(s,actor,body,verifiedSchedule){
   const starters=settingsOf(s).roster.starters;
   const slots=Object.entries(starters).flatMap(([position,count])=>
     Array.from({length:count},(_,index)=>position+':'+index));
@@ -788,7 +781,7 @@ function saveStartingLineup(s,actor,body){
     for(let index=0;index<existing.length;index++){
       const player=existing[index];
       const key=position+':'+index;
-      if((lineupLocked(s,player)||player.scoringMode||
+      if((lineupLocked(s,player,verifiedSchedule)||player.scoringMode||
         s.injuries?.some(i=>i.active&&i.player===player.id))&&requested[key]!==player.id)
         return failure(409,player.name+' is locked in '+key);
     }
@@ -796,7 +789,7 @@ function saveStartingLineup(s,actor,body){
   for(const player of mine){
     const target=proposed.get(player.id)||
       (player.slot==='IR'?'IR':'BENCH');
-    if(target!==player.slot&&lineupLocked(s,player))
+    if(target!==player.slot&&lineupLocked(s,player,verifiedSchedule))
       return failure(409,player.name+' is locked after kickoff');
     if(target!==player.slot&&(player.scoringMode||player.scoreAtSwap!==undefined||
       s.injuries?.some(i=>i.active&&i.player===player.id)))
@@ -1147,6 +1140,15 @@ async function api(req,res,route){
   let espnData=null;
   if(['/api/draft/start','/api/draft/pick','/api/transactions/add','/api/transactions/claim'].includes(route)){
     try{espnData=await draftPool();}catch(e){return send(res,503,{error:'ESPN player data unavailable',details:e.message});}}
+  let verifiedLineupSchedule=null;
+  if(route==='/api/lineup/save'||route==='/api/lineup/assign'){
+    try{
+      const calendar=await currentNFLCalendar();
+      const games=await liveNFL.loadWeek(calendar.season,calendar.week);
+      if(games.length<10)throw Error('Incomplete NFL schedule');
+      verifiedLineupSchedule={season:calendar.season,week:calendar.week,games};
+    }catch(e){return send(res,503,{error:'Unable to verify NFL kickoff times. Lineup changes temporarily paused.',details:e.message});}
+  }
   let nflMap=null;
   if(route.startsWith('/api/transactions/')){
     try{nflMap=gameMapFrom(await nflGames());}catch(e){return send(res,503,{error:e.message});}
@@ -1357,8 +1359,8 @@ async function api(req,res,route){
       if(taken(s,name,team.id))return failure(409,'Team name already taken');
       const old=team.team;team.team=name;audit(s,'RENAME',team.id,old+' renamed to '+name);
       return {ok:true,team:name};}
-    if(route==='/api/lineup/save')return saveStartingLineup(s,actor,body);
-    if(route==='/api/lineup/assign')return assignLineup(s,actor,body);
+    if(route==='/api/lineup/save')return saveStartingLineup(s,actor,body,verifiedLineupSchedule);
+    if(route==='/api/lineup/assign')return assignLineup(s,actor,body,verifiedLineupSchedule);
     if(route==='/api/substitute'){
       const injury=s.injuries.find(i=>i.id===body.injury&&i.active),starter=s.players.find(p=>p.id===injury?.player),
         bench=s.players.find(p=>p.id===body.bench);
