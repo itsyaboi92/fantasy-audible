@@ -72,7 +72,7 @@ function playerRow(x){return `<div class="row"><div><b>${esc(x.name)}</b><div cl
 async function apiPost(route,body){const response=await fetch(route,{method:'POST',headers:{
   'Content-Type':'application/json',Authorization:'Bearer '+token},body:JSON.stringify(body)});
   const result=await response.json();if(!response.ok)throw Error(result.error||'Request failed');return result;}
-async function act(route,body){if(route==='/api/substitute'&&!confirm('This substitution is permanent. Your starter points will be forfeited. Continue?'))return;
+async function act(route,body){if(route==='/api/substitute'&&!confirm('This substitution is permanent for this NFL week. Removed players cannot return, and their points are forfeited. Continue?'))return;
   try{await apiPost(route,body);toast('League updated');}catch(e){toast(e.message);}}
 async function renameTeam(){const current=m(manager)?.team||'',proposed=prompt('Enter your fantasy team name:',current);
   if(proposed===null)return;const name=proposed.trim().replace(/\s+/g,' ');if(name===current)return;
@@ -102,7 +102,7 @@ async function removeTeamPhoto(){if(!confirm('Remove your team photo?'))return;
   try{await apiPost('/api/team-photo',{photo:null});m(manager).photo=null;render();toast('Team photo removed');}
   catch(e){toast(e.message);}}
 function injuryCard(injury){const starter=p(injury.player);if(!starter||starter.owner!==manager)return '';
-  const choices=state.players.filter(x=>x.owner===manager&&x.slot==='BENCH'&&x.pos===starter.pos)
+  const choices=state.players.filter(x=>x.owner===manager&&x.slot==='BENCH'&&x.pos===starter.pos&&!(state.injurySwapHistory||[]).some(h=>h.week===state.week&&h.removedId===x.id))
     .map(x=>{const same=x.team===starter.team&&x.kickoff<=state.phase;
       const later=x.kickoff>state.phase,eligible=same||later;
       return `<div class="row"><div><b>${esc(x.name)}</b><div class="muted small">${same?'Same-team handcuff: future points only':later?'Later kickoff: full-game points':'Not eligible'}</div></div>
