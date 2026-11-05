@@ -684,26 +684,28 @@ function eligibility(s,starter,bench){if(!starter||!bench||starter.owner!==bench
 // Lineup moves are validated against the stored roster and game state.
 // A lineup edit uses a freshly verified NFL-week schedule, not the optional
 // scoring snapshot (which may not exist until the draft is complete).
-function lineupLocked(s,player,verifiedSchedule){
-  if(!player)return true;
+function lineupLockReason(s,player,verifiedSchedule){
+  if(!player)return 'Missing player';
   if(player.espnId||player.nflGame){
-    if(!verifiedSchedule||!Array.isArray(verifiedSchedule.games))return true;
+    if(!verifiedSchedule||!Array.isArray(verifiedSchedule.games))return 'NFL schedule unavailable';
     const id=liveNFL.teamId(player);
-    if(!id)return true;
+    if(!id)return 'NFL team could not be identified';
     const game=verifiedSchedule.games.find(g=>g.teams?.some(t=>String(t.id)===String(id)));
-    if(!game){
-      // A team not scheduled in a complete NFL week has a bye.
-      return verifiedSchedule.games.length<10;
-    }
+    if(!game)return verifiedSchedule.games.length<10?'NFL schedule incomplete':null; // bye
     const kickoff=Date.parse(game.kickoff);
-    if(!Number.isFinite(kickoff))return true;
-    return Date.now()>=kickoff||['playing','live','final','completed'].includes(String(game.status).toLowerCase());
+    if(!Number.isFinite(kickoff))return 'Kickoff timestamp unavailable';
+    // The verified UTC kickoff is authoritative. ESPN status is not a substitute:
+    // stale status labels must not lock players before kickoff.
+    if(Date.now()>=kickoff)return `NFL kickoff passed (${new Date(kickoff).toISOString()}, season ${verifiedSchedule.season}, week ${verifiedSchedule.week})`;
+    return null;
   }
-  if(['playing','injured','finished','final','completed'].includes(String(player.status).toLowerCase()))return true;
-  if(player.kickoffAt){const at=Date.parse(player.kickoffAt);if(Number.isFinite(at)&&Date.now()>=at)return true;}
-  if(typeof player.kickoff==='number'&&player.kickoff!==99&&player.kickoff<=s.phase)return true;
-  return false;
+  if(['playing','injured','finished','final','completed'].includes(String(player.status).toLowerCase()))return 'Legacy player status: '+player.status;
+  if(player.kickoffAt){const at=Date.parse(player.kickoffAt);if(Number.isFinite(at)&&Date.now()>=at)return 'Stored kickoff passed: '+player.kickoffAt;}
+  if(typeof player.kickoff==='number'&&player.kickoff!==99&&player.kickoff<=s.phase)return 'Legacy demo phase lock';
+  return null;
 }
+function lineupLocked(s,player,verifiedSchedule){return lineupLockReason(s,player,verifiedSchedule)!==null;}
+
 function slotEligible(player,slot){return slot==='FLEX'?['RB','WR','TE'].includes(player.pos):player.pos===slot;}
 function lineupCapacity(s,slot){return slot==='BENCH'?settingsOf(s).roster.bench:
   slot==='IR'?settingsOf(s).roster.ir:settingsOf(s).roster.starters[slot];}
@@ -783,14 +785,14 @@ function saveStartingLineup(s,actor,body,verifiedSchedule){
       const key=position+':'+index;
       if((lineupLocked(s,player,verifiedSchedule)||player.scoringMode||
         s.injuries?.some(i=>i.active&&i.player===player.id))&&requested[key]!==player.id)
-        return failure(409,player.name+' is locked in '+key);
+        return failure(409,player.name+' is locked in '+key+' ('+(lineupLockReason(s,player,verifiedSchedule)|| (player.scoringMode?'injury substitution already committed':'pending injury decision'))+')');
     }
   }
   for(const player of mine){
     const target=proposed.get(player.id)||
       (player.slot==='IR'?'IR':'BENCH');
     if(target!==player.slot&&lineupLocked(s,player,verifiedSchedule))
-      return failure(409,player.name+' is locked after kickoff');
+      return failure(409,player.name+' is locked after kickoff ('+lineupLockReason(s,player,verifiedSchedule)+')');
     if(target!==player.slot&&(player.scoringMode||player.scoreAtSwap!==undefined||
       s.injuries?.some(i=>i.active&&i.player===player.id)))
       return failure(409,player.name+' cannot be moved after an injury decision');
@@ -1144,9 +1146,16 @@ async function api(req,res,route){
   if(route==='/api/lineup/save'||route==='/api/lineup/assign'){
     try{
       const calendar=await currentNFLCalendar();
-      const games=await liveNFL.loadWeek(calendar.season,calendar.week);
+      // Use the league's active NFL week, not ESPN's rolling current week.
+      // The two can differ around Thursday kickoff and during week rollover.
+      const {state:leagueSnapshot}=await snapshot();
+      const leagueWeek=Number(leagueSnapshot.week);
+      const leagueSeason=Number(leagueSnapshot.scheduleSeason||leagueSnapshot.nflDirectorySync?.season||calendar.season);
+      if(!Number.isInteger(leagueWeek)||leagueWeek<1||leagueWeek>18||leagueSeason!==calendar.season)
+        throw Error(`League week/season requires synchronization (league ${leagueSeason} W${leagueWeek}, NFL ${calendar.season} W${calendar.week})`);
+      const games=await liveNFL.loadWeek(leagueSeason,leagueWeek);
       if(games.length<10)throw Error('Incomplete NFL schedule');
-      verifiedLineupSchedule={season:calendar.season,week:calendar.week,games};
+      verifiedLineupSchedule={season:leagueSeason,week:leagueWeek,games};
     }catch(e){return send(res,503,{error:'Unable to verify NFL kickoff times. Lineup changes temporarily paused.',details:e.message});}
   }
   let nflMap=null;
