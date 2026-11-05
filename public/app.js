@@ -634,7 +634,10 @@ function playerGameLocked(player){
     const meta=nflPlayerMetaCache[key]?.data?.players?.[espnId];
     const team=String(meta?.teamId||player.nflTeamId||player.team||'').toUpperCase();
     const teamId=/^\d+$/.test(team)?team:NFL_TEAM_IDS[team];
-    const game=nflMatchupCache[key]?.data?.teams?.[teamId];
+    const weeklyGames=nflMatchupCache[key]?.data?.teams||{};
+    const game=weeklyGames[teamId];
+    // Once a complete week is loaded, an unscheduled team is on bye.
+    if(!game&&teamId&&Object.keys(weeklyGames).length>=20)return false;
     if(game?.kickoff&&Number.isFinite(Date.parse(game.kickoff)))return Date.now()>=Date.parse(game.kickoff);
     const synced=state?.nflSync;
     if(Number(synced?.week)===week){
