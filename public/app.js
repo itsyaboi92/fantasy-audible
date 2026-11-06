@@ -189,6 +189,11 @@ async function openPlayerProfile(id){
 }
 function closePlayerProfile(){profilePlayerId=null;profileHistory=null;expandedProfileWeek=null;render();}
 function toggleProfileWeek(week){expandedProfileWeek=expandedProfileWeek===week?null:week;render();}
+function defenseStatTable(stats){
+  if(!stats)return '';
+  const labels={sack:'Sacks',interception:'Interceptions',forcedFumble:'Forced fumbles',fumbleRecovered:'Fumble recoveries',safety:'Safeties',blockedKick:'Blocked kicks',interceptionTD:'Interception return TDs',fumbleReturnTD:'Fumble return TDs',puntReturnTD:'Punt return TDs',kickoffReturnTD:'Kickoff return TDs',blockedKickReturnTD:'Blocked kick return TDs',twoPointReturn:'Two-point returns',onePointSafety:'One-point safeties',pointsAllowed:'Points allowed',yardsAllowed:'Offensive yards allowed'};
+  return `<section class="fa31-group"><h3>Actual D/ST statistics</h3>${Object.entries(labels).map(([k,label])=>{const x=stats[k],v=x?.value;return `<div class="fa31-stat"><span>${esc(label)}</span><b>${v===null||v===undefined?'—':esc(v)}${x?.verified?' ✓':''}</b></div>`;}).join('')}<p class="muted small">✓ Verified against final totals. — Data unavailable, not zero. Event-only counts remain provisional until reconciled.</p></section>`;
+}
 function playerProfileCard(){
   if(!profilePlayerId)return '';
   const x=espn?.players?.find(p=>String(p.id)===profilePlayerId);
@@ -199,6 +204,7 @@ function playerProfileCard(){
   if(!h)return '';
   const rows=h.weeks.map(w=>{
     const detail=expandedProfileWeek===w.week?`<div style="padding:8px 0">
+      ${defenseStatTable(w.statDetails)}
       ${(w.breakdown||[]).map(r=>`<div class="row"><span>${esc(r.label)} (${esc(r.quantity)} × ${esc(r.rate)})</span><b>${fmt(r.points)}</b></div>`).join('')||'<p class="muted small">No scoring statistics reported.</p>'}
       ${w.unsupported?.length?`<p class="muted small">Not fully verified: ${esc(w.unsupported.join(', '))}</p>`:''}
       </div>`:'';
@@ -798,7 +804,7 @@ async function loadMatchupGameStats(){
     const title=`<h2 style="margin:8px 0">${esc(data.player?.name||'Player')}</h2><div class="muted small">${esc(data.player?.position||'')} · ${esc(game?.team||'')} ${game?.homeAway==='home'?'vs':'@'} ${esc(game?.opponent||'')}</div><p class="muted small">${esc(game?.status||data.status||'Unavailable')} · ${esc(time)}${scoreRow?' · '+scoreRow:''}</p>`;
     const groupHtml=(data.groups||[]).map(g=>`<section class="fa31-group"><h3>${esc(g.name.charAt(0).toUpperCase()+g.name.slice(1))}</h3>${g.rows.map(r=>`<div class="fa31-stat"><span>${esc(r.label)}</span><b>${esc(r.value)}</b></div>`).join('')}</section>`).join('');
     const breakdown=(data.breakdown||[]).map(r=>`<div class="fa31-stat"><span>${esc(r.label)} (${esc(r.quantity)} × ${esc(r.rate)})</span><b>${fmt(r.points)}</b></div>`).join('');
-    content.innerHTML=title+(data.status==='available'?`<div class="fa31-points">${fmt(data.points)} <span>provisional fantasy pts</span></div>${groupHtml}<section class="fa31-group"><h3>Fantasy scoring breakdown</h3>${breakdown||'<p class="muted small">No supported scoring events yet.</p>'}</section>${data.unsupported?.length?`<p class="muted small">Unverified categories: ${esc(data.unsupported.join(', '))}</p>`:''}`:`<p class="muted">${esc(data.notice||'No statistics available yet.')}</p>`)+`<p class="muted small">${esc(data.notice||'Unofficial ESPN feed; fantasy ledger remains authoritative.')}</p><button onclick="loadMatchupGameStats()">Refresh stats</button>`;
+    content.innerHTML=title+(data.status==='available'?`<div class="fa31-points">${fmt(data.points)} <span>provisional fantasy pts</span></div>${data.statDetails?defenseStatTable(data.statDetails):groupHtml}<section class="fa31-group"><h3>Fantasy scoring breakdown</h3>${breakdown||'<p class="muted small">No supported scoring events yet.</p>'}</section>${data.unsupported?.length?`<p class="muted small">Unverified categories: ${esc(data.unsupported.join(', '))}</p>`:''}`:`<p class="muted">${esc(data.notice||'No statistics available yet.')}</p>`)+`<p class="muted small">${esc(data.notice||'Unofficial ESPN feed; fantasy ledger remains authoritative.')}</p><button onclick="loadMatchupGameStats()">Refresh stats</button>`;
     if(game?.status==='playing')fa31StatsTimer=setTimeout(()=>{if(fa31Selected&&!document.hidden)loadMatchupGameStats();},25000);
   }catch(e){if(request===fa31Request&&fa31Selected&&content)content.innerHTML=`<p>${esc(e.message)}</p><button onclick="loadMatchupGameStats()">Retry</button>`;}
 }
