@@ -55,8 +55,9 @@ function scorePlayer(p,rules,events=[]){
  const fgPair=parsePair(k.FG??k.FGA);
  const madeFG=fgPair?fgPair.made:get(k,'FGM','FGMADE');
  const missedFG=fgPair?fgPair.attempts-fgPair.made:get(k,'FGMISS','FGMISSED');
- // Event-level play attribution is required for distance buckets.
- // Do not award a default three points for unverified field goals.
+ // Verified made-FG count earns the minimum configured field-goal award.
+ // When individual distances are unavailable, distance bonuses remain provisional.
+ // If event-level distances are available, award their exact bucket instead.
  let eventFG=0,eventMiss=0;
  for(const e of events){
    if(String(e.athleteId)!==String(p.id))continue;
@@ -75,7 +76,12 @@ function scorePlayer(p,rules,events=[]){
    else if(e.kind==='puntReturnTD')add('Punt return TD',1,misc.puntReturnTD);
    else if(e.kind==='fumbleRecoveryTD')add('Fumble recovery TD',1,misc.fumbleRecoveryTD);
  }
- if(madeFG>eventFG)unsupported.push('field-goal distances');
+ if(madeFG>eventFG){
+   const remaining=madeFG-eventFG;
+   const minimumRate=Math.min(...[kick.fg0to39,kick.fg40to49,kick.fg50to59,kick.fg60plus].map(x=>Number(x)).filter(Number.isFinite));
+   if(Number.isFinite(minimumRate))add('Made FG (distance unverified; minimum award)',remaining,minimumRate);
+   unsupported.push('field-goal distances and possible additional distance points');
+ }
  if(missedFG>eventMiss)unsupported.push('missed field-goal distances');
  if(!events.length)unsupported.push('40+ yard TD bonuses','return touchdowns');
  return {points:Math.round(score*100)/100,breakdown,

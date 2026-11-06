@@ -1528,7 +1528,7 @@ async function syncNFLScoring(){
           if(!stats){player.liveScoreStatus='NO_BOX_SCORE_ENTRY';continue;}
           calculated=liveNFL.scorePlayer(stats,settingsOf(s).scoring);
         }
-        // Preserve known kicker PAT points; mark unverified FG distance as partial.
+        // Credit verified field-goal makes at the minimum configured rate; mark unknown distances partial.
         // Do not overwrite an in-progress injury handcuff's credited points.
         if(player.scoringMode){player.liveScoreStatus='INJURY_SUBSTITUTION_REQUIRES_EVENT_SCORING';continue;}
         player.points=calculated.points;
