@@ -1127,7 +1127,7 @@ async function api(req,res,route){
         if(rows.length)groups.push({name,rows});
       }
       return send(res,200,{...result,status:'available',groups,points:scored.points,
-        breakdown:scored.breakdown,unsupported:scored.unsupported,
+        breakdown:scored.breakdown,statDetails:isDefense?scored.statDetails:undefined,unsupported:scored.unsupported,
         notice:'Unified event/box-score reconciliation; fantasy lineup eligibility is applied separately.'});
     }catch(e){return send(res,503,{error:'Live NFL game statistics unavailable',details:e.message});}
   }
@@ -1174,7 +1174,7 @@ async function api(req,res,route){
           if(isDefense&&!defense)return {week:game.week,gameId:game.id,status:'NO_STATS',opponent:opponent?.abbreviation||null};
           const result=authoritativeGameScore(summary,{...player,pos:player.position,espnId:id},settingsOf(current.state).scoring,game);
           return {week:game.week,gameId:game.id,status:'final',opponent:game.teams.find(t=>String(t.id)!==String(team))?.abbreviation||null,
-            points:result.points,breakdown:result.breakdown,unsupported:result.unsupported,provisional:true};
+            points:result.points,breakdown:result.breakdown,statDetails:isDefense?result.statDetails:undefined,unsupported:result.unsupported,provisional:true};
         }catch(e){return {week:game.week,gameId:game.id,status:'UNAVAILABLE',error:'Game statistics unavailable'};}
       }));
       weeks.sort((a,b)=>b.week-a.week);

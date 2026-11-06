@@ -106,7 +106,7 @@ function teamLedger(summary,teamId,opponentId,rules,game){
    if(/\bintercepted\b/i.test(t)){add(e,'interception');if(td)add(e,'interceptionTD');}
    if(/\bfumbl\w*\b.*\brecover(?:ed|y)\b/i.test(t)){
     // Do not assume every fumble is lost: recovery team must be identifiable.
-    const rec=t.match(/recovered by\s+([^,.]+)/i);if(rec&&(/\bdefen(?:se|sive)\b/i.test(rec[1])||new RegExp('\\b'+own+'\\b').test(rec[1]))){add(e,'fumbleRecovered');if(td)add(e,'fumbleReturnTD');}
+    const rec=t.match(/recovered by\s+([^,.]+)/i);const ownNames={30:/\b(?:jacksonville|jaguars|jax|jac)\b/i,33:/\b(?:baltimore|ravens|bal)\b/i};if(rec&&(/\bdefen(?:se|sive)\b/i.test(rec[1])||new RegExp('\\b'+own+'\\b').test(rec[1])||(ownNames[own]?.test(rec[1])))){add(e,'fumbleRecovered');if(td)add(e,'fumbleReturnTD');}
    }
    if(/\bforced\s+fumble\b|\bfumble\s+forced\b/i.test(t))add(e,'forcedFumble');
    if(/\bsafety\b/i.test(t))add(e,'safety');
@@ -149,11 +149,21 @@ function teamLedger(summary,teamId,opponentId,rules,game){
  const breakdown=[];let points=0;
  const addScore=(label,qty,rate)=>{if(!qty||!Number.isFinite(Number(rate)))return;const v=round(qty*Number(rate));points+=v;breakdown.push({label,quantity:qty,rate:Number(rate),points:v});};
  for(const [k,v] of Object.entries(counts))addScore(k,v,k==='sack'?r.sack:r[k]);
- addScore('Points allowed',1,pointsBracket(pointsAllowed,r,'pointsAllowed'));
- addScore('Yards allowed',1,yardsBracket(yardsAllowed,r));
+ addScore(`Points allowed: ${pointsAllowed} (${pointsAllowed===0?'0':pointsAllowed<=6?'1–6':pointsAllowed<=13?'7–13':pointsAllowed<=17?'14–17':pointsAllowed<=27?'18–27':pointsAllowed<=34?'28–34':pointsAllowed<=45?'35–45':'46+'} bracket)`,1,pointsBracket(pointsAllowed,r,'pointsAllowed'));
+ if(Number.isFinite(officialYards)||!unparsed)addScore(`Offensive yards allowed: ${yardsAllowed} (${yardsAllowed<100?'under 100':yardsAllowed<200?'100–199':yardsAllowed<300?'200–299':yardsAllowed<350?'300–349':yardsAllowed<400?'350–399':yardsAllowed<450?'400–449':yardsAllowed<500?'450–499':yardsAllowed<550?'500–549':'550+'} bracket)`,1,yardsBracket(yardsAllowed,r));
+ const statDetails={};
+ for(const [kind,stat] of Object.entries(mapping)){
+  const confirmed=Object.prototype.hasOwnProperty.call(b,stat);
+  const eventObserved=observed[kind]||0;
+  statDetails[kind]={value:confirmed?counts[kind]:(eventObserved>0?eventObserved:null),source:confirmed?sources[kind]:(eventObserved>0?'play-by-play (partial)':'unavailable'),verified:confirmed&&final};
+ }
+ statDetails.pointsAllowed={value:Number.isFinite(pointsAllowed)?pointsAllowed:null,source:sources.pointsAllowed,verified:final&&!opponentNonOffensivePoints};
+ statDetails.yardsAllowed={value:Number.isFinite(officialYards)?officialYards:(unparsed?null:eventYardage),source:sources.yardsAllowed,verified:Number.isFinite(officialYards)&&final};
+ for(const k of ['interceptionTD','fumbleReturnTD','puntReturnTD','kickoffReturnTD','blockedKickReturnTD','twoPointReturn','onePointSafety'])
+  statDetails[k]={value:observed[k]||null,source:observed[k]?'play-by-play (partial)':'unavailable',verified:false};
  const unsupported=[];
  if(!Number.isFinite(officialYards)&&unparsed)unsupported.push('yards allowed missing official total');
  if(final&&opponentNonOffensivePoints)unsupported.push('points allowed requires scoring-event classification review');
- return {points:round(points),breakdown,events:detail,counts,yardsAllowed,pointsAllowed,discrepancies,sources,source:'hybrid-category-reconciliation',complete:plays.length>0&&!unsupported.length,unsupported};
+ return {points:round(points),breakdown,events:detail,counts,statDetails,yardsAllowed,pointsAllowed,discrepancies,sources,source:'hybrid-category-reconciliation',complete:plays.length>0&&!unsupported.length,unsupported};
 }
 module.exports={ledger,extractPlayer,playerLedger,teamLedger,scoreEvents,eventYards};
