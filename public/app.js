@@ -738,7 +738,7 @@ function nflPlayerGame(x){
   return {game:board?.teams?.[id]||null,loaded:!!board,verified};
 }
 function selectedMatchupWeek(){return Math.min(14,Math.max(1,matchupWeek??Number(state.scheduleStartWeek||state.nflDirectorySync?.currentWeek||state.week||1)));}
-function setMatchupWeek(week){matchupWeek=Math.min(14,Math.max(1,Number(week)||1));matchupIndex=0;render();fetchNFLMatchups(matchupWeek);}
+function setMatchupWeek(week){closeMatchupGameStats();matchupWeek=Math.min(14,Math.max(1,Number(week)||1));matchupIndex=0;render();fetchNFLMatchups(matchupWeek);}
 function selectMatchup(index){const games=state.matchupSchedule?.[selectedMatchupWeek()]||[];if(!games.length)return;matchupIndex=(index+games.length)%games.length;render();}
 function matchupSwipeStart(e){matchupTouchX=e.touches?.[0]?.clientX??null;}
 function matchupSwipeEnd(e){if(matchupTouchX===null)return;const diff=(e.changedTouches?.[0]?.clientX??matchupTouchX)-matchupTouchX;matchupTouchX=null;if(Math.abs(diff)>55)selectMatchup(matchupIndex+(diff<0?1:-1));}
@@ -748,8 +748,8 @@ function matchupPlayerCell(x){
   if(!x)return '<span class="muted">Open slot</span>';
   const playerId=String(x.id||'');
   const directoryPlayer=espn?.players?.find(p=>String(p.id)===String(x.espnId||playerId.replace(/^espn-/,'')));
-  const clickable=!!directoryPlayer;
-  const name=clickable?`<button class="fa-match-player-link" onclick='openPlayerProfile(${jsAttr(playerId)})'>${esc(x.name)}</button>`:`<b>${esc(x.name)}</b>`;
+  const clickable=!!directoryPlayer||/^\d{1,12}$/.test(String(x.espnId||playerId.replace(/^espn-/,'')));
+  const name=clickable?`<button class="fa-match-player-link" onclick='openMatchupGameStats(${jsAttr(String(x.espnId||playerId.replace(/^espn-/,'')))})'>${esc(x.name)}</button>`:`<b>${esc(x.name)}</b>`;
   const {game,loaded,verified}=nflPlayerGame(x);
   const injury=String(verified?.injuryStatus||directoryPlayer?.injuryStatus||x.injuryStatus||'').toUpperCase();
   const designation=({QUESTIONABLE:'Q',DOUBTFUL:'D',OUT:'O',INJURED_RESERVE:'IR',IR:'IR',PROBABLE:'P'})[injury]||'';
@@ -767,6 +767,40 @@ function matchupPlayerCell(x){
     <div class="muted small">${kickoff?esc(kickoff):(loaded?'No kickoff':'Loading kickoff…')} · ${esc(gameStatus)}</div>
     <div class="muted small">OPRK: ${Number.isInteger(oprk)&&oprk>=1&&oprk<=32?oprk+(oprk%10===1&&oprk!==11?'st':oprk%10===2&&oprk!==12?'nd':oprk%10===3&&oprk!==13?'rd':'th'):'—'} · Proj: ${Number.isFinite(projected)&&projected>=0?fmt(projected)+' est.':'—'}</div>
     <strong>${fmt(Number(x.points??score(x))||0)} <span class="muted small">pts</span></strong>`;
+}
+// v31: Game-specific player boxscore overlay, independent of season history.
+let fa31StatsTimer=null,fa31Selected=null,fa31Request=0;
+function closeMatchupGameStats(){
+  fa31Selected=null;fa31Request++;clearTimeout(fa31StatsTimer);fa31StatsTimer=null;
+  document.getElementById('fa31GameModal')?.remove();
+}
+function openMatchupGameStats(id){
+  closeMatchupGameStats();
+  const season=Number(state?.nflDirectorySync?.season||new Date().getFullYear());
+  fa31Selected={id:String(id),week:selectedMatchupWeek(),season};
+  const el=document.createElement('div');el.id='fa31GameModal';el.className='fa31-overlay';
+  el.innerHTML=`<div class="fa31-dialog" role="dialog" aria-modal="true" aria-label="Player game statistics"><div class="fa31-top"><b>Live NFL game statistics</b><button onclick="closeMatchupGameStats()" aria-label="Close player statistics">✕</button></div><div id="fa31GameContent" aria-live="polite">Loading game statistics…</div></div>`;
+  el.addEventListener('click',e=>{if(e.target===el)closeMatchupGameStats();});
+  document.body.appendChild(el);loadMatchupGameStats();
+}
+async function loadMatchupGameStats(){
+  const selection=fa31Selected;if(!selection)return;
+  const request=++fa31Request;
+  const content=document.getElementById('fa31GameContent');
+  try{
+    const params=new URLSearchParams({id:selection.id,week:String(selection.week),season:String(selection.season)});
+    const response=await fetch('/api/nfl/player-game?'+params,{headers:{Authorization:'Bearer '+token},cache:'no-store'});
+    const data=await response.json();if(!response.ok)throw Error(data.details||data.error||'Game stats unavailable');
+    if(request!==fa31Request||!fa31Selected)return;
+    const game=data.game;
+    const scoreRow=game?.teams?.map(t=>esc(t.abbreviation)+' '+esc(t.score)).join(' · ')||'';
+    const time=game?.kickoff?new Date(game.kickoff).toLocaleString(undefined,{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',timeZoneName:'short'}):'Unavailable';
+    const title=`<h2 style="margin:8px 0">${esc(data.player?.name||'Player')}</h2><div class="muted small">${esc(data.player?.position||'')} · ${esc(game?.team||'')} ${game?.homeAway==='home'?'vs':'@'} ${esc(game?.opponent||'')}</div><p class="muted small">${esc(game?.status||data.status||'Unavailable')} · ${esc(time)}${scoreRow?' · '+scoreRow:''}</p>`;
+    const groupHtml=(data.groups||[]).map(g=>`<section class="fa31-group"><h3>${esc(g.name.charAt(0).toUpperCase()+g.name.slice(1))}</h3>${g.rows.map(r=>`<div class="fa31-stat"><span>${esc(r.label)}</span><b>${esc(r.value)}</b></div>`).join('')}</section>`).join('');
+    const breakdown=(data.breakdown||[]).map(r=>`<div class="fa31-stat"><span>${esc(r.label)} (${esc(r.quantity)} × ${esc(r.rate)})</span><b>${fmt(r.points)}</b></div>`).join('');
+    content.innerHTML=title+(data.status==='available'?`<div class="fa31-points">${fmt(data.points)} <span>provisional fantasy pts</span></div>${groupHtml}<section class="fa31-group"><h3>Fantasy scoring breakdown</h3>${breakdown||'<p class="muted small">No supported scoring events yet.</p>'}</section>${data.unsupported?.length?`<p class="muted small">Unverified categories: ${esc(data.unsupported.join(', '))}</p>`:''}`:`<p class="muted">${esc(data.notice||'No statistics available yet.')}</p>`)+`<p class="muted small">${esc(data.notice||'Unofficial ESPN feed; fantasy ledger remains authoritative.')}</p><button onclick="loadMatchupGameStats()">Refresh stats</button>`;
+    if(game?.status==='playing')fa31StatsTimer=setTimeout(()=>{if(fa31Selected&&!document.hidden)loadMatchupGameStats();},25000);
+  }catch(e){if(request===fa31Request&&fa31Selected&&content)content.innerHTML=`<p>${esc(e.message)}</p><button onclick="loadMatchupGameStats()">Retry</button>`;}
 }
 function matchupView(){
   const week=selectedMatchupWeek(),games=state.matchupSchedule?.[week]||[];
@@ -1079,7 +1113,7 @@ function leagueTeamRosterView(){
     <h3>Bench (${bench.length})</h3>${rows(bench)||'<p class="muted">No bench players yet.</p>'}
     <h3>Injured Reserve (${ir.length})</h3>${rows(ir)||'<p class="muted">No players on IR.</p>'}</section>`;
 }
-function changeTab(next){if(next==='Matchup'&&tab!=='Matchup'){matchupWeek=null;matchupIndex=0;}tab=next;render();if(tab==='Draft')syncServerClock();
+function changeTab(next){closeMatchupGameStats();if(next==='Matchup'&&tab!=='Matchup'){matchupWeek=null;matchupIndex=0;}tab=next;render();if(tab==='Draft')syncServerClock();
   if(tab==='Draft'||tab==='Players')loadESPN();
   if(tab==='My Team'){loadWeeklyDirectory();fetchNFLMatchups(Math.min(18,Math.max(1,Number(state?.nflDirectorySync?.currentWeek||state?.week||1))));}
   if(tab==='Players'){loadWeeklyDirectory();fetchNFLMatchups(Math.min(18,Math.max(1,Number(state?.nflDirectorySync?.currentWeek||state?.week||selectedMatchupWeek()))));}
