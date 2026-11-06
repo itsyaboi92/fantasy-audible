@@ -1081,6 +1081,52 @@ async function api(req,res,route){
       return send(res,200,{season,week,teams,updatedAt:new Date().toISOString()});
     }catch(e){return send(res,503,{error:'NFL weekly schedule unavailable',details:e.message});}
   }
+  // v31: Read-only, week-specific NFL boxscore. Does not mutate fantasy scoring or lineups.
+  if(req.method==='GET'&&route==='/api/nfl/player-game'){
+    const id=String(url.searchParams.get('id')||'');
+    const week=Number(url.searchParams.get('week'));
+    const season=Number(url.searchParams.get('season')||current.state.nflDirectorySync?.season||new Date().getUTCFullYear());
+    if(!/^\d{1,12}$/.test(id)||!Number.isInteger(week)||week<1||week>18||!Number.isInteger(season)||season<2020||season>2100)
+      return send(res,400,{error:'Invalid player, season, or week'});
+    try{
+      const poolData=await draftPool();
+      const athlete=poolData.players.find(x=>String(x.id)===id);
+      if(!athlete)return send(res,404,{error:'ESPN player not found'});
+      const teamId=String(liveNFL.teamId(athlete)||'');
+      if(!teamId)return send(res,200,{id,season,week,status:'unavailable',notice:'No verified NFL team assignment'});
+      const games=await liveNFL.loadWeek(season,week);
+      const game=games.find(g=>g.teams.some(t=>String(t.id)===teamId));
+      if(!game)return send(res,200,{id,season,week,status:'bye',notice:'No NFL game scheduled for this player this week'});
+      const own=game.teams.find(t=>String(t.id)===teamId),opponent=game.teams.find(t=>String(t.id)!==teamId);
+      const result={id,season,week,player:{name:athlete.name,position:athlete.position,team:own?.abbreviation},
+        game:{id:game.id,status:game.status,kickoff:game.kickoff,team:own?.abbreviation,opponent:opponent?.abbreviation,
+          homeAway:own?.homeAway,teams:game.teams},updatedAt:new Date().toISOString(),provisional:true};
+      if(game.status==='upcoming')return send(res,200,{...result,notice:'Game has not started; live statistics are not yet available'});
+      // ESPN summaries are cached briefly to avoid duplicate network calls from managers.
+      const cacheKey='v31:'+game.id;
+      if(!globalThis.fa31GameCache)globalThis.fa31GameCache=new Map();
+      const cache=globalThis.fa31GameCache;
+      let item=cache.get(cacheKey);
+      const ttl=game.status==='final'?600000:20000;
+      if(!item||Date.now()-item.at>ttl){
+        const summary=await liveNFL.fetchGame(game.id);
+        item={at:Date.now(),stats:liveNFL.playerStats(summary)};
+        if(cache.size>80)cache.clear();
+        cache.set(cacheKey,item);
+      }
+      const stats=item.stats.get(id);
+      if(!stats)return send(res,200,{...result,status:'no-stats',notice:'ESPN has not reported player boxscore statistics for this game'});
+      const scored=liveNFL.scorePlayer(stats,settingsOf(current.state).scoring);
+      const groups=[];
+      for(const [name,values] of Object.entries({passing:stats.passing,rushing:stats.rushing,receiving:stats.receiving,kicking:stats.kicking,miscellaneous:stats.misc})){
+        const rows=Object.entries(values||{}).map(([label,value])=>({label,value:String(value)}));
+        if(rows.length)groups.push({name,rows});
+      }
+      return send(res,200,{...result,status:'available',groups,points:scored.points,
+        breakdown:scored.breakdown,unsupported:scored.unsupported,
+        notice:'Provisional ESPN boxscore and scoring. The official fantasy ledger remains authoritative.'});
+    }catch(e){return send(res,503,{error:'Live NFL game statistics unavailable',details:e.message});}
+  }
   if(req.method==='GET'&&route==='/api/players/weekly'){
     const weekly=current.state.nflWeeklyDirectory||{};
     return send(res,200,{season:current.state.nflSync?.season||null,
