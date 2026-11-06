@@ -201,7 +201,15 @@ function scoreDefense(input,rules){
  if(input?.playFeedAvailable)missing.push('Play-level defensive totals require reconciliation');
  return {points:Math.round(points*100)/100,breakdown,unsupported:missing};
 }
-function teamId(player){const v=String(player.nflTeamId??player.team??'');return /^\d+$/.test(v)?v:TEAM_IDS[v.toUpperCase()]||null;}
+function teamId(player){
+ const raw=player?.nflTeamId??player?.proTeamId??player?.teamId??player?.team??'';
+ const v=String(raw).trim();
+ if(/^\d+$/.test(v)&&Number(v)>0)return v;
+ const name=String(player?.name||player?.fullName||'').replace(/\s+D\/?ST$/i,'').trim().toUpperCase();
+ const aliases={CARDINALS:'ARI',FALCONS:'ATL',RAVENS:'BAL',BILLS:'BUF',PANTHERS:'CAR',BEARS:'CHI',BENGALS:'CIN',BROWNS:'CLE',COWBOYS:'DAL',BRONCOS:'DEN',LIONS:'DET',PACKERS:'GB',TEXANS:'HOU',COLTS:'IND',JAGUARS:'JAX',CHIEFS:'KC',RAIDERS:'LV',RAMS:'LAR',DOLPHINS:'MIA',VIKINGS:'MIN',PATRIOTS:'NE',SAINTS:'NO',GIANTS:'NYG',JETS:'NYJ',EAGLES:'PHI',STEELERS:'PIT',FORTYNINERS:'SF','49ERS':'SF',SEAHAWKS:'SEA',BUCCANEERS:'TB',TITANS:'TEN',COMMANDERS:'WAS'};
+ const normalized=name.split(/\s+/).at(-1);
+ return TEAM_IDS[v.toUpperCase()]||TEAM_IDS[aliases[normalized]]||null;
+}
 async function loadWeek(season,week){const board=await json(`${BASE}/scoreboard?season=${season}&seasontype=2&week=${week}&limit=100`);const games=eventGames(board);if(!games.length)throw Error('No NFL games returned for requested week');return games;}
 async function fetchGame(id){
  const summary=await json(`${BASE}/summary?event=${encodeURIComponent(id)}`);

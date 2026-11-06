@@ -1087,7 +1087,7 @@ async function api(req,res,route){
     const id=String(url.searchParams.get('id')||'');
     const week=Number(url.searchParams.get('week'));
     const season=Number(url.searchParams.get('season')||current.state.nflDirectorySync?.season||new Date().getUTCFullYear());
-    if(!/^\d{1,12}$/.test(id)||!Number.isInteger(week)||week<1||week>18||!Number.isInteger(season)||season<2020||season>2100)
+    if(!id||id.length>80||!Number.isInteger(week)||week<1||week>18||!Number.isInteger(season)||season<2020||season>2100)
       return send(res,400,{error:'Invalid player, season, or week'});
     try{
       const poolData=await draftPool();
@@ -1111,15 +1111,18 @@ async function api(req,res,route){
       const ttl=game.status==='final'?600000:20000;
       if(!item||Date.now()-item.at>ttl){
         const summary=await liveNFL.fetchGame(game.id);
-        item={at:Date.now(),stats:liveNFL.playerStats(summary),events:liveNFL.playEvents(summary)};
+        item={at:Date.now(),summary,stats:liveNFL.playerStats(summary),events:liveNFL.playEvents(summary)};
         if(cache.size>80)cache.clear();
         cache.set(cacheKey,item);
       }
-      const stats=item.stats.get(id);
-      if(!stats)return send(res,200,{...result,status:'no-stats',notice:'ESPN has not reported player boxscore statistics for this game'});
-      const scored=liveNFL.scorePlayer(stats,settingsOf(current.state).scoring,item.events);
+      const isDefense=athlete.position==='D/ST';
+      const stats=isDefense?null:item.stats.get(id);
+      const defense=isDefense?liveNFL.defenseStats(item.summary,game,item.events).get(teamId):null;
+      if(!stats&&!defense)return send(res,200,{...result,status:'no-stats',notice:'ESPN has not reported statistics for this game'});
+      const scored=isDefense?liveNFL.scoreDefense(defense,settingsOf(current.state).scoring):liveNFL.scorePlayer(stats,settingsOf(current.state).scoring,item.events);
       const groups=[];
-      for(const [name,values] of Object.entries({passing:stats.passing,rushing:stats.rushing,receiving:stats.receiving,kicking:stats.kicking,miscellaneous:stats.misc})){
+      const categories=isDefense?{defense:{...defense.stats,pointsAllowed:defense.pointsAllowed,yardsAllowed:defense.yardsAllowed}}:{passing:stats.passing,rushing:stats.rushing,receiving:stats.receiving,kicking:stats.kicking,miscellaneous:stats.misc};
+      for(const [name,values] of Object.entries(categories)){
         const rows=Object.entries(values||{}).map(([label,value])=>({label,value:String(value)}));
         if(rows.length)groups.push({name,rows});
       }
@@ -1136,9 +1139,11 @@ async function api(req,res,route){
       players:weekly,projectionStatus:'NOT_AVAILABLE',
       notice:'Weekly ESPN projections are not yet verified; unavailable projections are shown as —.'});
   }
+  // D/ST fantasy entries are teams, not athletes. ESPN fantasy IDs may be
+  // negative or synthetic, so resolve them through the directory, not an athlete regex.
   if(req.method==='GET'&&route==='/api/players/history'){
     const id=String(url.searchParams.get('id')||'');
-    if(!/^\d{1,12}$/.test(id))return send(res,400,{error:'Invalid player ID'});
+    if(!id||id.length>80)return send(res,400,{error:'Invalid player ID'});
     try{
       const pool=await draftPool();
       const player=pool.players.find(x=>String(x.id)===id);
@@ -1160,9 +1165,14 @@ async function api(req,res,route){
         try{
           const summary=await liveNFL.fetchGame(game.id);
           const stats=liveNFL.playerStats(summary);
-          const playerStats=stats.get(id);
-          if(!playerStats)return {week:game.week,gameId:game.id,status:'NO_STATS',opponent:game.teams.find(t=>String(t.id)!==String(team))?.abbreviation||null};
-          const result=liveNFL.scorePlayer(playerStats,settingsOf(current.state).scoring,liveNFL.playEvents(summary));
+          const opponent=game.teams.find(t=>String(t.id)!==String(team));
+          const isDefense=player.position==='D/ST';
+          const playerStats=isDefense?null:stats.get(id);
+          if(!isDefense&&!playerStats)return {week:game.week,gameId:game.id,status:'NO_STATS',opponent:opponent?.abbreviation||null};
+          const events=liveNFL.playEvents(summary);
+          const defense=isDefense?liveNFL.defenseStats(summary,game,events).get(String(team)):null;
+          if(isDefense&&!defense)return {week:game.week,gameId:game.id,status:'NO_STATS',opponent:opponent?.abbreviation||null};
+          const result=isDefense?liveNFL.scoreDefense(defense,settingsOf(current.state).scoring):liveNFL.scorePlayer(playerStats,settingsOf(current.state).scoring,events);
           return {week:game.week,gameId:game.id,status:'final',opponent:game.teams.find(t=>String(t.id)!==String(team))?.abbreviation||null,
             points:result.points,breakdown:result.breakdown,unsupported:result.unsupported,provisional:true};
         }catch(e){return {week:game.week,gameId:game.id,status:'UNAVAILABLE',error:'Game statistics unavailable'};}
