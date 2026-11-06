@@ -189,7 +189,7 @@ function groupContext(group){
 }
 function eligibleField(context,key){
  if(context==='defense')return !['kickoffReturnTD','puntReturnTD'].includes(key);
- if(context==='fumbles')return ['forcedFumble','fumbleRecovered','fumbleReturnTD'].includes(key);
+ if(context==='fumbles')return false; // Generic REC includes own-team recoveries; not a D/ST stat.
  if(context==='kick')return key==='kickoffReturnTD';
  if(context==='punt')return key==='puntReturnTD';
  return false;
@@ -263,72 +263,9 @@ function officialTeamStats(team){
  }
  return stats;
 }
-// Fumble REC is a player's recovery count, NOT automatically a defensive
-// turnover. Attribute a LOST turnover only after matching its play to a
-// box-score fumbler and an opposing-team recovery in the play description.
-function boxFumbles(summary){
- const result=new Map();
- for(const team of summary.boxscore?.players||[]){
-  const teamId=String(team.team?.id||'');if(!teamId)continue;
-  const players=[];
-  for(const group of team.statistics||[]){
-   if(!/fumbl/i.test([group.name,group.type,group.displayName].join(' ')))continue;
-   const labels=(group.labels||[]).map(normalizedLabel);
-   const lostIndex=labels.indexOf('LOST'),fumIndex=labels.indexOf('FUM'),recIndex=labels.indexOf('REC');
-   if(lostIndex<0&&recIndex<0)continue;
-   for(const entry of group.athletes||[]){
-    const athlete=entry.athlete||{};
-    const numeric=i=>i<0?null:(entry.stats?.[i]===undefined?null:Number(entry.stats[i]));
-    players.push({id:String(athlete.id||''),name:String(athlete.displayName||athlete.fullName||''),
-     teamId,lost:numeric(lostIndex),fum:numeric(fumIndex),rec:numeric(recIndex)});
-   }
-  }
-  result.set(teamId,players);
- }
- return result;
-}
-function normalizePerson(name){return String(name||'').toLowerCase().replace(/[^a-z0-9 ]/g,'').replace(/\s+/g,' ').trim();}
-function playerMentioned(text,name){
- const normalized=normalizePerson(text),full=normalizePerson(name);
- if(!full)return false;
- // Last name alone is unsafe (e.g., two Smiths). Prefer full name.
- return (' '+normalized+' ').includes(' '+full+' ');
-}
-function reconcileFumbleTurnovers(summary,game){
- const players=boxFumbles(summary),all=[...players.values()].flat();
- const plays=rawPlays(summary);
- const result=new Map();
- for(const team of game.teams||[])result.set(String(team.id),{recovered:0,forced:0,specialTeamsLost:0,matchedPlayIds:[],unresolved:[]});
- const matchedLost=new Map();
- for(const p of all){
-  if(!(p.lost>0))continue;
-  const matches=plays.filter(play=>{
-   const text=String(play.text||play.shortText||'');
-   return /fumbl/i.test(text)&&playerMentioned(text,p.name);
-  });
-  for(const play of matches){
-   const text=String(play.text||play.shortText||'');
-   const playId=String(play.id);
-   if(matchedLost.has(playId))continue;
-   // Require explicit recovered-by wording, not merely a location such as
-   // "recovered at BAL 18". REC column is used to confirm the recovery owner.
-   const recovering=all.filter(q=>q.teamId!==p.teamId&&q.rec>0&&
-    new RegExp('(?:recovered by|recovery by)\\s+'+normalizePerson(q.name).replace(/[.*+?^${}()|[\]\\]/g,'\\$&').replace(/ /g,'\\s+'),'i').test(text));
-   if(recovering.length!==1)continue;
-   const owner=recovering[0];
-   matchedLost.set(playId,true);
-   const dst=result.get(owner.teamId);if(dst){dst.recovered++;dst.matchedPlayIds.push(playId);}
-   const losing=result.get(p.teamId);
-   if(losing&&/kickoff|kick return|punt return|returned (?:the )?(?:kick|punt)/i.test(text))losing.specialTeamsLost++;
-  }
-  const counted=matches.filter(x=>matchedLost.has(String(x.id))).length;
-  if(counted<p.lost)result.get(p.teamId)?.unresolved.push({player:p.name,lost:p.lost,matched:counted});
- }
- return result;
-}
 function defenseStats(summary,game,events=[]){
  const teams=summary.boxscore?.teams||[];
- const output=new Map(),players=defensivePlayerTotals(summary),fumbles=reconcileFumbleTurnovers(summary,game);
+ const output=new Map(),players=defensivePlayerTotals(summary);
  for(const team of teams){
   const id=String(team.team?.id||'');if(!id)continue;
   const stats=officialTeamStats(team);
@@ -337,19 +274,14 @@ function defenseStats(summary,game,events=[]){
   for(const [key,value] of Object.entries(players.get(id)||{})){
    if(!Object.hasOwn(stats,key))stats[key]=value;
   }
-  const fumble=fumbles.get(id);
-  // Reconciled turnovers may fill missing official defensive recovery totals,
-  // but must never overwrite a present box-score defensive total.
-  if(fumble?.recovered>0&&!Object.hasOwn(stats,'fumbleRecovered'))stats.fumbleRecovered=fumble.recovered;
   const opponent=game.teams.find(t=>String(t.id)!==id);
   const oppBox=teams.find(t=>String(t.team?.id)!==id);
   const oppTotal=(oppBox?.statistics||[]).find(x=>String(x.name||'').toLowerCase()==='totalyards');
   const yards=oppTotal?Number(oppTotal.value??oppTotal.displayValue):NaN;
-  output.set(id,{stats,playEventCounts:defenseEvents(events,id,opponent?.id),
-   playFeedAvailable:rawPlays(summary).length>0,
+  output.set(id,{stats,playEventCounts:null,
+   playFeedAvailable:false,
    pointsAllowed:opponent?.score,yardsAllowed:Number.isFinite(yards)?yards:null,
-   opponentFound:!!opponent,gameStatus:game.status,
-   fumbleReconciliation:fumble});
+   opponentFound:!!opponent,gameStatus:game.status});
  }
  return output;
 }
@@ -411,4 +343,4 @@ async function fetchGame(id){
  }catch(e){console.warn('NFL CDN play feed unavailable for',id,e.message);}
  return summary;
 }
-module.exports={loadWeek,fetchGame,playerStats,rawPlays,playEvents,resolveKickerEvents,defenseEvents,scorePlayer,defenseStats,scoreDefense,teamId,defensivePlayerTotals,boxFumbles,reconcileFumbleTurnovers};
+module.exports={loadWeek,fetchGame,playerStats,rawPlays,playEvents,resolveKickerEvents,defenseEvents,scorePlayer,defenseStats,scoreDefense,teamId,defensivePlayerTotals};

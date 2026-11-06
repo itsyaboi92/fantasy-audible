@@ -167,83 +167,21 @@ function specialTeamsTurnover(e, game, summary){
  return {playId:e.id,returning,recovery,kind:kickoff?'kickoff':'punt',fumbler:fumbler[1].trim()};
 }
 function teamLedger(summary,teamId,opponentId,rules,game){
- const plays=ledger(summary),r=rules?.defense||{},own=id(teamId),opp=id(opponentId);
- const observed={sack:0,interception:0,fumbleRecovered:0,forcedFumble:0,safety:0,blockedKick:0,interceptionTD:0,fumbleReturnTD:0,puntReturnTD:0,kickoffReturnTD:0,blockedKickReturnTD:0,twoPointReturn:0,onePointSafety:0,specialTeamsFumblesLost:0};
- const detail=[],add=(e,k)=>{observed[k]++;detail.push({playId:e.id,kind:k,text:e.text});};
- let eventYardage=0,unparsed=0,offensivePoints=0,opponentNonOffensivePoints=0;
- const returnTurnovers=plays.map(e=>specialTeamsTurnover(e,game,summary)).filter(Boolean);
- const uniqueReturnTurnovers=[...new Map(returnTurnovers.map(x=>[x.playId,x])).values()];
- for(const turnover of uniqueReturnTurnovers){
-  if(turnover.returning===own){observed.specialTeamsFumblesLost++;detail.push({playId:turnover.playId,kind:'specialTeamsFumblesLost',text:`${turnover.fumbler} lost ${turnover.kind} return fumble`});}
-  if(turnover.recovery===own){observed.fumbleRecovered++;detail.push({playId:turnover.playId,kind:'fumbleRecovered',text:`Recovered ${turnover.kind} return fumble by ${turnover.fumbler}`});}
+ // All D/ST categories, including scoring, use ESPN box score exclusively.
+ // No play-by-play fallback or return-fumble-lost penalty.
+ const box=defenseStats(summary,game,[]).get(id(teamId));
+ if(!box)return {points:0,breakdown:[],counts:{},statDetails:{},unsupported:['D/ST box score unavailable'],complete:false,source:'espn-boxscore-only'};
+ const {scoreDefense}=require('./live-nfl');
+ const scored=scoreDefense(box,rules||{});
+ const mapping={sack:'sacks',interception:'interceptions',fumbleRecovered:'fumbleRecovered',forcedFumble:'forcedFumble',safety:'safety',blockedKick:'blockedKick',interceptionTD:'interceptionTD',fumbleReturnTD:'fumbleReturnTD',puntReturnTD:'puntReturnTD',kickoffReturnTD:'kickoffReturnTD',blockedKickReturnTD:'blockedKickReturnTD',twoPointReturn:'twoPointReturn',onePointSafety:'onePointSafety'};
+ const counts={},statDetails={},final=game?.status==='final';
+ for(const [key,field] of Object.entries(mapping)){
+  const available=Object.prototype.hasOwnProperty.call(box.stats,field);
+  if(available)counts[key]=box.stats[field];
+  statDetails[key]={value:available?box.stats[field]:null,source:available?'ESPN box score':'unavailable',verified:available&&final};
  }
- for(const e of plays){
-  const t=e.text+' '+e.type,offense=id(e.teamId)===opp,ours=id(e.teamId)===own,td=/\btouchdown\b/i.test(t);
-  if(offense){
-   const y=eventYards(e);if(y!==null)eventYardage+=y;else if(/\b(?:pass|rush|run|scramble|sacked)\b/i.test(e.type)&&!/\b(?:penalty|no play)\b/i.test(t))unparsed++;
-   if(/\bsacked\b|\bsack\b/i.test(t))add(e,'sack');
-   if(/\bintercepted\b/i.test(t)){add(e,'interception');if(td)add(e,'interceptionTD');}
-   if(/\bfumbl\w*\b.*\brecover(?:ed|y)\b/i.test(t) && !/\bkick\s*off\b|\bkickoff\b|\bpunt\b/i.test(t)){ 
-    // Do not assume every fumble is lost: recovery team must be identifiable.
-    const rec=t.match(/recovered by\s+([^,.]+)/i);const ownNames={30:/\b(?:jacksonville|jaguars|jax|jac)\b/i,33:/\b(?:baltimore|ravens|bal)\b/i};if(rec&&(/\bdefen(?:se|sive)\b/i.test(rec[1])||new RegExp('\\b'+own+'\\b').test(rec[1])||(ownNames[own]?.test(rec[1])))){add(e,'fumbleRecovered');if(td)add(e,'fumbleReturnTD');}
-   }
-   if(/\bforced\s+fumble\b|\bfumble\s+forced\b/i.test(t))add(e,'forcedFumble');
-   if(/\bsafety\b/i.test(t))add(e,'safety');
-   if(/\bblocked\b.*\b(?:punt|field goal|kick)\b|\b(?:punt|field goal|kick)\b.*\bblocked\b/i.test(t)){add(e,'blockedKick');if(td)add(e,'blockedKickReturnTD');}
-   if(td&&!/\b(?:intercepted|fumble return|kickoff return|punt return|blocked kick return)\b/i.test(t))offensivePoints+=6;
-   if(/\bextra point\b/i.test(t)&&/\b(?:good|successful)\b/i.test(t)&&!/\bno good\b/i.test(t))offensivePoints++;
-   if(isConversion(t)&&/\b(?:good|successful|converted)\b/i.test(t)&&!/\breturn\b/i.test(t))offensivePoints+=2;
-   if(fieldGoal(t)&&/\b(?:good|successful|made)\b/i.test(t)&&!/\b(?:no good|missed|blocked)\b/i.test(t))offensivePoints+=3;
-  }
-  if(ours&&td){if(/\bpunt\s+return\b/i.test(t))add(e,'puntReturnTD');if(/\bkickoff\s+return\b/i.test(t))add(e,'kickoffReturnTD');}
-  if(isConversion(t)&&/\breturn\b/i.test(t)&&/\b(?:good|successful|converted)\b/i.test(t)&&offense)add(e,'twoPointReturn');
-  if(/\bone.point safety\b/i.test(t)&&offense)add(e,'onePointSafety');
-  // Opponent's defensive/special-teams return TDs do not count as points allowed.
-  if(ours&&td&&/\b(?:interception|fumble|kickoff|punt|blocked kick)\b.*\breturn\b/i.test(t))opponentNonOffensivePoints+=6;
- }
- const boxes=defenseStats(summary,game||{teams:[]},[]),box=boxes.get(own)||{},b=box.stats||{};
- const mapping={sack:'sacks',interception:'interceptions',fumbleRecovered:'fumbleRecovered',forcedFumble:'forcedFumble',safety:'safety',blockedKick:'blockedKick'};
- const counts={...observed},sources={},discrepancies=[];
- for(const [kind,stat] of Object.entries(mapping)){
-  if(Number.isFinite(Number(b[stat]))&&b[stat]!==undefined){
-   const official=Number(b[stat]);if(official!==observed[kind])discrepancies.push({stat:kind,box:official,events:observed[kind],resolved:'box-score-category'});
-   counts[kind]=official;sources[kind]=official===observed[kind]?'verified-events':'box-score';
-  }else sources[kind]='events';
- }
- // Prefer official total offensive yards; individual ESPN play descriptions
- // can omit yards lost to sacks or contain penalties/no-plays.
- const oppStats=(summary.boxscore?.teams||[]).find(x=>id(x.team?.id)===opp);
- const yStat=(oppStats?.statistics||[]).find(x=>['totalyards','totaloffensiveyards'].includes(norm(x.name).replace(/ /g,'')));
- const officialYards=yStat?Number(String(yStat.displayValue??yStat.value).replace(/,/g,'')):NaN;
- const yardsAllowed=Number.isFinite(officialYards)?officialYards:eventYardage;
- sources.yardsAllowed=Number.isFinite(officialYards)?'box-score':'events';
- if(Number.isFinite(officialYards)&&officialYards!==eventYardage)discrepancies.push({stat:'yardsAllowed',box:officialYards,events:eventYardage,resolved:'box-score-category'});
- // Final scoreboard is a useful check, but subtract any opponent defensive or
- // return scores identified in play events. Never claim verified when ambiguous.
- const other=game?.teams?.find(t=>id(t.id)===opp),final=game?.status==='final';
- const scoreboard=other?Number(other.score):NaN;
- const pointsAllowed=final&&Number.isFinite(scoreboard)?Math.max(0,scoreboard-opponentNonOffensivePoints):offensivePoints;
- sources.pointsAllowed=final&&Number.isFinite(scoreboard)?'scoreboard-adjusted':'events';
- if(final&&Number.isFinite(scoreboard)&&pointsAllowed!==offensivePoints)discrepancies.push({stat:'pointsAllowed',box:pointsAllowed,events:offensivePoints,resolved:'scoreboard-adjusted'});
- const breakdown=[];let points=0;
- const addScore=(label,qty,rate)=>{if(!qty||!Number.isFinite(Number(rate)))return;const v=round(qty*Number(rate));points+=v;breakdown.push({label,quantity:qty,rate:Number(rate),points:v});};
- for(const [k,v] of Object.entries(counts))addScore(k,v,k==='sack'?r.sack:r[k]);
- addScore(`Points allowed: ${pointsAllowed} (${pointsAllowed===0?'0':pointsAllowed<=6?'1–6':pointsAllowed<=13?'7–13':pointsAllowed<=17?'14–17':pointsAllowed<=27?'18–27':pointsAllowed<=34?'28–34':pointsAllowed<=45?'35–45':'46+'} bracket)`,1,pointsBracket(pointsAllowed,r,'pointsAllowed'));
- if(Number.isFinite(officialYards)||!unparsed)addScore(`Offensive yards allowed: ${yardsAllowed} (${yardsAllowed<100?'under 100':yardsAllowed<200?'100–199':yardsAllowed<300?'200–299':yardsAllowed<350?'300–349':yardsAllowed<400?'350–399':yardsAllowed<450?'400–449':yardsAllowed<500?'450–499':yardsAllowed<550?'500–549':'550+'} bracket)`,1,yardsBracket(yardsAllowed,r));
- const statDetails={};
- for(const [kind,stat] of Object.entries(mapping)){
-  const confirmed=Object.prototype.hasOwnProperty.call(b,stat);
-  const eventObserved=observed[kind]||0;
-  statDetails[kind]={value:confirmed?counts[kind]:(eventObserved>0?eventObserved:null),source:confirmed?sources[kind]:(eventObserved>0?'play-by-play (partial)':'unavailable'),verified:confirmed&&final};
- }
- statDetails.pointsAllowed={value:Number.isFinite(pointsAllowed)?pointsAllowed:null,source:sources.pointsAllowed,verified:final&&!opponentNonOffensivePoints};
- statDetails.yardsAllowed={value:Number.isFinite(officialYards)?officialYards:(unparsed?null:eventYardage),source:sources.yardsAllowed,verified:Number.isFinite(officialYards)&&final};
- statDetails.specialTeamsFumblesLost={value:observed.specialTeamsFumblesLost||0,source:observed.specialTeamsFumblesLost?'verified play ownership':'no verified return turnovers',verified:false};
- for(const k of ['interceptionTD','fumbleReturnTD','puntReturnTD','kickoffReturnTD','blockedKickReturnTD','twoPointReturn','onePointSafety'])
-  statDetails[k]={value:observed[k]||null,source:observed[k]?'play-by-play (partial)':'unavailable',verified:false};
- const unsupported=[];
- if(!Number.isFinite(officialYards)&&unparsed)unsupported.push('yards allowed missing official total');
- if(final&&opponentNonOffensivePoints)unsupported.push('points allowed requires scoring-event classification review');
- return {points:round(points),breakdown,events:detail,counts,statDetails,yardsAllowed,pointsAllowed,discrepancies,sources,source:'hybrid-category-reconciliation',complete:plays.length>0&&!unsupported.length,unsupported};
+ for(const [key,value] of Object.entries({pointsAllowed:box.pointsAllowed,yardsAllowed:box.yardsAllowed}))
+  statDetails[key]={value:value??null,source:value===null||value===undefined?'unavailable':'ESPN box score',verified:value!==null&&value!==undefined&&final};
+ return {...scored,counts,statDetails,events:[],discrepancies:[],sources:{},pointsAllowed:box.pointsAllowed,yardsAllowed:box.yardsAllowed,source:'espn-boxscore-only',complete:final&&!scored.unsupported.length};
 }
 module.exports={ledger,extractPlayer,playerLedger,teamLedger,scoreEvents,eventYards,specialTeamsTurnover};
