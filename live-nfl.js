@@ -152,10 +152,10 @@ const BOX_FIELDS={
  fumbleRecovered:['FR','FUMREC','FUMRECS','FUMBLERECOVERIES','FUMBLERECOVERY','FUMRECOVERED'],
  safety:['SFTY','SFTYS','SAF','SAFETIES'],
  blockedKick:['BLK','BLOCKS','BLOCKEDKICKS','KICKSBLKD'],
- interceptionTD:['INTTD','INTTDS','INTERCEPTIONTDS','INTERCEPTIONTOUCHDOWNS'],
+ interceptionTD:['TD','INTTD','INTTDS','INTERCEPTIONTDS','INTERCEPTIONTOUCHDOWNS'],
  fumbleReturnTD:['FRTD','FRTDS','FUMRETTD','FUMBLERETURNTD','FUMBLERETURNTOUCHDOWNS'],
- kickoffReturnTD:['KRTD','KRTDS','KICKRETURNTD','KICKRETURNTOUCHDOWNS'],
- puntReturnTD:['PRTD','PRTDS','PUNTRETURNTD','PUNTRETURNTOUCHDOWNS']
+ kickoffReturnTD:['TD','KRTD','KRTDS','KICKRETURNTD','KICKRETURNTOUCHDOWNS'],
+ puntReturnTD:['TD','PRTD','PRTDS','PUNTRETURNTD','PUNTRETURNTOUCHDOWNS']
 };
 const DEF_GROUP=/defen|tackle|intercept/i;
 const FUM_GROUP=/fumbl/i;
@@ -183,19 +183,23 @@ function groupContext(group){
  const name=String([group.name,group.type,group.displayName].filter(Boolean).join(' ')).toLowerCase();
  if(KICK_GROUP.test(name))return 'kick';
  if(PUNT_GROUP.test(name))return 'punt';
+ if(/intercept/i.test(name))return 'interceptions';
  if(DEF_GROUP.test(name))return 'defense';
  if(FUM_GROUP.test(name))return 'fumbles';
  return 'other';
 }
 function eligibleField(context,key){
- if(context==='defense')return !['kickoffReturnTD','puntReturnTD'].includes(key);
- if(context==='fumbles')return false; // Generic REC includes own-team recoveries; not a D/ST stat.
+ if(context==='interceptions')return key==='interceptions'||key==='interceptionTD';
+ if(context==='defense')return !['interceptions','interceptionTD','kickoffReturnTD','puntReturnTD'].includes(key);
+ if(context==='fumbles')return key==='forcedFumble'; // FF is explicit; generic REC includes own-team recoveries.
  if(context==='kick')return key==='kickoffReturnTD';
  if(context==='punt')return key==='puntReturnTD';
  return false;
 }
 function readDefensiveGroup(group){
- const context=groupContext(group),labels=(group.labels||[]).map(normalizedLabel),rows=group.athletes||[];
+ const context=groupContext(group),labels=(group.labels||[]).map(normalizedLabel),allRows=group.athletes||[];
+ const teamRows=allRows.filter(row=>/^(TEAM|TOTALS?)$/i.test(String(row.athlete?.displayName||row.athlete?.name||'').trim()));
+ const rows=teamRows.length?teamRows:allRows;
  if(context==='other'||!rows.length)return {};
  const found={};
  for(const [key,aliases] of Object.entries(BOX_FIELDS)){
@@ -263,9 +267,49 @@ function officialTeamStats(team){
  }
  return stats;
 }
+// ESPN's Fumbles LOST is an opponent-turnover total, unlike REC, which
+// includes recoveries of the team's own fumbles. This is box-score-only.
+function lostFumblesByTeam(summary){
+ const result=new Map();
+ for(const entry of summary.boxscore?.players||[]){
+  const id=String(entry.team?.id||'');if(!id)continue;
+  const candidates=[];
+  for(const group of entry.statistics||[]){
+   if(groupContext(group)!=='fumbles')continue;
+   const labels=(group.labels||[]).map(normalizedLabel);
+   const index=labels.findIndex(x=>['LOST','FL','FUMLOST','FUMBLESLOST'].includes(x));
+   if(index<0)continue;
+   // Prefer ESPN's explicit TEAM totals, when supplied, over summing players.
+   const rows=group.athletes||[];
+   const teamRows=rows.filter(row=>/^(TEAM|TOTALS?)$/i.test(String(row.athlete?.displayName||row.athlete?.name||'').trim()));
+   const useRows=teamRows.length?teamRows:rows;
+   let total=0,valid=useRows.length>0;
+   for(const row of useRows){
+    const raw=row.stats?.[index];
+    const n=Number(String(raw??'').replace(/,/g,''));
+    if(raw===undefined||raw===null||String(raw).trim()===''||!Number.isFinite(n)){valid=false;break;}
+    total+=n;
+   }
+   if(valid)candidates.push(total);
+  }
+  if(candidates.length&&candidates.every(n=>n===candidates[0]))result.set(id,candidates[0]);
+ }
+ // Some ESPN responses expose the team fumbles-lost total directly.
+ for(const team of summary.boxscore?.teams||[]){
+  const id=String(team.team?.id||'');if(!id)continue;
+  for(const stat of team.statistics||[]){
+   const name=normalizedLabel(stat.name||stat.abbreviation||stat.label);
+   if(!['FUMBLESLOST','FUMLOST'].includes(name))continue;
+   const raw=stat.value??stat.displayValue;
+   const n=Number(String(raw??'').replace(/,/g,''));
+   if(raw!==undefined&&raw!==null&&String(raw).trim()!==''&&Number.isFinite(n))result.set(id,n);
+  }
+ }
+ return result;
+}
 function defenseStats(summary,game,events=[]){
  const teams=summary.boxscore?.teams||[];
- const output=new Map(),players=defensivePlayerTotals(summary);
+ const output=new Map(),players=defensivePlayerTotals(summary),lost=lostFumblesByTeam(summary);
  for(const team of teams){
   const id=String(team.team?.id||'');if(!id)continue;
   const stats=officialTeamStats(team);
@@ -275,8 +319,12 @@ function defenseStats(summary,game,events=[]){
    if(!Object.hasOwn(stats,key))stats[key]=value;
   }
   const opponent=game.teams.find(t=>String(t.id)!==id);
+  // An opponent's officially recorded LOST fumble is a turnover credited to
+  // this D/ST. Never use this team's generic REC (own recoveries included).
+  if(opponent&&lost.has(String(opponent.id))&&!Object.hasOwn(stats,'fumbleRecovered'))
+   stats.fumbleRecovered=lost.get(String(opponent.id));
   const oppBox=teams.find(t=>String(t.team?.id)!==id);
-  const oppTotal=(oppBox?.statistics||[]).find(x=>String(x.name||'').toLowerCase()==='totalyards');
+  const oppTotal=(oppBox?.statistics||[]).find(x=>normalizedLabel(x.name||x.abbreviation||x.label)==='TOTALYARDS');
   const yards=oppTotal?Number(oppTotal.value??oppTotal.displayValue):NaN;
   output.set(id,{stats,playEventCounts:null,
    playFeedAvailable:false,
@@ -343,4 +391,4 @@ async function fetchGame(id){
  }catch(e){console.warn('NFL CDN play feed unavailable for',id,e.message);}
  return summary;
 }
-module.exports={loadWeek,fetchGame,playerStats,rawPlays,playEvents,resolveKickerEvents,defenseEvents,scorePlayer,defenseStats,scoreDefense,teamId,defensivePlayerTotals};
+module.exports={loadWeek,fetchGame,playerStats,rawPlays,playEvents,resolveKickerEvents,defenseEvents,scorePlayer,defenseStats,scoreDefense,teamId,defensivePlayerTotals,lostFumblesByTeam};
