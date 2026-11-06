@@ -28,7 +28,22 @@ function extractPlayer(e,p){
  if(rushing&&y!==null){if(!two)addEvent(a,e,'rushYards',y);if(td&&!two){addEvent(a,e,'rushTD');if(y>=40)addEvent(a,e,'rushTD40');}if(two&&good)addEvent(a,e,'rushTwo');}
  if(receiving&&y!==null&&!intercept){if(!two){addEvent(a,e,'recYards',y);addEvent(a,e,'receptions');if(td){addEvent(a,e,'recTD');if(y>=40)addEvent(a,e,'recTD40');}}else if(good)addEvent(a,e,'recTwo');}
  const fg=fieldGoal(t);if(fg){const miss=/\b(?:no good|missed|blocked|wide|failed|unsuccessful)\b/i.test(t);if(miss)addEvent(a,e,'fgMiss',Number(fg[1]));else if(/\b(?:good|made|successful)\b/i.test(t)||e.scoring)addEvent(a,e,'fgMade',Number(fg[1]));}
- if(/\bextra point\b|\bPAT\b/i.test(all)&&!isConversion(all)){if(/\b(?:no good|missed|blocked|failed|unsuccessful)\b/i.test(t))addEvent(a,e,'patMiss');else if(/\b(?:good|made|successful)\b/i.test(t)||e.scoring)addEvent(a,e,'patMade');}
+ // ESPN touchdown scoring summaries include the PAT kicker in parentheses.
+ // A touchdown scorer must never inherit that kick merely because their
+ // name occurs elsewhere in the same description. Only explicit kicker
+ // attribution qualifies; unresolved attempts defer to the official kicker
+ // box-score aggregate (never to the touchdown scorer).
+ const patMention=/\bextra[ -]?point\b|\bPAT\b|\([^)]*\b(?:kick|extra[ -]?point)\b[^)]*\)/i.test(all);
+ if(patMention&&!isConversion(all)){
+  const kickerAttribution=t.match(/\(\s*([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,2})\s+(?:kick|extra[ -]?point)(?:\s+(?:good|no good|missed|blocked))?\s*\)/i)
+   ||t.match(/\b([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,2})\s+(?:extra[ -]?point|PAT|kick)\s+(?:is\s+)?(?:good|made|missed|blocked|no good)\b/i)
+   ||t.match(/\b(?:extra[ -]?point|PAT)\s+(?:by|attempt\s+by)\s+([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,2})\b/i);
+  if(kickerAttribution&&norm(kickerAttribution[1])===norm(p.name)){
+   const patText=kickerAttribution[0];
+   if(/\b(?:no good|missed|blocked|failed|unsuccessful)\b/i.test(patText))addEvent(a,e,'patMiss');
+   else if(/\b(?:good|made|successful|kick)\b/i.test(patText)||e.scoring)addEvent(a,e,'patMade');
+  }
+ }
  // A play mentioning a kicker, returner and recovery does not make all three
  // the fumbler. Require the athlete to be the explicitly named fumble owner.
  // When ESPN supplies no owner, defer to that athlete's official LOST total.
