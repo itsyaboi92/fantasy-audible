@@ -11,6 +11,38 @@ function get(v,...keys){for(const k of keys){const x=v[k.replace(/[^A-Z0-9]/g,''
 function playerStats(summary){const out=new Map();for(const team of summary.boxscore?.players||[])for(const group of team.statistics||[])for(const entry of group.athletes||[]){const athlete=entry.athlete||{};if(!athlete.id)continue;const id=String(athlete.id);let p=out.get(id);if(!p){p={id,teamId:String(team.team?.id),name:athlete.displayName,passing:{},rushing:{},receiving:{},kicking:{},misc:{}};out.set(id,p);}const values=rowValues(group,entry);const name=String(group.name||group.type||'').toLowerCase();if(name.includes('pass'))Object.assign(p.passing,values);else if(name.includes('rush'))Object.assign(p.rushing,values);else if(name.includes('receiv'))Object.assign(p.receiving,values);else if(name.includes('kick')||name.includes('field'))Object.assign(p.kicking,values);else if(name.includes('return')||name.includes('fumbl')||name.includes('misc'))Object.assign(p.misc,values);
 if(name.includes('fumbl'))p.fumbleGroupSeen=true;}
 return out;}
+// Deduplicated, attributed ESPN play records. Box-score aggregates remain the
+// authoritative baseline for ordinary yards/receptions, preventing double credit.
+function playEvents(summary){
+ const plays=new Map();
+ const collect=list=>{for(const play of list||[]){
+   if(!play||!play.id)continue;
+   const id=String(play.id);
+   const old=plays.get(id);
+   if(!old||JSON.stringify(play).length>JSON.stringify(old).length)plays.set(id,play);
+ }};
+ collect(summary.scoringPlays);
+ for(const drive of summary.drives?.previous||[])collect(drive.plays);
+ if(summary.drives?.current)collect(summary.drives.current.plays);
+ const events=[];
+ for(const play of plays.values()){
+  const type=String(play.type?.text||'').toLowerCase();
+  const desc=String(play.text||'');
+  const participants=(play.participants||[]).map(x=>String(x.athlete?.id||x.id||'')).filter(Boolean);
+  // Never attribute a kick to an athlete from an ambiguous text-only description.
+  const athleteId=participants.length===1?participants[0]:null;
+  const distance=desc.match(/(?:^|\D)(\d{1,2})\s*yard\s*(?:field goal|fg)/i)||desc.match(/(?:field goal|fg)\s*(?:of|from)?\s*(\d{1,2})\s*yards?/i);
+  const yards=distance?Number(distance[1]):null;
+  if(athleteId&&yards!==null&&(/field goal/.test(type)||/field goal/i.test(desc))){
+    const missed=/(?:no good|missed|blocked|wide (?:left|right))/i.test(desc);
+    const made=!missed&&/(?:good|is good|successful)/i.test(desc);
+    if(missed||made)events.push({playId:String(play.id),athleteId,kind:made?'fieldGoalMade':'fieldGoalMissed',yards});
+  }
+  // Bonus attribution is deliberately conservative: only an explicit play
+  // participant and a verified scoring play qualify.
+ }
+ return events;
+}
 function scorePlayer(p,rules,events=[]){
  const pass=rules.passing||{},rush=rules.rushing||{},rec=rules.receiving||{},
    kick=rules.kicking||{},misc=rules.miscellaneous||{};
@@ -149,4 +181,4 @@ function scoreDefense(input,rules){
 function teamId(player){const v=String(player.nflTeamId??player.team??'');return /^\d+$/.test(v)?v:TEAM_IDS[v.toUpperCase()]||null;}
 async function loadWeek(season,week){const board=await json(`${BASE}/scoreboard?season=${season}&seasontype=2&week=${week}&limit=100`);const games=eventGames(board);if(!games.length)throw Error('No NFL games returned for requested week');return games;}
 async function fetchGame(id){return json(`${BASE}/summary?event=${encodeURIComponent(id)}`);}
-module.exports={loadWeek,fetchGame,playerStats,scorePlayer,defenseStats,scoreDefense,teamId};
+module.exports={loadWeek,fetchGame,playerStats,playEvents,scorePlayer,defenseStats,scoreDefense,teamId};

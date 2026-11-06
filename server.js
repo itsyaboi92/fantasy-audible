@@ -1110,13 +1110,13 @@ async function api(req,res,route){
       const ttl=game.status==='final'?600000:20000;
       if(!item||Date.now()-item.at>ttl){
         const summary=await liveNFL.fetchGame(game.id);
-        item={at:Date.now(),stats:liveNFL.playerStats(summary)};
+        item={at:Date.now(),stats:liveNFL.playerStats(summary),events:liveNFL.playEvents(summary)};
         if(cache.size>80)cache.clear();
         cache.set(cacheKey,item);
       }
       const stats=item.stats.get(id);
       if(!stats)return send(res,200,{...result,status:'no-stats',notice:'ESPN has not reported player boxscore statistics for this game'});
-      const scored=liveNFL.scorePlayer(stats,settingsOf(current.state).scoring);
+      const scored=liveNFL.scorePlayer(stats,settingsOf(current.state).scoring,item.events);
       const groups=[];
       for(const [name,values] of Object.entries({passing:stats.passing,rushing:stats.rushing,receiving:stats.receiving,kicking:stats.kicking,miscellaneous:stats.misc})){
         const rows=Object.entries(values||{}).map(([label,value])=>({label,value:String(value)}));
@@ -1157,10 +1157,11 @@ async function api(req,res,route){
         .filter(g=>g.status==='final'&&g.teams.some(t=>String(t.id)===String(team)));
       const weeks=await Promise.all(games.map(async game=>{
         try{
-          const stats=liveNFL.playerStats(await liveNFL.fetchGame(game.id));
+          const summary=await liveNFL.fetchGame(game.id);
+          const stats=liveNFL.playerStats(summary);
           const playerStats=stats.get(id);
           if(!playerStats)return {week:game.week,gameId:game.id,status:'NO_STATS',opponent:game.teams.find(t=>String(t.id)!==String(team))?.abbreviation||null};
-          const result=liveNFL.scorePlayer(playerStats,settingsOf(current.state).scoring);
+          const result=liveNFL.scorePlayer(playerStats,settingsOf(current.state).scoring,liveNFL.playEvents(summary));
           return {week:game.week,gameId:game.id,status:'final',opponent:game.teams.find(t=>String(t.id)!==String(team))?.abbreviation||null,
             points:result.points,breakdown:result.breakdown,unsupported:result.unsupported,provisional:true};
         }catch(e){return {week:game.week,gameId:game.id,status:'UNAVAILABLE',error:'Game statistics unavailable'};}
@@ -1502,7 +1503,7 @@ async function syncNFLScoring(){
     const summaries=new Map(),failures=[];
     await Promise.all(games.filter(g=>g.status!=='upcoming').map(async g=>{
       try{const summary=await liveNFL.fetchGame(g.id);
-        summaries.set(g.id,{players:liveNFL.playerStats(summary),defenses:liveNFL.defenseStats(summary,g)});}
+        summaries.set(g.id,{players:liveNFL.playerStats(summary),events:liveNFL.playEvents(summary),defenses:liveNFL.defenseStats(summary,g)});}
       catch(e){failures.push(g.id+': '+e.message);}
     }));
     await change((s,accounts)=>{
@@ -1526,7 +1527,7 @@ async function syncNFLScoring(){
         }else{
           const stats=box.players.get(String(player.espnId));
           if(!stats){player.liveScoreStatus='NO_BOX_SCORE_ENTRY';continue;}
-          calculated=liveNFL.scorePlayer(stats,settingsOf(s).scoring);
+          calculated=liveNFL.scorePlayer(stats,settingsOf(s).scoring,box.events);
         }
         // Credit verified field-goal makes at the minimum configured rate; mark unknown distances partial.
         // Do not overwrite an in-progress injury handcuff's credited points.
@@ -1571,18 +1572,18 @@ async function syncPlayerDirectory(){
     const completed=weeks.flatMap(x=>x.games.map(g=>({...g,week:x.week})))
       .filter(g=>g.status==='final');
     const boxscores=await Promise.all(completed.map(async game=>{
-      try{return {game,stats:liveNFL.playerStats(await liveNFL.fetchGame(game.id))};}
+      try{const summary=await liveNFL.fetchGame(game.id);return {game,stats:liveNFL.playerStats(summary),events:liveNFL.playEvents(summary)};}
       catch(e){console.warn('Directory game',game.id,e.message);return null;}
     }));
     await change(s=>{
       const directory={...(s.nflWeeklyDirectory||{})};
       for(const entry of boxscores.filter(Boolean)){
-        const {game,stats}=entry;
+        const {game,stats,events}=entry;
         for(const [athleteId,playerStats] of stats){
           const previous=directory[athleteId];
           // Select the latest COMPLETED game by NFL week, not processing order.
           if(previous?.season===season&&previous?.gameStatus==='final'&&previous.week>game.week)continue;
-          const result=liveNFL.scorePlayer(playerStats,settingsOf(s).scoring);
+          const result=liveNFL.scorePlayer(playerStats,settingsOf(s).scoring,events);
           directory[athleteId]={points:result.points,breakdown:result.breakdown,
             gameId:game.id,opponent:game.teams.find(t=>t.id!==playerStats.teamId)?.abbreviation||null,
             gameStatus:'final',kickoff:game.kickoff,week:game.week,season,
