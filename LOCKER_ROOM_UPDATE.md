@@ -1,0 +1,5 @@
+# League Locker Room — November 4, 2026
+
+Private, authenticated, persistent chat for the current single league. Members post as their team identity. New messages are polled every 8 seconds while the page is visible; a new-message dot appears on the navigation tab. Commissioner can delete messages and mute/unmute members. Messages are HTML-escaped, length-limited to 1,000 characters, and stored in PostgreSQL tables created automatically at server startup. Existing league accounts, draft state, ESPN integration, scoring, and matchups are preserved.
+
+Install by replacing `server.js`, `public/app.js`, and `public/index.html` in the currently deployed repository. `live-nfl.js` is unchanged. Redeploy Render. No reset or manual database migration is required. The chat is scoped to the existing single league; multi-league isolation must be added with the future multi-league architecture. This release does not yet include emoji reactions or automated matchup announcements. Tested with Node syntax checks; live database and cross-device integration have not been tested.

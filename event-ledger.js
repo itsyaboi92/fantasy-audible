@@ -126,7 +126,7 @@ function eventYards(e){const t=e.text,kind=e.type;if(/\b(?:kickoff|punt|field go
  if(/\bsacked\b/i.test(t))return playYards(t);if(/\b(?:pass|rush|run|scramble)\b/i.test(kind+' '+t))return playYards(t);return null;}
 // Conservative special-teams turnover classification. Never infer recovery
 // ownership from a kicker's name or from the play.team field alone.
-function specialTeamsTurnover(e, game){
+function specialTeamsTurnover(e, game, summary){
  const t=e.text, kind=e.type, raw=e.raw||{};
  const kickoff=/\bkick\s*off\b|\bkickoff\b/i.test(kind+' '+t);
  const punt=/\bpunt\b/i.test(kind+' '+t);
@@ -147,8 +147,21 @@ function specialTeamsTurnover(e, game){
  let recovery=id(recoveryRaw);
  if(!recovery){
   const aliases={ '33':['baltimore','ravens','bal'], '30':['jacksonville','jaguars','jax','jac'] };
-  const matches=teams.filter(team=>[team.abbreviation,team.displayName,team.name,...(aliases[id(team.id)]||[])].filter(Boolean).some(n=>new RegExp('\\b'+String(n).replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'\\b','i').test(recoveryText)));
+  const matches=teams.filter(team=>[team.displayName,team.name,...(aliases[id(team.id)]||[]).filter(x=>x.length>3)].filter(Boolean).some(n=>new RegExp('\\b'+String(n).replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'\\b','i').test(recoveryText)));
   if(matches.length===1)recovery=id(matches[0].id);
+ }
+ if(!recovery&&recoveryText&&summary){
+  const ownerTeams=new Set();
+  const clean=x=>norm(x).replace(/[^a-z ]/g,'').trim();
+  const wanted=clean(recoveryText);
+  for(const boxTeam of summary.boxscore?.players||[]){
+   for(const group of boxTeam.statistics||[])for(const entry of group.athletes||[]){
+    const athlete=entry.athlete||{};
+    const full=clean(athlete.displayName||athlete.fullName||'');
+    if(full&&(wanted===full||wanted.startsWith(full+' ')||wanted.includes(' '+full+' ')))ownerTeams.add(id(boxTeam.team?.id));
+   }
+  }
+  if(ownerTeams.size===1)recovery=[...ownerTeams][0];
  }
  if(!recovery||recovery===returning||!teams.some(x=>id(x.id)===recovery))return null;
  return {playId:e.id,returning,recovery,kind:kickoff?'kickoff':'punt',fumbler:fumbler[1].trim()};
@@ -158,7 +171,7 @@ function teamLedger(summary,teamId,opponentId,rules,game){
  const observed={sack:0,interception:0,fumbleRecovered:0,forcedFumble:0,safety:0,blockedKick:0,interceptionTD:0,fumbleReturnTD:0,puntReturnTD:0,kickoffReturnTD:0,blockedKickReturnTD:0,twoPointReturn:0,onePointSafety:0,specialTeamsFumblesLost:0};
  const detail=[],add=(e,k)=>{observed[k]++;detail.push({playId:e.id,kind:k,text:e.text});};
  let eventYardage=0,unparsed=0,offensivePoints=0,opponentNonOffensivePoints=0;
- const returnTurnovers=plays.map(e=>specialTeamsTurnover(e,game)).filter(Boolean);
+ const returnTurnovers=plays.map(e=>specialTeamsTurnover(e,game,summary)).filter(Boolean);
  const uniqueReturnTurnovers=[...new Map(returnTurnovers.map(x=>[x.playId,x])).values()];
  for(const turnover of uniqueReturnTurnovers){
   if(turnover.returning===own){observed.specialTeamsFumblesLost++;detail.push({playId:turnover.playId,kind:'specialTeamsFumblesLost',text:`${turnover.fumbler} lost ${turnover.kind} return fumble`});}
@@ -170,7 +183,7 @@ function teamLedger(summary,teamId,opponentId,rules,game){
    const y=eventYards(e);if(y!==null)eventYardage+=y;else if(/\b(?:pass|rush|run|scramble|sacked)\b/i.test(e.type)&&!/\b(?:penalty|no play)\b/i.test(t))unparsed++;
    if(/\bsacked\b|\bsack\b/i.test(t))add(e,'sack');
    if(/\bintercepted\b/i.test(t)){add(e,'interception');if(td)add(e,'interceptionTD');}
-   if(/\bfumbl\w*\b.*\brecover(?:ed|y)\b/i.test(t)){
+   if(/\bfumbl\w*\b.*\brecover(?:ed|y)\b/i.test(t) && !/\bkick\s*off\b|\bkickoff\b|\bpunt\b/i.test(t)){ 
     // Do not assume every fumble is lost: recovery team must be identifiable.
     const rec=t.match(/recovered by\s+([^,.]+)/i);const ownNames={30:/\b(?:jacksonville|jaguars|jax|jac)\b/i,33:/\b(?:baltimore|ravens|bal)\b/i};if(rec&&(/\bdefen(?:se|sive)\b/i.test(rec[1])||new RegExp('\\b'+own+'\\b').test(rec[1])||(ownNames[own]?.test(rec[1])))){add(e,'fumbleRecovered');if(td)add(e,'fumbleReturnTD');}
    }

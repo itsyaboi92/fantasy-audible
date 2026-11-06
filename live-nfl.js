@@ -140,23 +140,50 @@ function scorePlayer(p,rules,events=[]){
 // Missing fields are never silently treated as verified zeros.
 // Aggregate ESPN's player defensive/fumble box-score groups. Team summary
 // statistics do not consistently expose sacks, forced fumbles or recoveries.
+// ESPN groups are positional: statistics[i] belongs to labels[i].
+// Preserve zeroes, avoid cross-group guesses, and reject conflicting columns.
+const DEFENSE_ALIASES={
+ sacks:['SACK','SACKS','SK','TOTSK','TOTALSACKS'],
+ interceptions:['INT','INTS','INTERCEPTIONS'],
+ forcedFumble:['FF','FORCEDFUMBLES','FORCEDFUMBLE','FUMFORCED'],
+ fumbleRecovered:['FR','FUMREC','FUMRECS','FUMBLERECOVERIES','FUMBLERECOVERY','FUMRECOVERED','RECOVERIES'],
+ safety:['SFTY','SFTYS','SAF','SAFETIES'],
+ blockedKick:['BLK','BLOCKS','BLOCKEDKICKS','KICKSBLKD']
+};
+const normalizedLabel=x=>String(x??'').toUpperCase().replace(/[^A-Z0-9]/g,'');
 function defensivePlayerTotals(summary){
  const out=new Map();
  for(const team of summary.boxscore?.players||[]){
   const tid=String(team.team?.id||'');if(!tid)continue;
-  const stats=out.get(tid)||{};
+  const candidates={};
   for(const group of team.statistics||[]){
-   const name=String(group.name||group.type||'').toLowerCase();
-   const labels=(group.labels||[]).map(x=>String(x).toUpperCase().replace(/[^A-Z0-9]/g,''));
+   const name=String(group.name||group.type||group.displayName||'').toLowerCase();
    const defensive=/defen|tackle/i.test(name),fumbles=/fumbl/i.test(name);
    if(!defensive&&!fumbles)continue;
-   const columns=defensive?{sacks:['SACK','SACKS','SK'],interceptions:['INT','INTS'],forcedFumble:['FF','FORCEDFUMBLES'],fumbleRecovered:['FR','FUMREC','FUMBLERECOVERIES'],safety:['SFTY','SAF'],blockedKick:['BLK','BLOCKS']}:{forcedFumble:['FF','FORCEDFUMBLES']};
-   for(const [key,aliases] of Object.entries(columns)){
-    const i=labels.findIndex(x=>aliases.includes(x));if(i<0)continue;
-    let sum=0,valid=true;
-    for(const row of group.athletes||[]){const raw=row.stats?.[i];const n=Number(raw);if(!Number.isFinite(n)){valid=false;break;}sum+=n;}
-    if(valid)stats[key]=Math.max(stats[key]||0,sum);
+   const labels=(group.labels||[]).map(normalizedLabel);
+   // Only use columns from the proper group. The generic 'REC' column
+   // can mean receptions and must never be treated as a fumble recovery.
+   for(const [key,aliases] of Object.entries(DEFENSE_ALIASES)){
+    if(fumbles&&!defensive&&!['forcedFumble','fumbleRecovered'].includes(key))continue;
+    const indexes=labels.map((x,i)=>aliases.includes(x)?i:-1).filter(i=>i>=0);
+    if(indexes.length!==1)continue;
+    const i=indexes[0];let sum=0,valid=true,rows=0;
+    for(const row of group.athletes||[]){
+     const value=row.stats?.[i];
+     if(value===undefined||value===null||String(value).trim()===''){valid=false;break;}
+     const n=Number(String(value).replace(/,/g,''));
+     if(!Number.isFinite(n)){valid=false;break;}
+     sum+=n;rows++;
+    }
+    if(!valid||!rows)continue;
+    (candidates[key]??=[]).push({sum,group:name});
    }
+  }
+  const stats={};
+  for(const [key,items] of Object.entries(candidates)){
+   // Two overlapping ESPN group totals are NOT additive; conflicting
+   // aggregates are unresolved, never resolved by taking their maximum.
+   if(items.every(x=>x.sum===items[0].sum))stats[key]=items[0].sum;
   }
   out.set(tid,stats);
  }
@@ -188,9 +215,9 @@ function defenseStats(summary,game,events=[]){
   const yards=oppTotal?Number(oppTotal.displayValue??oppTotal.value):NaN;
   const observed=defenseEvents(events,id,opponent?.id);
   const hasPlayFeed=rawPlays(summary).length>0;
-  // Event counts are authoritative where observed; a zero is provisional until
-  // complete play coverage can be demonstrated.
-  for(const [key,value] of Object.entries(observed))if(value>0)stats[key]=value;
+  // Never overwrite an official box-score total with a partial play count.
+  // Play events are fallback evidence only when the box-score field is absent.
+  for(const [key,value] of Object.entries(observed))if(value>0&&stats[key]===undefined)stats[key]=value;
   output.set(id,{stats,playEventCounts:observed,playFeedAvailable:hasPlayFeed,pointsAllowed:opponent?.score,
     yardsAllowed:Number.isFinite(yards)?yards:null,
     opponentFound:!!opponent,gameStatus:game.status});
@@ -252,4 +279,4 @@ async function fetchGame(id){
  }catch(e){console.warn('NFL CDN play feed unavailable for',id,e.message);}
  return summary;
 }
-module.exports={loadWeek,fetchGame,playerStats,rawPlays,playEvents,resolveKickerEvents,defenseEvents,scorePlayer,defenseStats,scoreDefense,teamId};
+module.exports={loadWeek,fetchGame,playerStats,rawPlays,playEvents,resolveKickerEvents,defenseEvents,scorePlayer,defenseStats,scoreDefense,teamId,defensivePlayerTotals};

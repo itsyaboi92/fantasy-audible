@@ -1,0 +1,1 @@
+GIF uploads and clipboard image storage are disabled. Use the Tenor GIF picker, which posts externally hosted media URLs as text messages. Previously uploaded GIFs remain viewable through the legacy read-only endpoint. No existing data is deleted. Configure TENOR_API_KEY in Render.

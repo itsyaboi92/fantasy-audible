@@ -1,0 +1,1 @@
+v27: Lineup locks for ESPN players use the current-week NFL kickoff, not stale player status or demo phase. Missing authoritative game data remains locked for safety. No roster migration. Replace server.js and public/app.js.
