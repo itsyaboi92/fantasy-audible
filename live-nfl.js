@@ -138,9 +138,34 @@ function scorePlayer(p,rules,events=[]){
 }
 // Defensive box-score attribution. Only award values present in the ESPN feed.
 // Missing fields are never silently treated as verified zeros.
+// Aggregate ESPN's player defensive/fumble box-score groups. Team summary
+// statistics do not consistently expose sacks, forced fumbles or recoveries.
+function defensivePlayerTotals(summary){
+ const out=new Map();
+ for(const team of summary.boxscore?.players||[]){
+  const tid=String(team.team?.id||'');if(!tid)continue;
+  const stats=out.get(tid)||{};
+  for(const group of team.statistics||[]){
+   const name=String(group.name||group.type||'').toLowerCase();
+   const labels=(group.labels||[]).map(x=>String(x).toUpperCase().replace(/[^A-Z0-9]/g,''));
+   const defensive=/defen|tackle/i.test(name),fumbles=/fumbl/i.test(name);
+   if(!defensive&&!fumbles)continue;
+   const columns=defensive?{sacks:['SACK','SACKS','SK'],interceptions:['INT','INTS'],forcedFumble:['FF','FORCEDFUMBLES'],fumbleRecovered:['FR','FUMREC','FUMBLERECOVERIES'],safety:['SFTY','SAF'],blockedKick:['BLK','BLOCKS']}:{forcedFumble:['FF','FORCEDFUMBLES']};
+   for(const [key,aliases] of Object.entries(columns)){
+    const i=labels.findIndex(x=>aliases.includes(x));if(i<0)continue;
+    let sum=0,valid=true;
+    for(const row of group.athletes||[]){const raw=row.stats?.[i];const n=Number(raw);if(!Number.isFinite(n)){valid=false;break;}sum+=n;}
+    if(valid)stats[key]=Math.max(stats[key]||0,sum);
+   }
+  }
+  out.set(tid,stats);
+ }
+ return out;
+}
 function defenseStats(summary,game,events=[]){
  const teams=summary.boxscore?.teams||[];
  const output=new Map();
+ const playerTotals=defensivePlayerTotals(summary);
  const aliases={sacks:['sacks','totalsacks'],interceptions:['interceptions','defensiveinterceptions'],
   fumbleRecovered:['fumblesrecovered','fumblerecoveries'],forcedFumble:['forcedfumbles'],
   safety:['safeties'],blockedKick:['blockedkicks','blockedpunts']};
@@ -155,6 +180,7 @@ function defenseStats(summary,game,events=[]){
   for(const [key,keys] of Object.entries(aliases))for(const k of keys){
    if(raw[k]!==undefined){const v=Number(raw[k]);if(Number.isFinite(v)){stats[key]=v;break;} }
   }
+  for(const [key,value] of Object.entries(playerTotals.get(id)||{}))if(stats[key]===undefined)stats[key]=value;
   const opponent=game.teams.find(t=>String(t.id)!==id);
   const oppBox=teams.find(t=>String(t.team?.id)!==id);
   // ESPN's totalYards is the opponent's offensive total, not net punting yards.
