@@ -1,6 +1,6 @@
 'use strict';
-// Deterministic play-level scorer. No box-score numbers ever enter the score.
-const {rawPlays,playerStats,defenseStats}=require('./live-nfl');
+// Deterministic event scorer with category-level box-score reconciliation.
+const {rawPlays,playerStats,defenseStats,playEvents,resolveKickerEvents}=require('./live-nfl');
 const num=x=>Number(x)||0,round=x=>Math.round((x+Number.EPSILON)*100)/100;
 const norm=s=>String(s||'').toLowerCase().replace(/[^a-z0-9 ]/g,' ').replace(/\s+/g,' ').trim();
 const id=x=>String(x??'');
@@ -62,6 +62,14 @@ function aggregatePlayer(summary,p){
 }
 function playerLedger(summary,p,rules){
  const plays=ledger(summary),raw=plays.flatMap(e=>extractPlayer(e,p)),aggregate=aggregatePlayer(summary,p),events=[...raw],discrepancies=[],sources={};
+ // Reuse the v34 kicker extractor that was validated against Cam Little's
+ // 36, 45, 47 and 33-yard kicks. Event IDs prevent double counting.
+ const kickerEvents=resolveKickerEvents(playEvents(summary),p);
+ for(const kick of kickerEvents){
+   const kind=kick.kind==='fieldGoalMade'?'fgMade':'fgMiss';
+   if(!events.some(e=>e.playId===kick.playId&&e.kind===kind))events.push({playId:kick.playId,kind,value:kick.yards,text:kick.text});
+ }
+
  const categories=['passYards','passTD','passINT','passTwo','rushYards','rushTD','rushTwo','recYards','receptions','recTD','recTwo','fumblesLost','patMade','patMiss'];
  for(const kind of categories){
   const observed=events.filter(e=>e.kind===kind).reduce((a,e)=>a+e.value,0),official=aggregate[kind];

@@ -1119,7 +1119,7 @@ async function api(req,res,route){
       const stats=isDefense?null:item.stats.get(id);
       const defense=isDefense?liveNFL.defenseStats(item.summary,game,item.events).get(teamId):null;
       if(!stats&&!defense)return send(res,200,{...result,status:'no-stats',notice:'ESPN has not reported statistics for this game'});
-      const scored=isDefense?liveNFL.scoreDefense(defense,settingsOf(current.state).scoring):liveNFL.scorePlayer(stats,settingsOf(current.state).scoring,item.events);
+      const scored=authoritativeGameScore(item.summary,{...athlete,pos:athlete.position,espnId:id},settingsOf(current.state).scoring,game);
       const groups=[];
       const categories=isDefense?{defense:{...defense.stats,pointsAllowed:defense.pointsAllowed,yardsAllowed:defense.yardsAllowed}}:{passing:stats.passing,rushing:stats.rushing,receiving:stats.receiving,kicking:stats.kicking,miscellaneous:stats.misc};
       for(const [name,values] of Object.entries(categories)){
@@ -1128,7 +1128,7 @@ async function api(req,res,route){
       }
       return send(res,200,{...result,status:'available',groups,points:scored.points,
         breakdown:scored.breakdown,unsupported:scored.unsupported,
-        notice:'Provisional ESPN boxscore and scoring. The official fantasy ledger remains authoritative.'});
+        notice:'Unified event/box-score reconciliation; fantasy lineup eligibility is applied separately.'});
     }catch(e){return send(res,503,{error:'Live NFL game statistics unavailable',details:e.message});}
   }
   if(req.method==='GET'&&route==='/api/players/weekly'){
@@ -1172,7 +1172,7 @@ async function api(req,res,route){
           const events=liveNFL.playEvents(summary);
           const defense=isDefense?liveNFL.defenseStats(summary,game,events).get(String(team)):null;
           if(isDefense&&!defense)return {week:game.week,gameId:game.id,status:'NO_STATS',opponent:opponent?.abbreviation||null};
-          const result=isDefense?liveNFL.scoreDefense(defense,settingsOf(current.state).scoring):liveNFL.scorePlayer(playerStats,settingsOf(current.state).scoring,events);
+          const result=authoritativeGameScore(summary,{...player,pos:player.position,espnId:id},settingsOf(current.state).scoring,game);
           return {week:game.week,gameId:game.id,status:'final',opponent:game.teams.find(t=>String(t.id)!==String(team))?.abbreviation||null,
             points:result.points,breakdown:result.breakdown,unsupported:result.unsupported,provisional:true};
         }catch(e){return {week:game.week,gameId:game.id,status:'UNAVAILABLE',error:'Game statistics unavailable'};}
@@ -1498,6 +1498,16 @@ const server=http.createServer((req,res)=>{const route=new URL(req.url,'http://l
   if(route.startsWith('/api/'))api(req,res,route).catch(e=>{console.error('API error:',e);
     if(!res.headersSent)send(res,500,{error:'Server error'});else res.end();});
   else staticFile(req,res,route);});
+// Single authoritative scorer shared by matchup synchronization, player details,
+// and historical player views. Never independently rescore a box score in the UI.
+function authoritativeGameScore(summary,player,scoring,game){
+  const team=String(liveNFL.teamId(player)||'');
+  if(player.pos==='D/ST'||player.position==='D/ST'){
+    const opponent=game.teams.find(t=>String(t.id)!==team);
+    return eventLedger.teamLedger(summary,team,opponent?.id,scoring,game);
+  }
+  return eventLedger.playerLedger(summary,{id:String(player.espnId||player.id),name:player.name,teamId:team},scoring);
+}
 // Fetch outside the database transaction; apply one consistent snapshot atomically.
 let scoringSyncBusy=false;
 async function syncNFLScoring(){
@@ -1530,13 +1540,7 @@ async function syncNFLScoring(){
         player.status=game.status;
         if(game.status==='upcoming')continue;
         const box=summaries.get(game.id);if(!box)continue;
-        let calculated;
-        if(player.pos==='D/ST'){
-          const opponent=game.teams.find(t=>String(t.id)!==String(liveNFL.teamId(player)));
-          calculated=eventLedger.teamLedger(box.summary,liveNFL.teamId(player),opponent?.id,settingsOf(s).scoring,game);
-        }else{
-          calculated=eventLedger.playerLedger(box.summary,{id:String(player.espnId),name:player.name,teamId:liveNFL.teamId(player)},settingsOf(s).scoring);
-        }
+        const calculated=authoritativeGameScore(box.summary,player,settingsOf(s).scoring,game);
         // Never replace a known score with a zero from an empty or incomplete feed.
         if(!eventLedger.ledger(box.summary).length){player.liveScoreStatus='PLAY_FEED_UNAVAILABLE';continue;}
         // Credit verified field-goal makes at the minimum configured rate; mark unknown distances partial.
