@@ -151,6 +151,36 @@ const DEFENSE_ALIASES={
  blockedKick:['BLK','BLOCKS','BLOCKEDKICKS','KICKSBLKD']
 };
 const normalizedLabel=x=>String(x??'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+// D/ST is box-score-first. Do not derive interceptions or recoveries from
+// play.team: on scoring/return plays that field does not consistently identify
+// the offense. Retain play counts as diagnostics only.
+const DEFENSIVE_GROUP=/defen|tackle|intercept/i;
+const FUMBLE_GROUP=/fumbl/i;
+const RETURN_GROUP=/kick.*return|punt.*return|return.*kick|return.*punt/i;
+function readDefensiveGroup(group){
+ const name=String(group.name||group.type||group.displayName||'').toLowerCase();
+ const defensive=DEFENSIVE_GROUP.test(name),fumbles=FUMBLE_GROUP.test(name);
+ if(!defensive&&!fumbles)return {};
+ const labels=(group.labels||[]).map(normalizedLabel);
+ const found={};
+ for(const [key,aliases] of Object.entries(DEFENSE_ALIASES)){
+  if(fumbles&&!defensive&&!['forcedFumble','fumbleRecovered'].includes(key))continue;
+  const matches=labels.map((x,i)=>aliases.includes(x)?i:-1).filter(i=>i>=0);
+  if(matches.length!==1)continue;
+  const index=matches[0],rows=group.athletes||[];
+  if(!rows.length)continue;
+  let sum=0,valid=true;
+  for(const row of rows){
+   const v=row.stats?.[index];
+   if(v===undefined||v===null||String(v).trim()===''){valid=false;break;}
+   const n=Number(String(v).replace(/,/g,''));
+   if(!Number.isFinite(n)){valid=false;break;}
+   sum+=n;
+  }
+  if(valid)found[key]=sum;
+ }
+ return found;
+}
 function defensivePlayerTotals(summary){
  const out=new Map();
  for(const team of summary.boxscore?.players||[]){
@@ -158,31 +188,13 @@ function defensivePlayerTotals(summary){
   const candidates={};
   for(const group of team.statistics||[]){
    const name=String(group.name||group.type||group.displayName||'').toLowerCase();
-   const defensive=/defen|tackle/i.test(name),fumbles=/fumbl/i.test(name);
-   if(!defensive&&!fumbles)continue;
-   const labels=(group.labels||[]).map(normalizedLabel);
-   // Only use columns from the proper group. The generic 'REC' column
-   // can mean receptions and must never be treated as a fumble recovery.
-   for(const [key,aliases] of Object.entries(DEFENSE_ALIASES)){
-    if(fumbles&&!defensive&&!['forcedFumble','fumbleRecovered'].includes(key))continue;
-    const indexes=labels.map((x,i)=>aliases.includes(x)?i:-1).filter(i=>i>=0);
-    if(indexes.length!==1)continue;
-    const i=indexes[0];let sum=0,valid=true,rows=0;
-    for(const row of group.athletes||[]){
-     const value=row.stats?.[i];
-     if(value===undefined||value===null||String(value).trim()===''){valid=false;break;}
-     const n=Number(String(value).replace(/,/g,''));
-     if(!Number.isFinite(n)){valid=false;break;}
-     sum+=n;rows++;
-    }
-    if(!valid||!rows)continue;
+   for(const [key,sum] of Object.entries(readDefensiveGroup(group))){
     (candidates[key]??=[]).push({sum,group:name});
    }
   }
   const stats={};
   for(const [key,items] of Object.entries(candidates)){
-   // Two overlapping ESPN group totals are NOT additive; conflicting
-   // aggregates are unresolved, never resolved by taking their maximum.
+   // Do not add overlapping group totals or silently choose a maximum.
    if(items.every(x=>x.sum===items[0].sum))stats[key]=items[0].sum;
   }
   out.set(tid,stats);
@@ -193,9 +205,10 @@ function defenseStats(summary,game,events=[]){
  const teams=summary.boxscore?.teams||[];
  const output=new Map();
  const playerTotals=defensivePlayerTotals(summary);
- const aliases={sacks:['sacks','totalsacks'],interceptions:['interceptions','defensiveinterceptions'],
-  fumbleRecovered:['fumblesrecovered','fumblerecoveries'],forcedFumble:['forcedfumbles'],
-  safety:['safeties'],blockedKick:['blockedkicks','blockedpunts']};
+ const aliases={sacks:['sacks','totalsacks'],interceptions:['defensiveinterceptions','interceptionsmade'],
+  fumbleRecovered:['defensivefumblesrecovered','specialteamsfumblesrecovered','fumblesrecovered','fumblerecoveries'],
+  forcedFumble:['defensivefumblesforced','specialteamsfumblesforced','forcedfumbles'],
+  safety:['defensivesafeties','safeties'],blockedKick:['blockedkicks','blockedpunts']};
  for(const team of teams){
   const id=String(team.team?.id||'');if(!id)continue;
   const raw={};
@@ -204,23 +217,23 @@ function defenseStats(summary,game,events=[]){
    if(key)raw[key]=stat.displayValue??stat.value;
   }
   const stats={};
+  // Team-level interception counts may describe interceptions THROWN.
+  // Trust only explicitly defensive fields or defender-level totals.
   for(const [key,keys] of Object.entries(aliases))for(const k of keys){
    if(raw[k]!==undefined){const v=Number(raw[k]);if(Number.isFinite(v)){stats[key]=v;break;} }
   }
-  for(const [key,value] of Object.entries(playerTotals.get(id)||{}))if(stats[key]===undefined)stats[key]=value;
+  // Defensive player box scores establish team ownership directly.
+  for(const [key,value] of Object.entries(playerTotals.get(id)||{}))stats[key]=value;
   const opponent=game.teams.find(t=>String(t.id)!==id);
   const oppBox=teams.find(t=>String(t.team?.id)!==id);
-  // ESPN's totalYards is the opponent's offensive total, not net punting yards.
   const oppTotal=(oppBox?.statistics||[]).find(x=>String(x.name||'').toLowerCase()==='totalyards');
   const yards=oppTotal?Number(oppTotal.displayValue??oppTotal.value):NaN;
   const observed=defenseEvents(events,id,opponent?.id);
-  const hasPlayFeed=rawPlays(summary).length>0;
-  // Never overwrite an official box-score total with a partial play count.
-  // Play events are fallback evidence only when the box-score field is absent.
-  for(const [key,value] of Object.entries(observed))if(value>0&&stats[key]===undefined)stats[key]=value;
-  output.set(id,{stats,playEventCounts:observed,playFeedAvailable:hasPlayFeed,pointsAllowed:opponent?.score,
-    yardsAllowed:Number.isFinite(yards)?yards:null,
-    opponentFound:!!opponent,gameStatus:game.status});
+  // No generic play-event fallback: it reverses interceptions when ESPN
+  // labels a turnover by the intercepting team's ID.
+  output.set(id,{stats,playEventCounts:observed,playFeedAvailable:rawPlays(summary).length>0,
+   pointsAllowed:opponent?.score,yardsAllowed:Number.isFinite(yards)?yards:null,
+   opponentFound:!!opponent,gameStatus:game.status});
  }
  return output;
 }
