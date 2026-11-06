@@ -31,7 +31,7 @@ const DEFAULT_SCORING = {
   rushing:{yards:0.1, touchdowns:6, touchdowns40:1, twoPoint:2, yards100to199:1},
   receiving:{yards:0.1, receptions:1, touchdowns:6, touchdowns40:1, twoPoint:2, yards100to199:1},
   kicking:{patMade:1, patMissed:-1, fg0to39:3, fg40to49:4, fg50to59:5, fg60plus:6, fgMiss0to39:-1},
-  defense:{sack:1, interception:2, interceptionTD:6, fumbleReturnTD:6, kickoffReturnTD:6,
+  defense:{specialTeamsFumblesLost:0, sack:1, interception:2, interceptionTD:6, fumbleReturnTD:6, kickoffReturnTD:6,
     puntReturnTD:6, blockedKickReturnTD:6, blockedKick:2, fumbleRecovered:1,
     forcedFumble:1, safety:2, twoPointReturn:2, onePointSafety:1,
     pointsAllowed0:5, pointsAllowed1to6:4, pointsAllowed7to13:3,

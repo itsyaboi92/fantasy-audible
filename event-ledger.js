@@ -29,7 +29,23 @@ function extractPlayer(e,p){
  if(receiving&&y!==null&&!intercept){if(!two){addEvent(a,e,'recYards',y);addEvent(a,e,'receptions');if(td){addEvent(a,e,'recTD');if(y>=40)addEvent(a,e,'recTD40');}}else if(good)addEvent(a,e,'recTwo');}
  const fg=fieldGoal(t);if(fg){const miss=/\b(?:no good|missed|blocked|wide|failed|unsuccessful)\b/i.test(t);if(miss)addEvent(a,e,'fgMiss',Number(fg[1]));else if(/\b(?:good|made|successful)\b/i.test(t)||e.scoring)addEvent(a,e,'fgMade',Number(fg[1]));}
  if(/\bextra point\b|\bPAT\b/i.test(all)&&!isConversion(all)){if(/\b(?:no good|missed|blocked|failed|unsuccessful)\b/i.test(t))addEvent(a,e,'patMiss');else if(/\b(?:good|made|successful)\b/i.test(t)||e.scoring)addEvent(a,e,'patMade');}
- if(/\bfumbl/i.test(t)&&/\brecovered by\b/i.test(t)){const after=t.split(/recovered by/i)[1]||'';if(!new RegExp('\\b'+escaped+'\\b','i').test(after))addEvent(a,e,'fumblesLost');}
+ // A play mentioning a kicker, returner and recovery does not make all three
+ // the fumbler. Require the athlete to be the explicitly named fumble owner.
+ // When ESPN supplies no owner, defer to that athlete's official LOST total.
+ if (/\bfumbl/i.test(t) && /\brecover(?:ed|y)\b/i.test(t)) {
+  const beforeRecovery=t.split(/\brecover(?:ed|y)\s+by\b/i)[0];
+  const ownerPatterns=[
+   new RegExp('\\b'+escaped+'\\b\\s+(?:\\([^)]*\\)\\s*)?(?:fumbles?|fumbled)\\b','i'),
+   new RegExp('\\b(?:fumble\\s+by|fumbled\\s+by)\\s+(?:[A-Za-z.\\-]+\\s+){0,3}'+escaped+'\\b','i')
+  ];
+  if (ownerPatterns.some(re=>re.test(beforeRecovery))) {
+   const after=t.split(/\brecovered by\b/i)[1]||'';
+   // A same-player recovery is not a fumble lost. For others, team
+   // ownership must be confirmed; otherwise the box-score LOST field wins.
+   if (after && !new RegExp('\\b'+escaped+'\\b','i').test(after) &&
+       e.raw?.fumbleLost === true) addEvent(a,e,'fumblesLost');
+  }
+ }
  if(td&&/\bkickoff\s+return\b/i.test(all))addEvent(a,e,'kickoffReturnTD');
  if(td&&/\bpunt\s+return\b/i.test(all))addEvent(a,e,'puntReturnTD');
  if(td&&/\bfumble\s+(?:recovery|return)\b/i.test(all))addEvent(a,e,'fumbleRecoveryTD');
@@ -93,11 +109,46 @@ function playerLedger(summary,p,rules){
 }
 function eventYards(e){const t=e.text,kind=e.type;if(/\b(?:kickoff|punt|field goal|extra point|penalty|timeout|kneel)\b/i.test(kind+' '+t))return null;if(/\bintercepted\b|\bincomplete\b|\bno gain\b/i.test(t))return 0;
  if(/\bsacked\b/i.test(t))return playYards(t);if(/\b(?:pass|rush|run|scramble)\b/i.test(kind+' '+t))return playYards(t);return null;}
+// Conservative special-teams turnover classification. Never infer recovery
+// ownership from a kicker's name or from the play.team field alone.
+function specialTeamsTurnover(e, game){
+ const t=e.text, kind=e.type, raw=e.raw||{};
+ const kickoff=/\bkick\s*off\b|\bkickoff\b/i.test(kind+' '+t);
+ const punt=/\bpunt\b/i.test(kind+' '+t);
+ if(!kickoff&&!punt||!/\bfumbl/i.test(t)||!/\brecover(?:ed|y)\b/i.test(t))return null;
+ const teams=game?.teams||[];
+ if(teams.length!==2)return null;
+ const kicking=id(e.teamId);
+ if(!teams.some(x=>id(x.id)===kicking))return null;
+ const returning=id(teams.find(x=>id(x.id)!==kicking)?.id);
+ const fumbler=t.match(/(?:^|[.;,]\s*)([A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+){0,2})\s+(?:fumbles|fumbled)\b/i)||t.match(/\bfumbled?\s+by\s+([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){0,3})/i);
+ if(!fumbler)return null;
+ // Require a return context: the fumbler must appear after the kick and
+ // before the recovery, not merely elsewhere in the description.
+ const before=t.split(/\brecovered\s+by\b/i)[0];
+ if(!/\breturn(?:ed|er|s|ing)?\b|\bto\s+[A-Z]{2,3}\s*\d+\b/i.test(before))return null;
+ const recoveryText=(t.match(/\brecovered\s+by\s+([^.;,]+)/i)||[])[1]||'';
+ const recoveryRaw=raw.recoveryTeam?.id||raw.recoveringTeam?.id||raw.recoveryTeamId||raw.recoveringTeamId||raw.fumbleRecovery?.team?.id;
+ let recovery=id(recoveryRaw);
+ if(!recovery){
+  const aliases={ '33':['baltimore','ravens','bal'], '30':['jacksonville','jaguars','jax','jac'] };
+  const matches=teams.filter(team=>[team.abbreviation,team.displayName,team.name,...(aliases[id(team.id)]||[])].filter(Boolean).some(n=>new RegExp('\\b'+String(n).replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'\\b','i').test(recoveryText)));
+  if(matches.length===1)recovery=id(matches[0].id);
+ }
+ if(!recovery||recovery===returning||!teams.some(x=>id(x.id)===recovery))return null;
+ return {playId:e.id,returning,recovery,kind:kickoff?'kickoff':'punt',fumbler:fumbler[1].trim()};
+}
 function teamLedger(summary,teamId,opponentId,rules,game){
  const plays=ledger(summary),r=rules?.defense||{},own=id(teamId),opp=id(opponentId);
- const observed={sack:0,interception:0,fumbleRecovered:0,forcedFumble:0,safety:0,blockedKick:0,interceptionTD:0,fumbleReturnTD:0,puntReturnTD:0,kickoffReturnTD:0,blockedKickReturnTD:0,twoPointReturn:0,onePointSafety:0};
+ const observed={sack:0,interception:0,fumbleRecovered:0,forcedFumble:0,safety:0,blockedKick:0,interceptionTD:0,fumbleReturnTD:0,puntReturnTD:0,kickoffReturnTD:0,blockedKickReturnTD:0,twoPointReturn:0,onePointSafety:0,specialTeamsFumblesLost:0};
  const detail=[],add=(e,k)=>{observed[k]++;detail.push({playId:e.id,kind:k,text:e.text});};
  let eventYardage=0,unparsed=0,offensivePoints=0,opponentNonOffensivePoints=0;
+ const returnTurnovers=plays.map(e=>specialTeamsTurnover(e,game)).filter(Boolean);
+ const uniqueReturnTurnovers=[...new Map(returnTurnovers.map(x=>[x.playId,x])).values()];
+ for(const turnover of uniqueReturnTurnovers){
+  if(turnover.returning===own){observed.specialTeamsFumblesLost++;detail.push({playId:turnover.playId,kind:'specialTeamsFumblesLost',text:`${turnover.fumbler} lost ${turnover.kind} return fumble`});}
+  if(turnover.recovery===own){observed.fumbleRecovered++;detail.push({playId:turnover.playId,kind:'fumbleRecovered',text:`Recovered ${turnover.kind} return fumble by ${turnover.fumbler}`});}
+ }
  for(const e of plays){
   const t=e.text+' '+e.type,offense=id(e.teamId)===opp,ours=id(e.teamId)===own,td=/\btouchdown\b/i.test(t);
   if(offense){
@@ -159,6 +210,7 @@ function teamLedger(summary,teamId,opponentId,rules,game){
  }
  statDetails.pointsAllowed={value:Number.isFinite(pointsAllowed)?pointsAllowed:null,source:sources.pointsAllowed,verified:final&&!opponentNonOffensivePoints};
  statDetails.yardsAllowed={value:Number.isFinite(officialYards)?officialYards:(unparsed?null:eventYardage),source:sources.yardsAllowed,verified:Number.isFinite(officialYards)&&final};
+ statDetails.specialTeamsFumblesLost={value:observed.specialTeamsFumblesLost||0,source:observed.specialTeamsFumblesLost?'verified play ownership':'no verified return turnovers',verified:false};
  for(const k of ['interceptionTD','fumbleReturnTD','puntReturnTD','kickoffReturnTD','blockedKickReturnTD','twoPointReturn','onePointSafety'])
   statDetails[k]={value:observed[k]||null,source:observed[k]?'play-by-play (partial)':'unavailable',verified:false};
  const unsupported=[];
@@ -166,4 +218,4 @@ function teamLedger(summary,teamId,opponentId,rules,game){
  if(final&&opponentNonOffensivePoints)unsupported.push('points allowed requires scoring-event classification review');
  return {points:round(points),breakdown,events:detail,counts,statDetails,yardsAllowed,pointsAllowed,discrepancies,sources,source:'hybrid-category-reconciliation',complete:plays.length>0&&!unsupported.length,unsupported};
 }
-module.exports={ledger,extractPlayer,playerLedger,teamLedger,scoreEvents,eventYards};
+module.exports={ledger,extractPlayer,playerLedger,teamLedger,scoreEvents,eventYards,specialTeamsTurnover};
