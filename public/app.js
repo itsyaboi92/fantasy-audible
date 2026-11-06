@@ -23,7 +23,7 @@ const LABELS={yards:'Yards',touchdowns:'Touchdowns',touchdowns40:'40+ yard TD bo
   interceptionTD:'Interception return TD',fumbleReturnTD:'Fumble return TD',
   kickoffReturnTD:'Kickoff return TD',puntReturnTD:'Punt return TD',
   blockedKickReturnTD:'Blocked kick return TD',blockedKick:'Blocked kick',
-  specialTeamsFumblesLost:'Special teams fumble lost',fumbleRecovered:'Fumble recovered',forcedFumble:'Forced fumble',safety:'Safety',
+fumbleRecovered:'Fumble recovered',forcedFumble:'Forced fumble',safety:'Safety',
   twoPointReturn:'Two-point return',onePointSafety:'One-point safety',
   pointsAllowed0:'Points allowed 0',pointsAllowed1to6:'Points allowed 1–6',
   pointsAllowed7to13:'Points allowed 7–13',pointsAllowed14to17:'Points allowed 14–17',
@@ -191,8 +191,8 @@ function closePlayerProfile(){profilePlayerId=null;profileHistory=null;expandedP
 function toggleProfileWeek(week){expandedProfileWeek=expandedProfileWeek===week?null:week;render();}
 function defenseStatTable(stats){
   if(!stats)return '';
-  const labels={specialTeamsFumblesLost:'Special-teams fumbles lost',sack:'Sacks',interception:'Interceptions',forcedFumble:'Forced fumbles',fumbleRecovered:'Fumble recoveries',safety:'Safeties',blockedKick:'Blocked kicks',interceptionTD:'Interception return TDs',fumbleReturnTD:'Fumble return TDs',puntReturnTD:'Punt return TDs',kickoffReturnTD:'Kickoff return TDs',blockedKickReturnTD:'Blocked kick return TDs',twoPointReturn:'Two-point returns',onePointSafety:'One-point safeties',pointsAllowed:'Points allowed',yardsAllowed:'Offensive yards allowed'};
-  return `<section class="fa31-group"><h3>Actual D/ST statistics</h3>${Object.entries(labels).map(([k,label])=>{const x=stats[k],v=x?.value;return `<div class="fa31-stat"><span>${esc(label)}</span><b>${v===null||v===undefined?'—':esc(v)}${x?.verified?' ✓':''}</b></div>`;}).join('')}<p class="muted small">✓ Verified against final totals. — Data unavailable, not zero. Event-only counts remain provisional until reconciled.</p></section>`;
+  const labels={sack:'Sacks',interception:'Interceptions',forcedFumble:'Forced fumbles',fumbleRecovered:'Fumble recoveries',safety:'Safeties',blockedKick:'Blocked kicks',interceptionTD:'Interception return TDs',fumbleReturnTD:'Fumble return TDs',puntReturnTD:'Punt return TDs',kickoffReturnTD:'Kickoff return TDs',blockedKickReturnTD:'Blocked kick return TDs',twoPointReturn:'Two-point returns',onePointSafety:'One-point safeties',pointsAllowed:'Points allowed',yardsAllowed:'Offensive yards allowed'};
+  return `<section class="fa31-group"><h3>Actual D/ST statistics</h3>${Object.entries(labels).map(([k,label])=>{const x=stats[k],v=x?.value;return `<div class="fa31-stat"><span>${esc(label)}</span><b>${v===null||v===undefined?'—':esc(v)}${x?.verified?' ✓':''}</b></div>`;}).join('')}<p class="muted small">✓ Verified against final totals. — Data unavailable, not zero. D/ST statistics are sourced from ESPN box scores only.</p></section>`;
 }
 function playerProfileCard(){
   if(!profilePlayerId)return '';
