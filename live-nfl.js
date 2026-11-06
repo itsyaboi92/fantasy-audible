@@ -142,40 +142,73 @@ function scorePlayer(p,rules,events=[]){
 // statistics do not consistently expose sacks, forced fumbles or recoveries.
 // ESPN groups are positional: statistics[i] belongs to labels[i].
 // Preserve zeroes, avoid cross-group guesses, and reject conflicting columns.
-const DEFENSE_ALIASES={
+const normalizedLabel=x=>String(x??'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+// ESPN labels are positional: labels[i] corresponds to athlete.stats[i].
+// Context matters: an offensive INT is thrown, while a defensive INT is caught.
+const BOX_FIELDS={
  sacks:['SACK','SACKS','SK','TOTSK','TOTALSACKS'],
  interceptions:['INT','INTS','INTERCEPTIONS'],
  forcedFumble:['FF','FORCEDFUMBLES','FORCEDFUMBLE','FUMFORCED'],
- fumbleRecovered:['FR','FUMREC','FUMRECS','FUMBLERECOVERIES','FUMBLERECOVERY','FUMRECOVERED','RECOVERIES'],
+ fumbleRecovered:['FR','FUMREC','FUMRECS','FUMBLERECOVERIES','FUMBLERECOVERY','FUMRECOVERED'],
  safety:['SFTY','SFTYS','SAF','SAFETIES'],
- blockedKick:['BLK','BLOCKS','BLOCKEDKICKS','KICKSBLKD']
+ blockedKick:['BLK','BLOCKS','BLOCKEDKICKS','KICKSBLKD'],
+ interceptionTD:['INTTD','INTTDS','INTERCEPTIONTDS','INTERCEPTIONTOUCHDOWNS'],
+ fumbleReturnTD:['FRTD','FRTDS','FUMRETTD','FUMBLERETURNTD','FUMBLERETURNTOUCHDOWNS'],
+ kickoffReturnTD:['KRTD','KRTDS','KICKRETURNTD','KICKRETURNTOUCHDOWNS'],
+ puntReturnTD:['PRTD','PRTDS','PUNTRETURNTD','PUNTRETURNTOUCHDOWNS']
 };
-const normalizedLabel=x=>String(x??'').toUpperCase().replace(/[^A-Z0-9]/g,'');
-// D/ST is box-score-first. Do not derive interceptions or recoveries from
-// play.team: on scoring/return plays that field does not consistently identify
-// the offense. Retain play counts as diagnostics only.
-const DEFENSIVE_GROUP=/defen|tackle|intercept/i;
-const FUMBLE_GROUP=/fumbl/i;
-const RETURN_GROUP=/kick.*return|punt.*return|return.*kick|return.*punt/i;
+const DEF_GROUP=/defen|tackle|intercept/i;
+const FUM_GROUP=/fumbl/i;
+const KICK_GROUP=/kick.*return|kickreturn/i;
+const PUNT_GROUP=/punt.*return|puntreturn/i;
+const TEAM_STAT_NAMES={
+ sacks:['defensivesacks','sacks'],
+ interceptions:['defensiveinterceptions','interceptionsmade'],
+ forcedFumble:['defensivefumblesforced','specialteamsfumblesforced','defensivemiscellaneousfumblesforced'],
+ fumbleRecovered:['defensivefumblesrecovered','specialteamsfumblesrecovered','defensivemiscellaneousfumblesrecovered'],
+ safety:['defensivesafeties','safeties'],
+ blockedKick:['defensivespecialteamsblocks','blockedkicks','blockedpunts'],
+ interceptionTD:['interceptionsreturnedtouchdowns','interceptionreturntouchdowns'],
+ fumbleReturnTD:['fumblereturntouchdowns','fumblesopponentrecoverytouchdowns'],
+ kickoffReturnTD:['kickreturntouchdowns','kickoffreturntouchdowns'],
+ puntReturnTD:['puntreturntouchdowns'],
+ twoPointReturn:['twopointdefensivemade','defensivetwopointreturns'],
+ onePointSafety:['onepointsafeties']
+};
+const TEAM_COMPONENTS={
+ forcedFumble:['defensivefumblesforced','specialteamsfumblesforced','defensivemiscellaneousfumblesforced'],
+ fumbleRecovered:['defensivefumblesrecovered','specialteamsfumblesrecovered','defensivemiscellaneousfumblesrecovered']
+};
+function groupContext(group){
+ const name=String([group.name,group.type,group.displayName].filter(Boolean).join(' ')).toLowerCase();
+ if(KICK_GROUP.test(name))return 'kick';
+ if(PUNT_GROUP.test(name))return 'punt';
+ if(DEF_GROUP.test(name))return 'defense';
+ if(FUM_GROUP.test(name))return 'fumbles';
+ return 'other';
+}
+function eligibleField(context,key){
+ if(context==='defense')return !['kickoffReturnTD','puntReturnTD'].includes(key);
+ if(context==='fumbles')return ['forcedFumble','fumbleRecovered','fumbleReturnTD'].includes(key);
+ if(context==='kick')return key==='kickoffReturnTD';
+ if(context==='punt')return key==='puntReturnTD';
+ return false;
+}
 function readDefensiveGroup(group){
- const name=String(group.name||group.type||group.displayName||'').toLowerCase();
- const defensive=DEFENSIVE_GROUP.test(name),fumbles=FUMBLE_GROUP.test(name);
- if(!defensive&&!fumbles)return {};
- const labels=(group.labels||[]).map(normalizedLabel);
+ const context=groupContext(group),labels=(group.labels||[]).map(normalizedLabel),rows=group.athletes||[];
+ if(context==='other'||!rows.length)return {};
  const found={};
- for(const [key,aliases] of Object.entries(DEFENSE_ALIASES)){
-  if(fumbles&&!defensive&&!['forcedFumble','fumbleRecovered'].includes(key))continue;
+ for(const [key,aliases] of Object.entries(BOX_FIELDS)){
+  if(!eligibleField(context,key))continue;
   const matches=labels.map((x,i)=>aliases.includes(x)?i:-1).filter(i=>i>=0);
   if(matches.length!==1)continue;
-  const index=matches[0],rows=group.athletes||[];
-  if(!rows.length)continue;
-  let sum=0,valid=true;
+  const index=matches[0];let sum=0,valid=true;
   for(const row of rows){
-   const v=row.stats?.[index];
-   if(v===undefined||v===null||String(v).trim()===''){valid=false;break;}
-   const n=Number(String(v).replace(/,/g,''));
-   if(!Number.isFinite(n)){valid=false;break;}
-   sum+=n;
+   const raw=row.stats?.[index];
+   if(raw===undefined||raw===null||String(raw).trim()===''){valid=false;break;}
+   const value=Number(String(raw).replace(/,/g,''));
+   if(!Number.isFinite(value)){valid=false;break;}
+   sum+=value;
   }
   if(valid)found[key]=sum;
  }
@@ -184,54 +217,69 @@ function readDefensiveGroup(group){
 function defensivePlayerTotals(summary){
  const out=new Map();
  for(const team of summary.boxscore?.players||[]){
-  const tid=String(team.team?.id||'');if(!tid)continue;
+  const id=String(team.team?.id||'');if(!id)continue;
   const candidates={};
   for(const group of team.statistics||[]){
-   const name=String(group.name||group.type||group.displayName||'').toLowerCase();
+   const context=groupContext(group);
    for(const [key,sum] of Object.entries(readDefensiveGroup(group))){
-    (candidates[key]??=[]).push({sum,group:name});
+    (candidates[key]??=[]).push({sum,context});
    }
   }
   const stats={};
   for(const [key,items] of Object.entries(candidates)){
-   // Do not add overlapping group totals or silently choose a maximum.
+   // Never add duplicate group totals. An independently reported defensive
+   // group takes precedence over the generic fumbles group for FF/FR.
    if(items.every(x=>x.sum===items[0].sum))stats[key]=items[0].sum;
   }
-  out.set(tid,stats);
+  out.set(id,stats);
  }
  return out;
 }
+function numericStat(raw,key){
+ if(!Object.hasOwn(raw,key))return null;
+ const v=raw[key];
+ if(v===null||v===undefined||String(v).trim()==='')return null;
+ const n=Number(String(v).replace(/,/g,''));return Number.isFinite(n)?n:null;
+}
+function officialTeamStats(team){
+ const raw={};
+ for(const stat of team.statistics||[]){
+  const key=String(stat.name||stat.abbreviation||stat.label||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+  if(key)raw[key]=stat.value??stat.displayValue;
+ }
+ const stats={};
+ for(const [key,aliases] of Object.entries(TEAM_STAT_NAMES)){
+  // Only add component categories if all the known component values exist.
+  // A partial component set must not masquerade as a complete total.
+  const components=TEAM_COMPONENTS[key];
+  if(components){
+   const present=components.map(k=>numericStat(raw,k));
+   if(present.every(x=>x!==null)){stats[key]=present.reduce((a,b)=>a+b,0);continue;}
+  }
+  for(const alias of aliases){
+   const n=numericStat(raw,alias);
+   if(n!==null){stats[key]=n;break;}
+  }
+ }
+ return stats;
+}
 function defenseStats(summary,game,events=[]){
  const teams=summary.boxscore?.teams||[];
- const output=new Map();
- const playerTotals=defensivePlayerTotals(summary);
- const aliases={sacks:['sacks','totalsacks'],interceptions:['defensiveinterceptions','interceptionsmade'],
-  fumbleRecovered:['defensivefumblesrecovered','specialteamsfumblesrecovered','fumblesrecovered','fumblerecoveries'],
-  forcedFumble:['defensivefumblesforced','specialteamsfumblesforced','forcedfumbles'],
-  safety:['defensivesafeties','safeties'],blockedKick:['blockedkicks','blockedpunts']};
+ const output=new Map(),players=defensivePlayerTotals(summary);
  for(const team of teams){
   const id=String(team.team?.id||'');if(!id)continue;
-  const raw={};
-  for(const stat of team.statistics||[]){
-   const key=String(stat.name||stat.label||'').toLowerCase().replace(/[^a-z0-9]/g,'');
-   if(key)raw[key]=stat.displayValue??stat.value;
+  const stats=officialTeamStats(team);
+  // Player-level defensive totals are team-owned. Prefer them for basic
+  // defensive statistics; do not infer INT from offensive QB columns.
+  for(const [key,value] of Object.entries(players.get(id)||{})){
+   if(!Object.hasOwn(stats,key))stats[key]=value;
   }
-  const stats={};
-  // Team-level interception counts may describe interceptions THROWN.
-  // Trust only explicitly defensive fields or defender-level totals.
-  for(const [key,keys] of Object.entries(aliases))for(const k of keys){
-   if(raw[k]!==undefined){const v=Number(raw[k]);if(Number.isFinite(v)){stats[key]=v;break;} }
-  }
-  // Defensive player box scores establish team ownership directly.
-  for(const [key,value] of Object.entries(playerTotals.get(id)||{}))stats[key]=value;
   const opponent=game.teams.find(t=>String(t.id)!==id);
   const oppBox=teams.find(t=>String(t.team?.id)!==id);
   const oppTotal=(oppBox?.statistics||[]).find(x=>String(x.name||'').toLowerCase()==='totalyards');
-  const yards=oppTotal?Number(oppTotal.displayValue??oppTotal.value):NaN;
-  const observed=defenseEvents(events,id,opponent?.id);
-  // No generic play-event fallback: it reverses interceptions when ESPN
-  // labels a turnover by the intercepting team's ID.
-  output.set(id,{stats,playEventCounts:observed,playFeedAvailable:rawPlays(summary).length>0,
+  const yards=oppTotal?Number(oppTotal.value??oppTotal.displayValue):NaN;
+  output.set(id,{stats,playEventCounts:defenseEvents(events,id,opponent?.id),
+   playFeedAvailable:rawPlays(summary).length>0,
    pointsAllowed:opponent?.score,yardsAllowed:Number.isFinite(yards)?yards:null,
    opponentFound:!!opponent,gameStatus:game.status});
  }
@@ -245,8 +293,11 @@ function scoreDefense(input,rules){
   breakdown.push({label,quantity:v,rate:n,points:value});};
  for(const [key,label] of Object.entries({sacks:'Sacks',interceptions:'Interceptions',
    fumbleRecovered:'Fumbles recovered',forcedFumble:'Forced fumbles',
-   safety:'Safeties',blockedKick:'Blocked kicks'})){
-   if(Object.hasOwn(d,key))add(label,d[key],key==='sacks'?r.sack:r[key]);else missing.push(label);
+   safety:'Safeties',blockedKick:'Blocked kicks',
+   interceptionTD:'Interception return touchdowns',fumbleReturnTD:'Fumble return touchdowns',
+   kickoffReturnTD:'Kickoff return touchdowns',puntReturnTD:'Punt return touchdowns',
+   twoPointReturn:'Defensive two-point returns',onePointSafety:'One-point safeties'})){
+   if(Object.hasOwn(d,key))add(label,d[key],key==='sacks'?r.sack:key==='interceptions'?r.interception:r[key]);else missing.push(label);
  }
  const pa=Number(input?.pointsAllowed);
  if(input?.opponentFound&&Number.isFinite(pa)){
@@ -263,8 +314,8 @@ function scoreDefense(input,rules){
    ya<500?'yardsAllowed450to499':ya<550?'yardsAllowed500to549':'yardsAllowed550plus';
   add('Yards allowed bracket',1,r[key]);
  }else missing.push('Yards allowed');
- missing.push('Defensive/return touchdowns','2-point returns','1-point safeties');
- if(input?.playFeedAvailable)missing.push('Play-level defensive totals require reconciliation');
+ // Missing categories above remain explicitly unresolved, not scored as zero.
+ // Box-score-first D/ST does not claim play-by-play verification.
  return {points:Math.round(points*100)/100,breakdown,unsupported:missing};
 }
 function teamId(player){
