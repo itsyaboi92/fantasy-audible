@@ -1503,7 +1503,7 @@ async function syncNFLScoring(){
     const summaries=new Map(),failures=[];
     await Promise.all(games.filter(g=>g.status!=='upcoming').map(async g=>{
       try{const summary=await liveNFL.fetchGame(g.id);
-        summaries.set(g.id,{players:liveNFL.playerStats(summary),events:liveNFL.playEvents(summary),defenses:liveNFL.defenseStats(summary,g)});}
+        summaries.set(g.id,{players:liveNFL.playerStats(summary),events:liveNFL.playEvents(summary),defenses:liveNFL.defenseStats(summary,g,liveNFL.playEvents(summary))});}
       catch(e){failures.push(g.id+': '+e.message);}
     }));
     await change((s,accounts)=>{
