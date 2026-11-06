@@ -203,5 +203,19 @@ function scoreDefense(input,rules){
 }
 function teamId(player){const v=String(player.nflTeamId??player.team??'');return /^\d+$/.test(v)?v:TEAM_IDS[v.toUpperCase()]||null;}
 async function loadWeek(season,week){const board=await json(`${BASE}/scoreboard?season=${season}&seasontype=2&week=${week}&limit=100`);const games=eventGames(board);if(!games.length)throw Error('No NFL games returned for requested week');return games;}
-async function fetchGame(id){return json(`${BASE}/summary?event=${encodeURIComponent(id)}`);}
+async function fetchGame(id){
+ const summary=await json(`${BASE}/summary?event=${encodeURIComponent(id)}`);
+ // ESPN's summary can omit older drives or individual plays. Merge the CDN
+ // play-by-play package by stable play ID when available; never use its box
+ // score to generate points.
+ try{
+   const cdn=await json(`https://cdn.espn.com/core/nfl/playbyplay?xhr=1&gameId=${encodeURIComponent(id)}`);
+   const extra=cdn.gamepackageJSON||cdn;
+   const byId=new Map();for(const p of rawPlays(summary).concat(rawPlays(extra))){
+     const old=byId.get(String(p.id));if(!old||JSON.stringify(p).length>JSON.stringify(old).length)byId.set(String(p.id),p);
+   }
+   if(byId.size)summary.plays=[...byId.values()];
+ }catch(e){console.warn('NFL CDN play feed unavailable for',id,e.message);}
+ return summary;
+}
 module.exports={loadWeek,fetchGame,playerStats,rawPlays,playEvents,resolveKickerEvents,defenseEvents,scorePlayer,defenseStats,scoreDefense,teamId};

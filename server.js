@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const { Pool } = require('pg');
 const { initializeESPN, getESPNPlayers } = require('./espn');
 const liveNFL = require('./live-nfl');
+const eventLedger = require('./event-ledger');
 const matchupAnalytics = require('./matchup-analytics');
 const webpush = require('web-push');
 const PUSH_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
@@ -1503,7 +1504,7 @@ async function syncNFLScoring(){
     const summaries=new Map(),failures=[];
     await Promise.all(games.filter(g=>g.status!=='upcoming').map(async g=>{
       try{const summary=await liveNFL.fetchGame(g.id);
-        summaries.set(g.id,{players:liveNFL.playerStats(summary),events:liveNFL.playEvents(summary),defenses:liveNFL.defenseStats(summary,g,liveNFL.playEvents(summary))});}
+        summaries.set(g.id,{summary,players:liveNFL.playerStats(summary),events:liveNFL.playEvents(summary)});}
       catch(e){failures.push(g.id+': '+e.message);}
     }));
     await change((s,accounts)=>{
@@ -1521,24 +1522,23 @@ async function syncNFLScoring(){
         const box=summaries.get(game.id);if(!box)continue;
         let calculated;
         if(player.pos==='D/ST'){
-          const teamStats=box.defenses.get(liveNFL.teamId(player));
-          if(!teamStats){player.liveScoreStatus='DEFENSE_BOX_SCORE_UNAVAILABLE';continue;}
-          calculated=liveNFL.scoreDefense(teamStats,settingsOf(s).scoring);
+          const opponent=game.teams.find(t=>String(t.id)!==String(liveNFL.teamId(player)));
+          calculated=eventLedger.teamLedger(box.summary,liveNFL.teamId(player),opponent?.id,settingsOf(s).scoring,game);
         }else{
-          const stats=box.players.get(String(player.espnId));
-          if(!stats){player.liveScoreStatus='NO_BOX_SCORE_ENTRY';continue;}
-          calculated=liveNFL.scorePlayer(stats,settingsOf(s).scoring,box.events);
+          calculated=eventLedger.playerLedger(box.summary,{id:String(player.espnId),name:player.name,teamId:liveNFL.teamId(player)},settingsOf(s).scoring);
         }
+        // Never replace a known score with a zero from an empty or incomplete feed.
+        if(!eventLedger.ledger(box.summary).length){player.liveScoreStatus='PLAY_FEED_UNAVAILABLE';continue;}
         // Credit verified field-goal makes at the minimum configured rate; mark unknown distances partial.
         // Do not overwrite an in-progress injury handcuff's credited points.
         if(player.scoringMode){player.liveScoreStatus='INJURY_SUBSTITUTION_REQUIRES_EVENT_SCORING';continue;}
         player.points=calculated.points;
-        player.liveScoreStatus=calculated.unsupported.length?'PARTIAL':'UPDATED';
+        player.liveScoreStatus=calculated.complete?'UPDATED':'PARTIAL';
         player.liveScoreUpdatedAt=new Date().toISOString();changed++;
       }
       s.week=week;
       updateWeeklyLedger(s,accounts,week,games,failures);
-      s.nflSync={season,week,at:new Date().toISOString(),games:games.map(g=>({id:g.id,status:g.status,kickoff:g.kickoff,teams:g.teams})),failures,updatedPlayers:changed,warning:'Provisional: D/ST, play-level bonuses, field-goal distances, and injury substitutions remain unverified.'};
+      s.nflSync={season,week,at:new Date().toISOString(),games:games.map(g=>({id:g.id,status:g.status,kickoff:g.kickoff,teams:g.teams})),failures,updatedPlayers:changed,warning:'Hybrid event/box-score scoring: category-level box-score fallback; event-specific distances and returns retained. Check liveScoreStatus for provisional results.'};
       return {ok:true};
     });
   }catch(e){console.error('NFL scoring sync:',e.message);}
