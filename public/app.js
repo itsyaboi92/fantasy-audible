@@ -978,12 +978,23 @@ function matchupView(){
   const current=Number(state.nflDirectorySync?.currentWeek||state.week||1),isCurrent=week===current;
   const recorded=state.weeklyLedger?.[week]?.matchups?.[game.id];
   const lineupBySlot=rows=>{const used=new Set();return STARTER_ORDER.map(slot=>{const p=(rows||[]).find(x=>!used.has(x.id)&&(x.slot===slot||(slot==='FLEX'&&['RB','WR','TE'].includes(x.slot))));if(p)used.add(p.id);return p||null;});};
-  const leftPlayers=recorded?.homeLineup?lineupBySlot(recorded.homeLineup):(isCurrent?matchupStarters(game.home):[]);
-  const rightPlayers=recorded?.awayLineup?lineupBySlot(recorded.awayLineup):(isCurrent?matchupStarters(game.away):[]);
-  const cells=STARTER_ORDER.map((slot,i)=>`<div class="fa-match-row"><div class="fa-player">${leftPlayers[i]?matchupPlayerCell(leftPlayers[i]):'<span class="muted">Open slot</span>'}</div><div class="fa-position">${slot}</div><div class="fa-player fa-right">${rightPlayers[i]?matchupPlayerCell(rightPlayers[i]):'<span class="muted">Open slot</span>'}</div></div>`).join('');
+  // Future weeks have no recorded lineup yet. Preview today's roster without
+  // carrying current-week fantasy points into the future matchup.
+  const futurePreview=players=>players.map(p=>({...p,points:0,credited:0,scoreAtSwap:0,scoringMode:null}));
+  const leftPlayers=recorded?.homeLineup?lineupBySlot(recorded.homeLineup):
+    (week>current?futurePreview(matchupStarters(game.home)):(isCurrent?matchupStarters(game.home):[]));
+  const rightPlayers=recorded?.awayLineup?lineupBySlot(recorded.awayLineup):
+    (week>current?futurePreview(matchupStarters(game.away)):(isCurrent?matchupStarters(game.away):[]));
+  const cells=STARTER_ORDER.map((slot,i)=>`<div class="fa-match-row"><div class="fa-player">${leftPlayers[i]?(week>current?`<b>${esc(leftPlayers[i].name)}</b><div class="muted small">Projected starter · 0.0 actual</div>`:matchupPlayerCell(leftPlayers[i])):'<span class="muted">Open slot</span>'}</div><div class="fa-position">${slot}</div><div class="fa-player fa-right">${rightPlayers[i]?(week>current?`<b>${esc(rightPlayers[i].name)}</b><div class="muted small">Projected starter · 0.0 actual</div>`:matchupPlayerCell(rightPlayers[i])):'<span class="muted">Open slot</span>'}</div></div>`).join('');
   const status=recorded?.status==='final'?'Final':week>current?'Upcoming':week<current?'Past week · provisional':(Object.values(nflMatchupCache[(Number(state.nflDirectorySync?.season||new Date().getFullYear()))+':'+week]?.data?.teams||{}).some(g=>g.status==='playing')?'Live / provisional':'Upcoming / awaiting kickoff');
-  const total=(id,side)=>recorded?fmt(Number(recorded[side+'Score'])||0):fmt(matchupStarters(id).reduce((sum,p)=>sum+(Number(p?.points)||0),0));
-  const forecast=faMatchForecastView(leftPlayers,rightPlayers,week,recorded);
+  const total=(id,side)=>recorded?fmt(Number(recorded[side+'Score'])||0):
+    week>current?fmt(0):
+    isCurrent?fmt(matchupStarters(id).reduce((sum,p)=>sum+(Number(p?.points)||0),0)):fmt(0);
+  // Do not use current-week scores or a different week's projections for a
+  // future matchup. A future forecast requires that week's own verified data.
+  const forecast=week>current
+    ?'<div class="fa-forecast muted small">Future-week projections will appear when that week’s ESPN statistical projections are available.</div>'
+    :faMatchForecastView(leftPlayers,rightPlayers,week,recorded);
   return `<style>
   .fa-forecast{padding:12px 8px 18px;margin:0 0 14px;border-top:1px solid #384357}
   .fa-forecast-label{display:flex;justify-content:space-between;gap:12px;font-size:13px;font-variant-numeric:tabular-nums}
