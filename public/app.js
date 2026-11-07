@@ -1033,15 +1033,21 @@ function editorialView(){
 }
 function render(){if(!state||!manager)return;const mine=state.players.filter(x=>x.owner===manager),myTeam=m(manager);
   if(!myTeam)return;
+  const pendingInjuries=(state.injuries||[]).filter(i=>i.active&&state.players.some(p=>p.id===i.player&&p.owner===manager));
+  if(!document.getElementById('fa-injury-priority-style')){
+    const style=document.createElement('style');style.id='fa-injury-priority-style';
+    style.textContent='.fa-injury-priority{border:2px solid #e34242;border-radius:14px;padding:12px;margin:12px 0 18px;background:linear-gradient(135deg,rgba(220,38,38,.20) 0%,rgba(220,38,38,.08) 14%,transparent 38%);box-shadow:0 0 0 1px rgba(220,38,38,.12)}.fa-injury-priority>.fa-injury-heading{font-weight:800;color:#ef5555;letter-spacing:.03em;margin-bottom:8px}.fa-injury-priority .card{margin:8px 0}.fa-home-medical-cross{color:#ef5555;font-weight:900;font-size:1.18em;margin-left:5px;vertical-align:middle}';
+    document.head.appendChild(style);
+  }
   $('tabs').innerHTML=tabs.filter(t=>t!=='Commissioner'||state.viewer.commissioner)
-    .map(t=>`<button class="${tab===t?'active':''}" onclick="changeTab('${t}')">${t==='Locker Room'&&chatLastId>chatSeenId?'💬 '+t+' •':t}</button>`).join('');
+    .map(t=>`<button class="${tab===t?'active':''}" onclick="changeTab('${t}')">${t==='Home'&&pendingInjuries.length?`${t} <span class="fa-home-medical-cross" aria-label="${pendingInjuries.length} pending injury decision${pendingInjuries.length===1?'':'s'}" title="Injury substitution decision pending">✚</span>`:t==='Locker Room'&&chatLastId>chatSeenId?'💬 '+t+' •':t}</button>`).join('');
   let content='';
-  if(tab==='Home')content=`<h1>${esc(state.league)}</h1><p>Week ${state.week} · ${esc(myTeam.team)}</p>
+  if(tab==='Home')content=`${pendingInjuries.length?`<section class="fa-injury-priority" role="alert" aria-label="Pending injury substitution"><div class="fa-injury-heading">✚ INJURY SUBSTITUTION ${pendingInjuries.length===1?'AVAILABLE':'DECISIONS AVAILABLE'}</div>${pendingInjuries.map(injuryCard).join('')}</section>`:''}
+    <h1>${esc(state.league)}</h1><p>Week ${state.week} · ${esc(myTeam.team)}</p>
     ${editorialView()}
     <div class="grid">${card('Your score',`<div class="stat">${fmt(total(manager))}</div>`)}
     ${card('Registered teams',`<div class="stat">${state.managers.filter(x=>x.claimed).length} / 12</div>`)}
     ${card('Draft status',`<p>${esc(draftData().status)}</p><button onclick="changeTab('Draft')">Open draft room</button>`)}</div>
-    ${state.injuries.filter(i=>i.active).map(injuryCard).join('')}
     ${card('Recent activity',state.transactions.slice(0,8).map(t=>`<div class="row"><span>${esc(t.details)}</span></div>`).join('')||'<p>No activity yet.</p>')}`;
   if(tab==='My Team'){const picks=draftData().picks.filter(x=>x.manager===manager);
     content=`<h1>${teamPhoto(manager,64)} ${esc(myTeam.team)}</h1><button onclick="renameTeam()">Rename My Team</button><div class="fa-photo-editor"><label for="teamPhotoUpload">Team profile photo</label><input id="teamPhotoUpload" type="file" accept="image/jpeg,image/png,image/webp" onchange="uploadTeamPhoto(this)"><button onclick="removeTeamPhoto()" ${myTeam.photo?'':'disabled'}>Remove photo</button><p class="muted small">Images are cropped to a square and resized automatically.</p></div>
