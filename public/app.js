@@ -102,11 +102,31 @@ async function uploadTeamPhoto(input){const file=input.files?.[0];if(!file)retur
 async function removeTeamPhoto(){if(!confirm('Remove your team photo?'))return;
   try{await apiPost('/api/team-photo',{photo:null});m(manager).photo=null;render();toast('Team photo removed');}
   catch(e){toast(e.message);}}
+function faLatestMeta(x){
+  const season=Number(state?.nflDirectorySync?.season||new Date().getFullYear());
+  const week=Number(state?.nflDirectorySync?.currentWeek||state?.week||1);
+  return nflPlayerMetaCache[season+':'+week]?.data?.players?.[String(x.espnId||String(x.id).replace(/^espn-/,''))]||null;
+}
+function faSubRisk(x,starter,mode){
+  const meta=faLatestMeta(x),raw=meta?.weeklyProjectedPoints;
+  const expected=raw==null||!Number.isFinite(Number(raw))?null:Number(raw);
+  const keep=Number(starter.points)||0;
+  if(expected===null)return '<span class="muted small">Score impact: insufficient projection data</span>';
+  const gain=expected-(mode==='handcuff'?Number(x.points)||0:0)-keep;
+  const method=meta?.projectionMethod==='LEAGUE_SCORED_ESPN_STATS'?'League-scored ESPN stats':'projection unavailable';
+  // No uncalibrated percentage: this is an expected-value comparison, not a probability.
+  return `<span class="muted small">${esc(method)}: ${fmt(expected)} pts · Expected change: ${gain>=0?'+':''}${fmt(gain)} pts · Improvement probability: insufficient variance data</span>`;
+}
 function injuryCard(injury){const starter=p(injury.player);if(!starter||starter.owner!==manager)return '';
-  const choices=state.players.filter(x=>x.owner===manager&&x.slot==='BENCH'&&(starter.slot==='FLEX'?['RB','WR','TE'].includes(x.pos):x.pos===starter.pos)&&!(state.injurySwapHistory||[]).some(h=>h.week===state.week&&h.removedId===x.id))
+  const choices=state.players.filter(x=>x.owner===manager&&x.slot==='BENCH'&&
+    (starter.slot==='FLEX'?['RB','WR','TE'].includes(x.pos):x.pos===starter.pos)&&
+    !(state.injurySwapHistory||[]).some(h=>h.week===state.week&&h.removedId===x.id))
     .map(x=>{const same=x.team===starter.team&&x.kickoff<=state.phase;
       const later=x.kickoff>state.phase,eligible=same||later;
-      return `<div class="row"><div><b>${esc(x.name)}</b><div class="muted small">${same?'Same-team handcuff: future points only':later?'Later kickoff: full-game points':'Not eligible'}</div></div>
+      const health=faLatestMeta(x)?.injuryStatus||x.injuryStatus||'UNKNOWN';
+      return `<div class="row"><div><b>${esc(x.name)}</b> ${injuryLabel(health)}
+        <div class="muted small">${same?'Same-team handcuff: future points only':later?'Later kickoff: full-game points':'Not eligible'}</div>
+        <div>${faSubRisk(x,starter,same?'handcuff':'later')}</div></div>
         <button ${eligible?'':'disabled'} onclick='act("/api/substitute",${JSON.stringify({injury:injury.id,bench:x.id})})'>Substitute</button></div>`;}).join('');
   return card('Injury substitution available',`<p><b>${esc(starter.name)}</b> — ${fmt(starter.points)} points</p>
     <p>Keep your starter or permanently substitute.</p>${choices||'<p>No eligible bench players.</p>'}
@@ -733,6 +753,7 @@ async function moveToSection(playerId,slot){
 const STARTER_ORDER=['QB','RB','RB','WR','WR','TE','FLEX','D/ST','K'];
 const NFL_TEAM_IDS={ARI:'22',ATL:'1',BAL:'33',BUF:'2',CAR:'29',CHI:'3',CIN:'4',CLE:'5',DAL:'6',DEN:'7',DET:'8',GB:'9',HOU:'34',IND:'11',JAX:'30',JAC:'30',KC:'12',LV:'13',LAR:'14',LA:'14',MIA:'15',MIN:'16',NE:'17',NO:'18',NYG:'19',NYJ:'20',PHI:'21',PIT:'23',SF:'25',SEA:'26',TB:'27',TEN:'10',WAS:'28'};
 setInterval(()=>{if(tab==='Matchup'&&state){loadWeeklyDirectory(true);fetchNFLMatchups(selectedMatchupWeek());}},60000);
+setInterval(()=>{if(token&&state&&!document.hidden){const week=Number(state.nflDirectorySync?.currentWeek||state.week||1);fetchNFLMatchups(week);}},5*60000);
 const nflMatchupCache={};const nflMatchupPending=new Set();const nflPlayerMetaCache={};
 async function fetchNFLMatchups(week){
   const season=Number(state?.nflDirectorySync?.season||new Date().getFullYear());
@@ -745,10 +766,21 @@ async function fetchNFLMatchups(week){
     nflMatchupCache[key]={at:Date.now(),data:await response.json()};
     try{
       const meta=await fetch('/api/nfl/player-metadata?season='+season+'&week='+week,{headers:{Authorization:'Bearer '+token}});
-      if(meta.ok)nflPlayerMetaCache[key]={at:Date.now(),data:await meta.json()};
+      if(meta.ok){
+        const result=await meta.json();nflPlayerMetaCache[key]={at:Date.now(),data:result};
+        const statuses=result.players||{};
+        for(const item of state?.players||[]){
+          const status=statuses[String(item.espnId||String(item.id).replace(/^espn-/,''))]?.injuryStatus;
+          if(status&&status!=='UNKNOWN')item.injuryStatus=status;
+        }
+        for(const item of espn?.players||[]){
+          const status=statuses[String(item.id)]?.injuryStatus;
+          if(status&&status!=='UNKNOWN')item.injuryStatus=status;
+        }
+      }
     }catch(e){console.warn('NFL player metadata:',e.message);}
   }catch(e){console.warn('NFL matchup metadata:',e.message);nflMatchupCache[key]={at:Date.now(),data:{teams:{}}};}
-  finally{nflMatchupPending.delete(key);if((tab==='Matchup'||tab==='Players'||tab==='My Team')&&(tab==='My Team'||selectedMatchupWeek()===week))render();}
+  finally{nflMatchupPending.delete(key);if((tab==='Matchup'||tab==='Players'||tab==='My Team'||tab==='Home')&&(tab==='My Team'||tab==='Home'||selectedMatchupWeek()===week))render();}
 }
 function nflPlayerGame(x){
   const week=selectedMatchupWeek(),season=Number(state?.nflDirectorySync?.season||new Date().getFullYear());
@@ -860,7 +892,7 @@ function faForecastPlayer(p,week){
   const noFurtherPoints=progress>0&&['OUT','INJURED_RESERVE','IR'].includes(injured);
   const remaining=noFurtherPoints?0:baseline*(1-progress);
   // Higher early-game uncertainty; decreases as scoring opportunities expire.
-  const sigma=noFurtherPoints?0:Math.max(2,baseline*.48)*Math.sqrt(Math.max(0,1-progress));
+  const sigma=noFurtherPoints?0:Math.max(4,baseline*.75)*Math.sqrt(Math.max(0,1-progress));
   return {actual:credited,projected:credited+remaining,variance:sigma*sigma,known:true};
 }
 function faForecastTeam(players,week){
@@ -886,16 +918,17 @@ function faMatchForecastView(leftPlayers,rightPlayers,week,recorded){
   const unknown=a.missing+b.missing;
   const anyKnown=leftPlayers.concat(rightPlayers).some(p=>p&&faForecastPlayer(p,week).known);
   if(!anyKnown)return `<div class="fa-forecast muted small">Projected final scores loading or unavailable.</div>`;
+  // Without historical player-specific variance, this is a favorability indicator,
+  // not a statistically calibrated probability. Missing projections prohibit odds.
   const variance=a.variance+b.variance;
-  const chance=variance>0?faNormalCdf((a.projected-b.projected)/Math.sqrt(variance)):
-    a.projected>b.projected?1:a.projected<b.projected?0:.5;
-  const percent=Math.max(0,Math.min(100,100*chance));
+  const chance=variance>0?faNormalCdf((a.projected-b.projected)/Math.sqrt(variance)):0.5;
+  const percent=unknown?50:Math.max(1,Math.min(99,100*chance));
   return `<div class="fa-forecast" aria-label="Estimated matchup favorability">
     <div class="fa-forecast-label"><span>Projected final <b>${fmt(a.projected)}</b></span><span><b>${fmt(b.projected)}</b> Projected final</span></div>
     <div class="fa-favor-track"><div class="fa-favor-left" style="width:${percent.toFixed(2)}%"></div>
       <div class="fa-favor-needle" style="left:${percent.toFixed(2)}%"></div></div>
-    <div class="fa-forecast-label"><span>${Math.round(percent)}% favored</span><span>${Math.round(100-percent)}% favored</span></div>
-    <div class="muted small" style="text-align:center;margin-top:8px">Estimated win chance · historical player projections${unknown?' · '+unknown+' projection'+(unknown===1?'':'s')+' unavailable':''}</div>
+    <div class="fa-forecast-label"><span>${unknown?'—':Math.round(percent)+'%'} favored</span><span>${unknown?'—':Math.round(100-percent)+'%'} favored</span></div>
+    <div class="muted small" style="text-align:center;margin-top:8px">${unknown?'Win probability unavailable · '+unknown+' missing projection'+(unknown===1?'':'s'):'Uncalibrated favorability estimate · not ESPN win probability'}</div>
   </div>`;
 }
 function matchupView(){
@@ -1113,6 +1146,8 @@ function editorialView(){
   const section=a=>`<article style="padding:12px 0;border-bottom:1px solid #ffffff20"><div class="muted small">${esc(a.kind.toUpperCase())} · WEEK ${a.week}</div><h3>${esc(a.title)}</h3>${a.lines.map(line=>`<p>${esc(line)}</p>`).join('')}</article>`;
   return card('🎙️ The Audible · Latest Edition',section(article)+`<button onclick="changeTab('Locker Room')">Discuss in Locker Room</button><details style="margin-top:12px"><summary>Previous editions (${articles.length-1})</summary>${articles.slice(1).map(section).join('')||'<p>No previous editions yet.</p>'}</details>`);
 }
+let faCurrentBuild='Build information loading…';
+function faLoadBuild(){fetch('/api/build',{cache:'no-store'}).then(r=>r.ok?r.json():Promise.reject(Error('Build unavailable'))).then(info=>{faCurrentBuild='v'+String(info.version||'?')+' · Build '+String(info.build||'unavailable');if(tab==='Home'&&state)render();}).catch(()=>{faCurrentBuild='Build information unavailable';});}
 function render(){if(!state||!manager)return;const mine=state.players.filter(x=>x.owner===manager),myTeam=m(manager);
   if(!myTeam)return;
   const pendingInjuries=(state.injuries||[]).filter(i=>i.active&&state.players.some(p=>p.id===i.player&&p.owner===manager));
@@ -1130,7 +1165,7 @@ function render(){if(!state||!manager)return;const mine=state.players.filter(x=>
     <div class="grid">${card('Your score',`<div class="stat">${fmt(total(manager))}</div>`)}
     ${card('Registered teams',`<div class="stat">${state.managers.filter(x=>x.claimed).length} / 12</div>`)}
     ${card('Draft status',`<p>${esc(draftData().status)}</p><button onclick="changeTab('Draft')">Open draft room</button>`)}</div>
-    ${card('Recent activity',state.transactions.slice(0,8).map(t=>`<div class="row"><span>${esc(t.details)}</span></div>`).join('')||'<p>No activity yet.</p>')}`;
+    ${card('Recent activity',state.transactions.slice(0,8).map(t=>`<div class="row"><span>${esc(t.details)}</span></div>`).join('')||'<p>No activity yet.</p>')}<p class="muted small" style="text-align:center;opacity:.7">Fantasy Audible · ${esc(faCurrentBuild)}</p>`;
   if(tab==='My Team'){const picks=draftData().picks.filter(x=>x.manager===manager);
     content=`<h1>${teamPhoto(manager,64)} ${esc(myTeam.team)}</h1><button onclick="renameTeam()">Rename My Team</button><div class="fa-photo-editor"><label for="teamPhotoUpload">Team profile photo</label><input id="teamPhotoUpload" type="file" accept="image/jpeg,image/png,image/webp" onchange="uploadTeamPhoto(this)"><button onclick="removeTeamPhoto()" ${myTeam.photo?'':'disabled'}>Remove photo</button><p class="muted small">Images are cropped to a square and resized automatically.</p></div>
       ${card('Drafted players',picks.map(x=>`<div class="row"><div><b>${esc(x.playerName)}</b>
@@ -1307,6 +1342,7 @@ function faEntranceInit(){
     '<div class="fa-enter-label">TAP TO ENTER</div><div class="fa-launch-status" aria-live="polite"></div></div>'+
     '<div class="fa-build-footer" id="fa-build-footer">VERSION LOADING…</div>';
   document.body.appendChild(overlay);
+  faLoadBuild();
   fetch('/api/build',{cache:'no-store'})
     .then(response=>{if(!response.ok)throw Error('Build info unavailable');return response.json();})
     .then(info=>{
