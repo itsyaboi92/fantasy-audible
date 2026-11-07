@@ -5,6 +5,7 @@ let viewedLeagueTeamId=null;
 let espn=null,espnError='',draftSearch='',draftPosition='ALL',loadingESPN=false;
 let weeklyDirectory={},weeklyUpdatedAt=null,weeklyLoading=false,weeklyLastFetch=0;
 let playerSort='rank';
+let playerAvailability='all';
 let breakdownPlayerId=null;
 let profilePlayerId=null,profileHistory=null,profileError="",profileLoading=false,expandedProfileWeek=null;
 let transactionData=null,transactionError='',loadingTransactions=false,lastTransactionFetch=0;
@@ -163,18 +164,29 @@ function weeklyCell(x){
   if(entry.gameStatus==='playing')return {last:null,live:entry.points};
   return {last:null,live:null};
 }
+function directoryOwnership(x){
+  const id=String(x.id);
+  const tx=transactionData?.byId?.get(id);
+  if(tx?.status==='ROSTERED')return true;
+  if(tx&&['FREE_AGENT','LOCKED','WAIVERS'].includes(tx.status))return false;
+  return (state?.players||[]).some(p=>String(p.espnId||String(p.id).replace(/^espn-/,''))===id&&p.owner);
+}
 function sortDirectory(players){
-  if(playerSort==='rank')return players;
-  return [...players].sort((a,b)=>{
-    const value=x=>playerSort==='last'?weeklyCell(x).last:
+  const filtered=tab==='Players'&&playerAvailability!=='all'
+    ?players.filter(x=>directoryOwnership(x)===(playerAvailability==='rostered')):players;
+  if(playerSort==='rank')return filtered;
+  return [...filtered].sort((a,b)=>{
+    const value=x=>playerSort==='next'?playerNextProjection(x):
+      playerSort==='last'?weeklyCell(x).last:
       playerSort==='live'?weeklyCell(x).live:null;
     const av=value(a),bv=value(b);
     if(av==null&&bv==null)return (a.rank??99999)-(b.rank??99999);
     if(av==null)return 1;if(bv==null)return -1;
-    return bv-av;
+    return bv-av||((a.rank??99999)-(b.rank??99999));
   });
 }
 function updatePlayerSort(value){playerSort=value;render();}
+function updatePlayerAvailability(value){playerAvailability=value;render();}
 async function openPlayerProfile(id){
   profilePlayerId=String(id);profileHistory=null;profileError='';profileLoading=true;
   expandedProfileWeek=null;render();
@@ -368,8 +380,11 @@ function playerTable(){if(!espn)return card('ESPN player data',`<p>${esc(espnErr
     <div class="actions"><input id="draftSearch" placeholder="Search players" value="${esc(draftSearch)}"
       oninput="updateDraftSearch(this.value)"><select id="draftPosition" onchange="updateDraftPosition(this.value)">
       ${['ALL',...POSITIONS].map(pos=>`<option value="${pos}" ${draftPosition===pos?'selected':''}>${pos}</option>`).join('')}
-      </select><select onchange="updatePlayerSort(this.value)">
-      ${[['rank','ESPN Rank'],['last','Last Game Points'],['live','Live Points']].map(([v,l])=>
+      </select>${tab==='Players'?`<select aria-label="Player availability" onchange="updatePlayerAvailability(this.value)">
+      ${[['all','All Players'],['available','Available / Unrostered'],['rostered','On Rosters']].map(([v,l])=>
+        `<option value="${v}" ${playerAvailability===v?'selected':''}>${l}</option>`).join('')}
+      </select>`:''}<select aria-label="Sort players" onchange="updatePlayerSort(this.value)">
+      ${[['rank','ESPN Rank'],['next','Next Game Projected'],['last','Last Game Points'],['live','Live Points']].map(([v,l])=>
         `<option value="${v}" ${playerSort===v?'selected':''}>${l}</option>`).join('')}
       </select><button onclick="loadESPN(true);loadWeeklyDirectory(true)">Refresh</button></div>
     <p class="muted small">Showing ${players.length} players. Missing ranks and projections show —.</p>
