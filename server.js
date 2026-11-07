@@ -1511,6 +1511,15 @@ function staticFile(req,res,route){if(req.method!=='GET'&&req.method!=='HEAD'){r
     res.writeHead(200,{'Content-Type':type,'X-Content-Type-Options':'nosniff','Cache-Control':'no-cache'});
     res.end(req.method==='HEAD'?undefined:data);});}
 const server=http.createServer((req,res)=>{const route=new URL(req.url,'http://localhost').pathname;
+  if(route==='/api/build'&&(req.method==='GET'||req.method==='HEAD')){
+    let version='1.0.0';
+    try{version=String(require('./package.json').version||version);}catch(e){}
+    const raw=String(process.env.RENDER_GIT_COMMIT||process.env.GIT_COMMIT||process.env.SOURCE_VERSION||'');
+    const build=/^[a-f0-9]{7,40}$/i.test(raw)?raw.slice(0,7):'unavailable';
+    const data=JSON.stringify({version,build});
+    res.writeHead(200,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});
+    return res.end(req.method==='HEAD'?undefined:data);
+  }
   if(route.startsWith('/api/'))api(req,res,route).catch(e=>{console.error('API error:',e);
     if(!res.headersSent)send(res,500,{error:'Server error'});else res.end();});
   else staticFile(req,res,route);});
