@@ -1163,7 +1163,7 @@ async function faWeeklyESPN(season,week){
         const positions=new Map(directory.players.map(p=>[String(p.id),p.position]));
         historical=await matchupAnalytics.analytics(season,week,settingsOf(current.state).scoring,positions);
         for(const [id,entry] of Object.entries(players)){
-          const h=historical.players[id];if(h){entry.projectionSample=h.projectionSample;}
+          const h=historical.players[id];if(h){entry.projectionSample=h.projectionSample;entry.historicalWeeklyScores=(historical.playerGames?.[id]||[]).map(g=>g.points).filter(Number.isFinite);}
         }
         const games=await liveNFL.loadWeek(season,week);
         const opponents={};for(const g of games)for(const side of g.teams){
