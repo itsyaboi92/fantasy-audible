@@ -1166,10 +1166,85 @@ function authForm(){$('tabs').innerHTML='';$('connection').textContent='● Sign
     localStorage.setItem('audibleToken',result.token);location.reload();}
     catch(e){$('authError').textContent=e.message;}}
   $('auth').onsubmit=e=>{e.preventDefault();submit('login');};$('register').onclick=()=>submit('register');}
-async function connect(){if(!token)return authForm();try{const response=await fetch('/api/state',{
-  headers:{Authorization:'Bearer '+token},cache:'no-store'});if(response.status===401)return logout();
-  if(!response.ok)throw Error('Server unavailable');state=await response.json();manager=state.viewer.manager;render();loadChat();}
-  catch(e){$('connection').textContent='● Offline';return;}
+
+// Fantasy Audible launch gate: shown only to authenticated returning users.
+// Audio is initiated by the user's tap, satisfying iOS user-gesture playback rules.
+let faEntranceReady=false,faEntranceEntering=false,faEntranceAudio=null;
+function faEntranceInit(){
+  if(!token||document.getElementById('fa-entrance'))return;
+  const css=document.createElement('style');css.id='fa-entrance-style';
+  css.textContent=`
+  #fa-entrance{position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;
+    overflow:hidden;background:radial-gradient(ellipse at 50% 28%,#142e48 0%,#071522 47%,#020812 100%);
+    color:white;cursor:pointer;touch-action:manipulation;isolation:isolate;transition:opacity .75s ease,visibility .75s ease}
+  #fa-entrance.fa-exit{opacity:0;visibility:hidden;pointer-events:none}
+  #fa-entrance .fa-lights{position:absolute;inset:0;pointer-events:none;
+    background:radial-gradient(ellipse 20% 10% at 11% 9%,rgba(255,255,255,.95),transparent 60%),
+      radial-gradient(ellipse 20% 10% at 89% 9%,rgba(255,255,255,.95),transparent 60%),
+      conic-gradient(from 135deg at 11% 10%,transparent 0deg,rgba(149,206,255,.12) 24deg,transparent 45deg),
+      conic-gradient(from 185deg at 89% 10%,transparent 0deg,rgba(149,206,255,.12) 24deg,transparent 45deg);
+    opacity:.75;filter:blur(5px)}
+  #fa-entrance .fa-field{position:absolute;bottom:-12%;left:-25%;width:150%;height:42%;
+    transform:perspective(380px) rotateX(65deg);transform-origin:center bottom;
+    background:repeating-linear-gradient(90deg,transparent 0,transparent 16%,rgba(220,243,255,.22) 16.2%,transparent 16.5%),
+      repeating-linear-gradient(0deg,transparent 0,transparent 19%,rgba(220,243,255,.18) 19.2%,transparent 19.5%),
+      linear-gradient(180deg,#17382d,#06140e);opacity:.48;filter:blur(1px)}
+  #fa-entrance .fa-content{position:relative;z-index:2;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;gap:clamp(34px,7vh,72px);width:100%;padding:30px 14px;transform:translateY(-2vh)}
+  #fa-entrance .fa-logo{width:min(78vw,33dvh,360px);height:min(78vw,33dvh,360px);object-fit:contain;
+    border-radius:22%;filter:drop-shadow(0 18px 22px rgba(0,0,0,.6)) drop-shadow(0 0 14px rgba(236,44,53,.32));
+    animation:faFloat 3.8s ease-in-out infinite}
+  #fa-entrance .fa-enter-label{font-size:clamp(25px,6.4vw,57px);font-style:italic;font-weight:950;letter-spacing:.025em;
+    text-align:center;white-space:nowrap;line-height:1.2;max-width:100%;
+    background:linear-gradient(110deg,#9eafc4 0%,#fff 19%,#d7e8f9 37%,#fff 47%,#7d99b7 57%,#fff 72%,#c0d5e8 100%);
+    background-size:230% 100%;background-position:100% 50%;color:transparent;
+    -webkit-background-clip:text;background-clip:text;
+    filter:drop-shadow(0 0 9px rgba(176,220,255,.75));
+    animation:faWords 2.7s ease-in-out infinite,faShimmer 4.4s linear infinite}
+  #fa-entrance .fa-launch-status{font-size:12px;color:#bac8d7;letter-spacing:.13em;min-height:16px}
+  #fa-entrance.fa-entering .fa-logo{animation:faFlare .6s ease-out forwards}
+  #fa-entrance.fa-entering .fa-enter-label{animation:none;opacity:1}
+  @keyframes faFloat{0%,100%{transform:translateY(9px) scale(.985)}50%{transform:translateY(-11px) scale(1.018)}}
+  @keyframes faWords{0%,100%{opacity:.98}50%{opacity:.10}}
+  @keyframes faShimmer{0%{background-position:110% 50%}100%{background-position:-110% 50%}}
+  @keyframes faFlare{0%{transform:scale(1);filter:drop-shadow(0 0 12px #d52a35)}
+    55%{transform:scale(1.08);filter:drop-shadow(0 0 38px #fff)}
+    100%{transform:scale(1.02);filter:drop-shadow(0 0 20px #f44)}}
+  @media(prefers-reduced-motion:reduce){
+    #fa-entrance .fa-logo,#fa-entrance .fa-enter-label{animation:none!important;opacity:1}
+    #fa-entrance{transition:none}}
+  `;
+  document.head.appendChild(css);
+  const overlay=document.createElement('div');overlay.id='fa-entrance';overlay.setAttribute('role','button');
+  overlay.setAttribute('tabindex','0');overlay.setAttribute('aria-label','Tap to enter Fantasy Audible');
+  overlay.innerHTML='<div class="fa-lights"></div><div class="fa-field"></div>'+
+    '<div class="fa-content"><img class="fa-logo" src="/icon-512.png" alt="Fantasy Audible icon">'+
+    '<div class="fa-enter-label">TAP TO ENTER</div><div class="fa-launch-status" aria-live="polite"></div></div>';
+  document.body.appendChild(overlay);
+  const enter=()=>{
+    if(faEntranceEntering)return;
+    if(!faEntranceReady){overlay.querySelector('.fa-launch-status').textContent='CONNECTING TO LEAGUE…';return;}
+    faEntranceEntering=true;overlay.classList.add('fa-entering');
+    // One first Omaha call only. Never wait for audio to finish before entering.
+    try{faEntranceAudio=new Audio('/omaha_first.mp3');faEntranceAudio.preload='auto';
+      faEntranceAudio.play().catch(()=>{});}catch(e){}
+    setTimeout(()=>{overlay.classList.add('fa-exit');
+      setTimeout(()=>{overlay.remove();css.remove();},800);},650);
+  };
+  overlay.addEventListener('click',enter);
+  overlay.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();enter();}});
+}
+function faEntranceDismiss(){
+  const overlay=document.getElementById('fa-entrance');
+  if(overlay)overlay.remove();
+  document.getElementById('fa-entrance-style')?.remove();
+  faEntranceReady=false;
+}
+
+async function connect(){if(!token)return authForm();faEntranceInit();try{const response=await fetch('/api/state',{
+  headers:{Authorization:'Bearer '+token},cache:'no-store'});if(response.status===401){faEntranceDismiss();return logout();}
+  if(!response.ok)throw Error('Server unavailable');state=await response.json();manager=state.viewer.manager;render();faEntranceReady=true;loadChat();}
+  catch(e){faEntranceDismiss();$('connection').textContent='● Offline';return;}
   await syncServerClock();const events=new EventSource('/api/events?token='+encodeURIComponent(token));
   let previousPickCount=state.draft?.picks?.length??0,previousDeadline=state.draft?.deadline??null,
     previousStatus=state.draft?.status??null;
