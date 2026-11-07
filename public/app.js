@@ -145,7 +145,7 @@ async function loadWeeklyDirectory(force=false){
     weeklyUpdatedAt=data.updatedAt||null;
     weeklyLastFetch=Date.now();
   }catch(e){weeklyLastFetch=Date.now();console.warn('Weekly player directory:',e.message);}
-  finally{weeklyLoading=false;if(tab==='Players'||tab==='My Team')render();}
+  finally{weeklyLoading=false;if(tab==='Players'||tab==='My Team'||tab==='Matchup')render();}
 }
 function playerNextProjection(x){
   const season=Number(state?.nflDirectorySync?.season||new Date().getFullYear());
@@ -732,11 +732,12 @@ async function moveToSection(playerId,slot){
 }
 const STARTER_ORDER=['QB','RB','RB','WR','WR','TE','FLEX','D/ST','K'];
 const NFL_TEAM_IDS={ARI:'22',ATL:'1',BAL:'33',BUF:'2',CAR:'29',CHI:'3',CIN:'4',CLE:'5',DAL:'6',DEN:'7',DET:'8',GB:'9',HOU:'34',IND:'11',JAX:'30',JAC:'30',KC:'12',LV:'13',LAR:'14',LA:'14',MIA:'15',MIN:'16',NE:'17',NO:'18',NYG:'19',NYJ:'20',PHI:'21',PIT:'23',SF:'25',SEA:'26',TB:'27',TEN:'10',WAS:'28'};
+setInterval(()=>{if(tab==='Matchup'&&state){loadWeeklyDirectory(true);fetchNFLMatchups(selectedMatchupWeek());}},60000);
 const nflMatchupCache={};const nflMatchupPending=new Set();const nflPlayerMetaCache={};
 async function fetchNFLMatchups(week){
   const season=Number(state?.nflDirectorySync?.season||new Date().getFullYear());
   const key=season+':'+week;
-  if(nflMatchupPending.has(key)||(nflMatchupCache[key]&&Date.now()-nflMatchupCache[key].at<300000))return;
+  if(nflMatchupPending.has(key)||(nflMatchupCache[key]&&Date.now()-nflMatchupCache[key].at<60000))return;
   nflMatchupPending.add(key);
   try{
     const response=await fetch('/api/nfl/week-matchups?season='+season+'&week='+week,{headers:{Authorization:'Bearer '+token}});
@@ -823,6 +824,80 @@ async function loadMatchupGameStats(){
     if(game?.status==='playing')fa31StatsTimer=setTimeout(()=>{if(fa31Selected&&!document.hidden)loadMatchupGameStats();},25000);
   }catch(e){if(request===fa31Request&&fa31Selected&&content)content.innerHTML=`<p>${esc(e.message)}</p><button onclick="loadMatchupGameStats()">Retry</button>`;}
 }
+// Live matchup forecasts: historical weekly baseline plus elapsed-game estimate.
+// These are model estimates, not official ESPN live projections or calibrated odds.
+function faProjectionProgress(game){
+  if(!game)return null;
+  if(game.status==='final')return 1;
+  if(game.status==='upcoming'||game.status==='scheduled')return 0;
+  if(game.status!=='playing'&&game.status!=='live')return null;
+  const kickoff=Date.parse(game.kickoff||'');
+  // Game clock is not exposed by the current week-matchups endpoint. Estimate
+  // game progress from kickoff, capped to avoid claiming a final before ESPN does.
+  if(!Number.isFinite(kickoff))return .5;
+  return Math.max(.06,Math.min(.94,(Date.now()-kickoff)/(3.25*3600000)));
+}
+function faForecastPlayer(p,week){
+  if(!p)return {actual:0,projected:0,variance:0,known:false};
+  const season=Number(state?.nflDirectorySync?.season||new Date().getFullYear());
+  const key=season+':'+week;
+  const id=String(p.espnId||String(p.id||'').replace(/^espn-/,''));
+  const meta=nflPlayerMetaCache[key]?.data?.players?.[id];
+  const team=String(meta?.teamId||p.nflTeamId||p.team||'').toUpperCase();
+  const teamId=/^\d+$/.test(team)?team:NFL_TEAM_IDS[team];
+  const game=nflMatchupCache[key]?.data?.teams?.[teamId];
+  const feed=weeklyDirectory[id];
+  const raw=meta?.weeklyProjectedPoints;
+  const baseline=raw!==null&&raw!==undefined&&Number.isFinite(Number(raw))?Math.max(0,Number(raw)):null;
+  const progress=faProjectionProgress(game);
+  const feedPoints=feed?.points==null?null:Number(feed.points);
+  const actual=Number.isFinite(feedPoints)&&feed?.gameStatus!=='upcoming'?feedPoints:Math.max(0,Number(p.points)||0);
+  // The fantasy substitution ledger can credit fewer points than the NFL feed.
+  const credited=Number.isFinite(Number(p.credited))&&p.scoringMode?Math.max(0,Number(p.credited)):actual;
+  if(progress===1||feed?.gameStatus==='final')return {actual:credited,projected:credited,variance:0,known:true};
+  if(baseline===null||progress===null)return {actual:credited,projected:null,variance:null,known:false};
+  const injured=String(meta?.injuryStatus||p.injuryStatus||'').toUpperCase();
+  const noFurtherPoints=progress>0&&['OUT','INJURED_RESERVE','IR'].includes(injured);
+  const remaining=noFurtherPoints?0:baseline*(1-progress);
+  // Higher early-game uncertainty; decreases as scoring opportunities expire.
+  const sigma=noFurtherPoints?0:Math.max(2,baseline*.48)*Math.sqrt(Math.max(0,1-progress));
+  return {actual:credited,projected:credited+remaining,variance:sigma*sigma,known:true};
+}
+function faForecastTeam(players,week){
+  let actual=0,projected=0,variance=0,missing=0;
+  for(const p of players){if(!p)continue;const x=faForecastPlayer(p,week);
+    actual+=x.actual;
+    if(x.known){projected+=x.projected;variance+=x.variance;}else{projected+=x.actual;missing++;}}
+  return {actual,projected,variance,missing};
+}
+function faNormalCdf(x){
+  // Abramowitz-Stegun approximation to the standard normal CDF.
+  const z=Math.abs(x),t=1/(1+.2316419*z);
+  const density=Math.exp(-z*z/2)/Math.sqrt(2*Math.PI);
+  const cdf=1-density*(.319381530*t-.356563782*t*t+1.781477937*t**3-1.821255978*t**4+1.330274429*t**5);
+  return x>=0?cdf:1-cdf;
+}
+function faMatchForecastView(leftPlayers,rightPlayers,week,recorded){
+  if(recorded?.status==='final'){
+    const a=Number(recorded.homeScore)||0,b=Number(recorded.awayScore)||0;
+    return `<div class="fa-forecast"><div class="fa-forecast-label">Final · ${fmt(a)} – ${fmt(b)}</div></div>`;
+  }
+  const a=faForecastTeam(leftPlayers,week),b=faForecastTeam(rightPlayers,week);
+  const unknown=a.missing+b.missing;
+  const anyKnown=leftPlayers.concat(rightPlayers).some(p=>p&&faForecastPlayer(p,week).known);
+  if(!anyKnown)return `<div class="fa-forecast muted small">Projected final scores loading or unavailable.</div>`;
+  const variance=a.variance+b.variance;
+  const chance=variance>0?faNormalCdf((a.projected-b.projected)/Math.sqrt(variance)):
+    a.projected>b.projected?1:a.projected<b.projected?0:.5;
+  const percent=Math.max(0,Math.min(100,100*chance));
+  return `<div class="fa-forecast" aria-label="Estimated matchup favorability">
+    <div class="fa-forecast-label"><span>Projected final <b>${fmt(a.projected)}</b></span><span><b>${fmt(b.projected)}</b> Projected final</span></div>
+    <div class="fa-favor-track"><div class="fa-favor-left" style="width:${percent.toFixed(2)}%"></div>
+      <div class="fa-favor-needle" style="left:${percent.toFixed(2)}%"></div></div>
+    <div class="fa-forecast-label"><span>${Math.round(percent)}% favored</span><span>${Math.round(100-percent)}% favored</span></div>
+    <div class="muted small" style="text-align:center;margin-top:8px">Estimated win chance · historical player projections${unknown?' · '+unknown+' projection'+(unknown===1?'':'s')+' unavailable':''}</div>
+  </div>`;
+}
 function matchupView(){
   const week=selectedMatchupWeek(),games=state.matchupSchedule?.[week]||[];
   if(!games.length){const count=state.managers.filter(x=>x.claimed).length;
@@ -841,7 +916,13 @@ function matchupView(){
   const cells=STARTER_ORDER.map((slot,i)=>`<div class="fa-match-row"><div class="fa-player">${leftPlayers[i]?matchupPlayerCell(leftPlayers[i]):'<span class="muted">Open slot</span>'}</div><div class="fa-position">${slot}</div><div class="fa-player fa-right">${rightPlayers[i]?matchupPlayerCell(rightPlayers[i]):'<span class="muted">Open slot</span>'}</div></div>`).join('');
   const status=recorded?.status==='final'?'Final':week>current?'Upcoming':week<current?'Past week · provisional':(Object.values(nflMatchupCache[(Number(state.nflDirectorySync?.season||new Date().getFullYear()))+':'+week]?.data?.teams||{}).some(g=>g.status==='playing')?'Live / provisional':'Upcoming / awaiting kickoff');
   const total=(id,side)=>recorded?fmt(Number(recorded[side+'Score'])||0):fmt(matchupStarters(id).reduce((sum,p)=>sum+(Number(p?.points)||0),0));
+  const forecast=faMatchForecastView(leftPlayers,rightPlayers,week,recorded);
   return `<style>
+  .fa-forecast{padding:12px 8px 18px;margin:0 0 14px;border-top:1px solid #384357}
+  .fa-forecast-label{display:flex;justify-content:space-between;gap:12px;font-size:13px;font-variant-numeric:tabular-nums}
+  .fa-favor-track{height:15px;background:#b34a47;border-radius:999px;position:relative;margin:16px 8px 12px}
+  .fa-favor-left{height:100%;background:#2e8de2;border-radius:999px 0 0 999px;transition:width .7s ease}
+  .fa-favor-needle{position:absolute;top:-7px;height:29px;width:3px;border-radius:3px;background:white;box-shadow:0 0 6px #fff;transform:translateX(-50%);transition:left .7s ease}
   .fa-week{display:flex;align-items:center;justify-content:center;gap:12px;margin:14px 0}.fa-week select{padding:8px;background:#202d43;color:inherit;border-radius:8px}
   .fa-match-strip{display:flex;overflow-x:auto;gap:8px;padding:10px 0 16px;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch}
   .fa-match-pill{flex:0 0 auto;max-width:210px;white-space:normal;scroll-snap-align:center;min-height:50px}.fa-match-pill.active{outline:2px solid #66da8c}
@@ -861,6 +942,7 @@ function matchupView(){
     <div class="fa-match-nav"><button onclick="selectMatchup(${matchupIndex-1})">‹ Previous</button><span class="muted small">Matchup ${matchupIndex+1} of ${games.length}</span><button onclick="selectMatchup(${matchupIndex+1})">Next ›</button></div>
     <div class="fa-head"><div>${teamPhoto(game.home,54)}<br><b>${esc(left?.team||'Team')}</b><div class="fa-total">${total(game.home,'home')}</div></div><span>VS</span><div>${teamPhoto(game.away,54)}<br><b>${esc(right?.team||'Team')}</b><div class="fa-total">${total(game.away,'away')}</div></div></div>
     <div class="fa-match-meta muted small">${esc(status)} · ${recorded?.status==='final'?'Verified final':'Scores remain provisional until verified'}</div>
+    ${forecast}
     ${cells}<p class="muted small" style="text-align:center">Swipe left/right for other matchups · Scroll down for players</p>
   </section>${byeTeams.length?card('This week’s bye',byeTeams.map(x=>esc(x.team||x.id)).join(', ')):''}
   <section class="card"><h3>League standings · verified finals only</h3><div style="overflow-x:auto"><table style="width:100%;text-align:left"><thead><tr><th>Team</th><th>W</th><th>L</th><th>T</th><th>PF</th></tr></thead><tbody>${(state.standings||[]).map(r=>`<tr><td>${esc(m(r.manager)?.team||r.manager)}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.ties}</td><td>${fmt(r.pointsFor)}</td></tr>`).join('')}</tbody></table></div></section>`;
@@ -1144,7 +1226,7 @@ function changeTab(next){closeMatchupGameStats();if(next==='Matchup'&&tab!=='Mat
   if(tab==='Draft'||tab==='Players')loadESPN();
   if(tab==='My Team'){loadWeeklyDirectory();fetchNFLMatchups(Math.min(18,Math.max(1,Number(state?.nflDirectorySync?.currentWeek||state?.week||1))));}
   if(tab==='Players'){loadWeeklyDirectory();fetchNFLMatchups(Math.min(18,Math.max(1,Number(state?.nflDirectorySync?.currentWeek||state?.week||selectedMatchupWeek()))));}
-  if(tab==='Matchup')fetchNFLMatchups(selectedMatchupWeek());
+  if(tab==='Matchup'){loadWeeklyDirectory();fetchNFLMatchups(selectedMatchupWeek());}
   if(tab==='Players'||tab==='My Waivers')loadTransactions();
   if(tab==='Locker Room')loadChat();}
 function logout(){localStorage.removeItem('audibleToken');location.reload();}
