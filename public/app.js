@@ -901,14 +901,24 @@ function faForecastPlayer(p,week){
   const raw=meta?.weeklyProjectedPoints;
   const baseline=raw!==null&&raw!==undefined&&Number.isFinite(Number(raw))?Math.max(0,Number(raw)):null;
   const progress=faProjectionProgress(game);
+  const injury=String(meta?.injuryStatus||p.injuryStatus||'').toUpperCase().replace(/[ -]/g,'_');
+  const explicitlyOut=['OUT','INJURED_RESERVE','IR','SUSPENDED','PUP','NON_FOOTBALL_INJURY'].includes(injury);
+  // A verified bye means no NFL game is scheduled for this team in this week.
+  // Do not mistake a missing/failed schedule response for a bye.
+  const schedule=nflMatchupCache[key]?.data;
+  const hasVerifiedSchedule=Boolean(schedule&&schedule.teams&&Object.keys(schedule.teams).length);
+  const onBye=Boolean(hasVerifiedSchedule&&teamId&&!game);
+
   const feedPoints=feed?.points==null?null:Number(feed.points);
   const actual=Number.isFinite(feedPoints)&&feed?.gameStatus!=='upcoming'?feedPoints:Math.max(0,Number(p.points)||0);
   // The fantasy substitution ledger can credit fewer points than the NFL feed.
   const credited=Number.isFinite(Number(p.credited))&&p.scoringMode?Math.max(0,Number(p.credited)):actual;
   if(progress===1||feed?.gameStatus==='final')return {actual:credited,projected:credited,variance:0,known:true};
+  // OUT/BYE are deterministic zeros for FUTURE scoring. Already earned points
+  // remain credited even if a player is ruled out during a live game.
+  if(explicitlyOut||onBye)return {actual:credited,projected:credited,variance:0,known:true};
   if(baseline===null||progress===null)return {actual:credited,projected:null,variance:null,known:false};
-  const injured=String(meta?.injuryStatus||p.injuryStatus||'').toUpperCase();
-  const noFurtherPoints=progress>0&&['OUT','INJURED_RESERVE','IR'].includes(injured);
+  const noFurtherPoints=false;
   const remaining=noFurtherPoints?0:baseline*(1-progress);
   // Higher early-game uncertainty; decreases as scoring opportunities expire.
   // Fantasy scoring has a wide weekly distribution. Do not let a projected
@@ -959,7 +969,7 @@ function matchupView(){
   const week=selectedMatchupWeek(),games=state.matchupSchedule?.[week]||[];
   if(!games.length){const count=state.managers.filter(x=>x.claimed).length;
     const reason=count<2?'At least two registered teams are required.':state.draft?.status!=='completed'?'Matchups will be generated automatically when the draft finishes.':state.matchupScheduleNotice||(!state.scheduleStartWeek?'Draft completed. Automatic schedule activation pending; checking ESPN NFL kickoff calendar.':week<state.scheduleStartWeek?'Your league begins in NFL Week '+state.scheduleStartWeek+'.':'No matchup scheduled for this week.');
-    return `<h1>Week ${week} Matchups</h1><div class="fa-week"><button onclick="setMatchupWeek(${week-1})" ${week===1?'disabled':''}>‹</button><label>NFL Week <select onchange="setMatchupWeek(this.value)">${Array.from({length:14},(_,i)=>`<option value="${i+1}" ${week===i+1?'selected':''}>${i+1}</option>`).join('')}</select></label><button onclick="setMatchupWeek(${week+1})" ${week===14?'disabled':''}>›</button></div>${card('League matchups',esc(reason))}`;
+    return `<h1>Week ${week} Matchups</h1><div class="fa-week" style="display:flex;justify-content:center;align-items:center;gap:12px;margin:18px auto 22px;width:100%;"><button onclick="setMatchupWeek(${week-1})" ${week===1?'disabled':''}>‹</button><label>NFL Week <select onchange="setMatchupWeek(this.value)">${Array.from({length:14},(_,i)=>`<option value="${i+1}" ${week===i+1?'selected':''}>${i+1}</option>`).join('')}</select></label><button onclick="setMatchupWeek(${week+1})" ${week===14?'disabled':''}>›</button></div>${card('League matchups',esc(reason))}`;
   }
   if(matchupIndex>=games.length)matchupIndex=0;
   if(matchupWeek===null){matchupWeek=week;const mine=games.findIndex(g=>g.home===manager||g.away===manager);if(mine>=0)matchupIndex=mine;}
@@ -980,7 +990,7 @@ function matchupView(){
   .fa-favor-track{height:15px;background:#b34a47;border-radius:999px;position:relative;margin:16px 8px 12px}
   .fa-favor-left{height:100%;background:#2e8de2;border-radius:999px 0 0 999px;transition:width .7s ease}
   .fa-favor-needle{position:absolute;top:-7px;height:29px;width:3px;border-radius:3px;background:white;box-shadow:0 0 6px #fff;transform:translateX(-50%);transition:left .7s ease}
-  .fa-week{display:flex;align-items:center;justify-content:center;gap:12px;margin:14px 0}.fa-week select{padding:8px;background:#202d43;color:inherit;border-radius:8px}
+  .fa-week{display:flex;align-items:center;justify-content:center;gap:12px;margin:18px auto 22px;width:100%;flex-wrap:nowrap}.fa-week label{display:flex;align-items:center;gap:8px;white-space:nowrap}.fa-week select{padding:8px;background:#202d43;color:inherit;border-radius:8px}
   .fa-match-strip{display:flex;overflow-x:auto;gap:8px;padding:10px 0 16px;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch}
   .fa-match-pill{flex:0 0 auto;max-width:210px;white-space:normal;scroll-snap-align:center;min-height:50px}.fa-match-pill.active{outline:2px solid #66da8c}
   .fa-match-surface{touch-action:pan-y;overflow:hidden}.fa-head{display:grid;grid-template-columns:minmax(0,1fr) 36px minmax(0,1fr);align-items:center;text-align:center;gap:6px;padding:12px 0 20px}
