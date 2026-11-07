@@ -1179,7 +1179,7 @@ async function faWeeklyESPN(season,week){
       return send(res,200,{season,week,players,updatedAt:new Date().toISOString(),
         historicalMethod:historical?.method||'Unavailable',historicalGames:historical?.gamesProcessed||0,
         projectionStatus:weeklyFeed&&!weeklyFeed.stale?'LEAGUE_SCORED_ESPN_STATS':'UNAVAILABLE',oprkStatus:historical&&Object.keys(historical.rankings).length?'HISTORICAL_32_TEAM_RANK':'UNAVAILABLE',
-        notice:'Projections use ESPN projected statistics and league scoring, never ESPN fantasy-point totals. K/DST projections are unavailable until detailed ESPN statistical mappings and tier distributions are verified. OPRK is historical.'});
+        notice:'Projections use ESPN projected statistics and league scoring, never ESPN fantasy-point totals. K 50+ field goals use the 50-59 scoring tier; D/ST projected mean points/yards allowed select approximate tiers. Missing projected stats remain unavailable. OPRK is historical.'});
     }catch(e){return send(res,503,{error:'NFL player metadata unavailable',details:e.message});}
   }
   if(req.method==='GET'&&route==='/api/nfl/week-matchups'){
