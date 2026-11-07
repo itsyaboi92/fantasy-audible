@@ -103,7 +103,7 @@ async function removeTeamPhoto(){if(!confirm('Remove your team photo?'))return;
   try{await apiPost('/api/team-photo',{photo:null});m(manager).photo=null;render();toast('Team photo removed');}
   catch(e){toast(e.message);}}
 function injuryCard(injury){const starter=p(injury.player);if(!starter||starter.owner!==manager)return '';
-  const choices=state.players.filter(x=>x.owner===manager&&x.slot==='BENCH'&&x.pos===starter.pos&&!(state.injurySwapHistory||[]).some(h=>h.week===state.week&&h.removedId===x.id))
+  const choices=state.players.filter(x=>x.owner===manager&&x.slot==='BENCH'&&(starter.slot==='FLEX'?['RB','WR','TE'].includes(x.pos):x.pos===starter.pos)&&!(state.injurySwapHistory||[]).some(h=>h.week===state.week&&h.removedId===x.id))
     .map(x=>{const same=x.team===starter.team&&x.kickoff<=state.phase;
       const later=x.kickoff>state.phase,eligible=same||later;
       return `<div class="row"><div><b>${esc(x.name)}</b><div class="muted small">${same?'Same-team handcuff: future points only':later?'Later kickoff: full-game points':'Not eligible'}</div></div>
