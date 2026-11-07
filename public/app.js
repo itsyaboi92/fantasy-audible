@@ -959,7 +959,7 @@ function matchupView(){
   const week=selectedMatchupWeek(),games=state.matchupSchedule?.[week]||[];
   if(!games.length){const count=state.managers.filter(x=>x.claimed).length;
     const reason=count<2?'At least two registered teams are required.':state.draft?.status!=='completed'?'Matchups will be generated automatically when the draft finishes.':state.matchupScheduleNotice||(!state.scheduleStartWeek?'Draft completed. Automatic schedule activation pending; checking ESPN NFL kickoff calendar.':week<state.scheduleStartWeek?'Your league begins in NFL Week '+state.scheduleStartWeek+'.':'No matchup scheduled for this week.');
-    return `<h1>Week ${week} Matchups</h1>${card('League matchups',esc(reason))}`;
+    return `<h1>Week ${week} Matchups</h1><div class="fa-week"><button onclick="setMatchupWeek(${week-1})" ${week===1?'disabled':''}>‹</button><label>NFL Week <select onchange="setMatchupWeek(this.value)">${Array.from({length:14},(_,i)=>`<option value="${i+1}" ${week===i+1?'selected':''}>${i+1}</option>`).join('')}</select></label><button onclick="setMatchupWeek(${week+1})" ${week===14?'disabled':''}>›</button></div>${card('League matchups',esc(reason))}`;
   }
   if(matchupIndex>=games.length)matchupIndex=0;
   if(matchupWeek===null){matchupWeek=week;const mine=games.findIndex(g=>g.home===manager||g.away===manager);if(mine>=0)matchupIndex=mine;}
