@@ -107,15 +107,34 @@ function faLatestMeta(x){
   const week=Number(state?.nflDirectorySync?.currentWeek||state?.week||1);
   return nflPlayerMetaCache[season+':'+week]?.data?.players?.[String(x.espnId||String(x.id).replace(/^espn-/,''))]||null;
 }
+function faPlayerSigma(meta,expected){
+  const scores=meta?.historicalWeeklyScores;
+  if(Array.isArray(scores)&&scores.length>=3){
+    const avg=scores.reduce((a,b)=>a+b,0)/scores.length;
+    const variance=scores.reduce((sum,v)=>sum+(v-avg)**2,0)/(scores.length-1);
+    return {sigma:Math.max(5,Math.sqrt(variance)),sample:scores.length,source:'historical weekly scoring'};
+  }
+  return {sigma:Math.max(9,Math.abs(expected)*0.85),sample:0,source:'position-independent conservative estimate'};
+}
 function faSubRisk(x,starter,mode){
   const meta=faLatestMeta(x),raw=meta?.weeklyProjectedPoints;
   const expected=raw==null||!Number.isFinite(Number(raw))?null:Number(raw);
-  const keep=Number(starter.points)||0;
-  if(expected===null)return '<span class="muted small">Score impact: insufficient projection data</span>';
-  const gain=expected-(mode==='handcuff'?Number(x.points)||0:0)-keep;
-  const method=meta?.projectionMethod==='LEAGUE_SCORED_ESPN_STATS'?'League-scored ESPN stats':'projection unavailable';
-  // No uncalibrated percentage: this is an expected-value comparison, not a probability.
-  return `<span class="muted small">${esc(method)}: ${fmt(expected)} pts · Expected change: ${gain>=0?'+':''}${fmt(gain)} pts · Improvement probability: insufficient variance data</span>`;
+  const keep=Number(starter.credited??starter.points)||0;
+  if(expected===null)return '<span class="muted small">Score impact: insufficient ESPN projected stats · Probability unavailable</span>';
+  const already=mode==='handcuff'?(Number(x.points)||0):0;
+  const remaining=Math.max(0,expected-already);
+  const gain=remaining-keep;
+  const health=String(meta?.injuryStatus||x.injuryStatus||'UNKNOWN').toUpperCase();
+  const unavailable=['OUT','IR','INJURED_RESERVE','SUSPENDED'].includes(health);
+  const uncertain=['DOUBTFUL','QUESTIONABLE','UNKNOWN'].includes(health);
+  const sigma=faPlayerSigma(meta,remaining);
+  const conditional=1-faNormalCdf((keep-remaining)/sigma.sigma);
+  const chance=unavailable?0:conditional;
+  const adjusted=unavailable?-keep:gain;
+  const source=sigma.sample>=3?'Historical variance ('+sigma.sample+' games)':'Conservative variance estimate';
+  return `<div class="muted small">Projected credited: ${fmt(remaining)} pts · Expected change: ${adjusted>=0?'+':''}${fmt(adjusted)} pts<br>
+    <b>${uncertain?'Improvement probability unavailable (playing status uncertain)':Math.round(chance*100)+'% estimated chance to improve · '+Math.round((1-chance)*100)+'% to tie or hurt'}</b><br>
+    ${esc(source)} · ${unavailable?'Unavailable to play':uncertain?'Health status limits forecast':'Assumes player is active'} · Not a calibrated probability</div>`;
 }
 function injuryCard(injury){const starter=p(injury.player);if(!starter||starter.owner!==manager)return '';
   const choices=state.players.filter(x=>x.owner===manager&&x.slot==='BENCH'&&
@@ -896,7 +915,8 @@ function faForecastPlayer(p,week){
   // advantage of 8-40 points create near-certain pregame odds. This is a
   // conservative, explicitly uncalibrated uncertainty estimate until enough
   // player-level outcomes exist to fit and backtest distributions.
-  const sigma=noFurtherPoints?0:Math.max(11,baseline*1.05)*Math.sqrt(Math.max(0,1-progress));
+  const calibrated=faPlayerSigma(meta,baseline);
+  const sigma=noFurtherPoints?0:calibrated.sigma*Math.sqrt(Math.max(0,1-progress));
   return {actual:credited,projected:credited+remaining,variance:sigma*sigma,known:true};
 }
 function faForecastTeam(players,week){
@@ -926,13 +946,13 @@ function faMatchForecastView(leftPlayers,rightPlayers,week,recorded){
   // not a statistically calibrated probability. Missing projections prohibit odds.
   const variance=a.variance+b.variance;
   const chance=variance>0?faNormalCdf((a.projected-b.projected)/Math.sqrt(variance)):0.5;
-  const percent=unknown?50:Math.max(1,Math.min(99,100*chance));
+  const percent=unknown?50:Math.max(2,Math.min(98,100*chance));
   return `<div class="fa-forecast" aria-label="Estimated matchup favorability">
     <div class="fa-forecast-label"><span>${unknown?'Known projected points':'Projected final'} <b>${fmt(a.projected)}</b></span><span><b>${fmt(b.projected)}</b> ${unknown?'Known projected points':'Projected final'}</span></div>
     <div class="fa-favor-track" style="${unknown?'background:#57677f':''}">${unknown?'':`<div class="fa-favor-left" style="width:${percent.toFixed(2)}%"></div>
       <div class="fa-favor-needle" style="left:${percent.toFixed(2)}%"></div>`}</div>
     <div class="fa-forecast-label"><span>${unknown?'—':Math.round(percent)+'%'} favored</span><span>${unknown?'—':Math.round(100-percent)+'%'} favored</span></div>
-    <div class="muted small" style="text-align:center;margin-top:8px">${unknown?'Favorability unavailable · '+unknown+' missing ESPN stat projection'+(unknown===1?'':'s'):'Modeled favorability · uncalibrated, not ESPN win probability'}</div>
+    <div class="muted small" style="text-align:center;margin-top:8px">${unknown?'Favorability unavailable · '+unknown+' missing ESPN stat projection'+(unknown===1?'':'s'):'Modeled win chance · historical variance where available · not yet backtested'}</div>
   </div>`;
 }
 function matchupView(){
