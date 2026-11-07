@@ -1170,6 +1170,7 @@ function authForm(){$('tabs').innerHTML='';$('connection').textContent='● Sign
 // Fantasy Audible launch gate: shown only to authenticated returning users.
 // Audio is initiated by the user's tap, satisfying iOS user-gesture playback rules.
 let faEntranceReady=false,faEntranceEntering=false,faEntranceAudio=null;
+let faEntranceAudioContext=null,faEntranceAudioBuffer=null;
 function faEntranceInit(){
   if(!token||document.getElementById('fa-entrance'))return;
   const css=document.createElement('style');css.id='fa-entrance-style';
@@ -1221,13 +1222,42 @@ function faEntranceInit(){
     '<div class="fa-content"><img class="fa-logo" src="/icon-512.png" alt="Fantasy Audible icon">'+
     '<div class="fa-enter-label">TAP TO ENTER</div><div class="fa-launch-status" aria-live="polite"></div></div>';
   document.body.appendChild(overlay);
+  // Preload and decode before the user taps, so playback can start immediately.
+  // iOS may ignore HTMLAudioElement preload; Web Audio provides a decoded fallback.
+  faEntranceAudio=new Audio('/omaha_first.mp3');
+  faEntranceAudio.preload='auto';
+  faEntranceAudio.load();
+  try{
+    const AudioContextClass=window.AudioContext||window.webkitAudioContext;
+    if(AudioContextClass){
+      faEntranceAudioContext=new AudioContextClass();
+      fetch('/omaha_first.mp3',{cache:'force-cache'})
+        .then(r=>{if(!r.ok)throw Error('Entrance audio unavailable');return r.arrayBuffer();})
+        .then(bytes=>faEntranceAudioContext.decodeAudioData(bytes))
+        .then(buffer=>{faEntranceAudioBuffer=buffer;})
+        .catch(()=>{});
+    }
+  }catch(e){}
   const enter=()=>{
     if(faEntranceEntering)return;
     if(!faEntranceReady){overlay.querySelector('.fa-launch-status').textContent='CONNECTING TO LEAGUE…';return;}
     faEntranceEntering=true;overlay.classList.add('fa-entering');
-    // One first Omaha call only. Never wait for audio to finish before entering.
-    try{faEntranceAudio=new Audio('/omaha_first.mp3');faEntranceAudio.preload='auto';
-      faEntranceAudio.play().catch(()=>{});}catch(e){}
+    // Play on the tap itself; no new network request or audio element creation.
+    // A decoded buffer starts with minimal latency; the preloaded element is fallback.
+    try{
+      if(faEntranceAudioBuffer&&faEntranceAudioContext){
+        const context=faEntranceAudioContext;
+        const source=context.createBufferSource();
+        source.buffer=faEntranceAudioBuffer;
+        source.connect(context.destination);
+        context.resume().then(()=>source.start(0)).catch(()=>{
+          faEntranceAudio.currentTime=0;faEntranceAudio.play().catch(()=>{});
+        });
+      }else{
+        faEntranceAudio.currentTime=0;
+        faEntranceAudio.play().catch(()=>{});
+      }
+    }catch(e){try{faEntranceAudio.play().catch(()=>{});}catch(_){} }
     setTimeout(()=>{overlay.classList.add('fa-exit');
       setTimeout(()=>{overlay.remove();css.remove();},800);},650);
   };
