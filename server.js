@@ -177,10 +177,25 @@ function dropValidation(s,owner,id,gameMap){
   if(!id)return null;
   const player=s.players.find(p=>p.id===id&&p.owner===owner);
   if(!player)return failure(404,'Player to drop is not on your roster');
-  const game=gameMap.get(String(player.nflTeamId??player.team??''));
-  if(game&&Date.now()>=Date.parse(game.kickoff)&&!game.completed)
-    return failure(409,'Cannot drop a player during their NFL game');
-  if(lineupLocked(s,player))return failure(409,'Cannot drop a locked lineup player');
+  // Transaction routes use the verified NFL game map, not the lineup editor's
+  // separate verifiedSchedule argument. Calling lineupLocked without that
+  // argument locks every ESPN player, even before kickoff.
+  if(player.espnId||player.nflGame){
+    const teamId=String(player.nflTeamId??player.team??'');
+    if(!teamId||!gameMap)return failure(503,'NFL schedule unavailable for this player');
+    const game=gameMap.get(teamId);
+    if(game){
+      const kickoff=Date.parse(game.kickoff);
+      if(!Number.isFinite(kickoff))return failure(503,'NFL kickoff time unavailable');
+      if(Date.now()>=kickoff)return failure(409,'Cannot drop a player after their NFL kickoff');
+    }else if(nflSchedule.currentWeekTeams?.has(teamId)){
+      return failure(503,'NFL game missing from verified schedule');
+    } // No current-week game means bye; player remains droppable.
+  }else if(lineupLocked(s,player)){
+    return failure(409,'Cannot drop a locked lineup player');
+  }
+  if(injurySwapRetired(s,player)||injurySwapCurrentSlot(s,player)||player.scoringMode||player.scoreAtSwap!==undefined)
+    return failure(409,'Cannot drop a player involved in a committed injury substitution');
   return player;
 }
 async function processWaivers(){
