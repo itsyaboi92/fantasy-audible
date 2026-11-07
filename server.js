@@ -691,7 +691,8 @@ function injurySwapRetired(s,player){return Boolean(player&&s.injurySwapHistory?
 function injurySwapCurrentSlot(s,player){return Boolean(player&&s.injurySwapHistory?.some(x=>
   x.week===injurySwapWeek(s)&&x.replacementId===player.id));}
 function eligibility(s,starter,bench){if(!starter||!bench||starter.owner!==bench.owner||
-  starter.slot==='BENCH'||bench.slot!=='BENCH'||starter.pos!==bench.pos||
+  starter.slot==='BENCH'||bench.slot!=='BENCH'||
+  !(starter.slot==='FLEX'?['RB','WR','TE'].includes(bench.pos):starter.pos===bench.pos)||
   injurySwapRetired(s,starter)||injurySwapRetired(s,bench))return null;
   // Real NFL schedule supersedes demo phase counters for drafted ESPN players.
   if(starter.espnId&&bench.espnId){
