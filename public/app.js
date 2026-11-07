@@ -856,8 +856,8 @@ async function loadMatchupGameStats(){
     if(game?.status==='playing')fa31StatsTimer=setTimeout(()=>{if(fa31Selected&&!document.hidden)loadMatchupGameStats();},25000);
   }catch(e){if(request===fa31Request&&fa31Selected&&content)content.innerHTML=`<p>${esc(e.message)}</p><button onclick="loadMatchupGameStats()">Retry</button>`;}
 }
-// Live matchup forecasts: historical weekly baseline plus elapsed-game estimate.
-// These are model estimates, not official ESPN live projections or calibrated odds.
+// Live matchup forecasts use ESPN projected statistics scored under league rules.
+// Favorability is a modeled indicator, not an ESPN or calibrated win probability.
 function faProjectionProgress(game){
   if(!game)return null;
   if(game.status==='final')return 1;
@@ -892,7 +892,11 @@ function faForecastPlayer(p,week){
   const noFurtherPoints=progress>0&&['OUT','INJURED_RESERVE','IR'].includes(injured);
   const remaining=noFurtherPoints?0:baseline*(1-progress);
   // Higher early-game uncertainty; decreases as scoring opportunities expire.
-  const sigma=noFurtherPoints?0:Math.max(4,baseline*.75)*Math.sqrt(Math.max(0,1-progress));
+  // Fantasy scoring has a wide weekly distribution. Do not let a projected
+  // advantage of 8-40 points create near-certain pregame odds. This is a
+  // conservative, explicitly uncalibrated uncertainty estimate until enough
+  // player-level outcomes exist to fit and backtest distributions.
+  const sigma=noFurtherPoints?0:Math.max(11,baseline*1.05)*Math.sqrt(Math.max(0,1-progress));
   return {actual:credited,projected:credited+remaining,variance:sigma*sigma,known:true};
 }
 function faForecastTeam(players,week){
@@ -924,11 +928,11 @@ function faMatchForecastView(leftPlayers,rightPlayers,week,recorded){
   const chance=variance>0?faNormalCdf((a.projected-b.projected)/Math.sqrt(variance)):0.5;
   const percent=unknown?50:Math.max(1,Math.min(99,100*chance));
   return `<div class="fa-forecast" aria-label="Estimated matchup favorability">
-    <div class="fa-forecast-label"><span>Projected final <b>${fmt(a.projected)}</b></span><span><b>${fmt(b.projected)}</b> Projected final</span></div>
-    <div class="fa-favor-track"><div class="fa-favor-left" style="width:${percent.toFixed(2)}%"></div>
-      <div class="fa-favor-needle" style="left:${percent.toFixed(2)}%"></div></div>
+    <div class="fa-forecast-label"><span>${unknown?'Known projected points':'Projected final'} <b>${fmt(a.projected)}</b></span><span><b>${fmt(b.projected)}</b> ${unknown?'Known projected points':'Projected final'}</span></div>
+    <div class="fa-favor-track" style="${unknown?'background:#57677f':''}">${unknown?'':`<div class="fa-favor-left" style="width:${percent.toFixed(2)}%"></div>
+      <div class="fa-favor-needle" style="left:${percent.toFixed(2)}%"></div>`}</div>
     <div class="fa-forecast-label"><span>${unknown?'—':Math.round(percent)+'%'} favored</span><span>${unknown?'—':Math.round(100-percent)+'%'} favored</span></div>
-    <div class="muted small" style="text-align:center;margin-top:8px">${unknown?'Win probability unavailable · '+unknown+' missing projection'+(unknown===1?'':'s'):'Uncalibrated favorability estimate · not ESPN win probability'}</div>
+    <div class="muted small" style="text-align:center;margin-top:8px">${unknown?'Favorability unavailable · '+unknown+' missing ESPN stat projection'+(unknown===1?'':'s'):'Modeled favorability · uncalibrated, not ESPN win probability'}</div>
   </div>`;
 }
 function matchupView(){
