@@ -235,7 +235,14 @@ async function openPlayerProfile(id){
     const data=await response.json();
     if(!response.ok)throw Error(data.details ? (data.error||'History unavailable')+': '+data.details : (data.error||'History unavailable'));
     if(profilePlayerId===String(id))profileHistory=data;
-  }catch(e){if(profilePlayerId===String(id))profileError=e.message;}
+  }catch(e){
+    if(profilePlayerId===String(id)){
+      const message=String(e?.message||e);
+      profileError=/string did not match the expected pattern/i.test(message)
+        ?'Player history could not be loaded. Please retry; the scoring in Matchups is unaffected.'
+        :message;
+    }
+  }
   finally{if(profilePlayerId===String(id)){profileLoading=false;render();}}
 }
 function closePlayerProfile(){profilePlayerId=null;profileHistory=null;expandedProfileWeek=null;render();}
