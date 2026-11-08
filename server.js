@@ -331,7 +331,7 @@ async function activateLeagueSchedule(){
 }
 // Persisted week-specific ledger. Historical weeks are never inferred from today's roster.
 function ledgerScore(p){return Number(p.scoringMode==='handcuff'?(p.credited??0):p.points)||0;}
-function ledgerLineup(s,id){return s.players.filter(p=>p.owner===id&&!['BENCH','IR'].includes(p.slot)).map(p=>({id:p.id,name:p.name,team:p.team,pos:p.pos,slot:p.slot,status:p.status,points:ledgerScore(p),liveScoreStatus:p.liveScoreStatus||null}));}
+function ledgerLineup(s,id){return s.players.filter(p=>p.owner===id&&!['BENCH','IR'].includes(p.slot)).map(p=>({id:p.id,name:p.name,team:p.team,pos:p.pos,slot:p.slot,status:p.status,points:ledgerScore(p),espnId:p.espnId||null,nflTeamId:p.nflTeamId||null,scoringMode:p.scoringMode||null,liveScoreStatus:p.liveScoreStatus||null}));}
 function ledgerTotal(lineup){return Math.round(lineup.reduce((n,p)=>n+p.points,0)*100)/100;}
 function updateWeeklyLedger(s,accounts,week,games,failures){
   if(!Number.isInteger(week)||week<1||week>18)return;
@@ -1278,23 +1278,13 @@ async function faWeeklyESPN(season,week){
       const key=`${season}:${currentWeek}:${team}:${id}:${JSON.stringify(settingsOf(current.state).scoring)}`;
       const cached=playerHistoryCache.get(key);
       if(cached&&Date.now()-cached.at<15*60*1000)return send(res,200,cached.value);
-      // Bound ESPN requests: mobile player-history views previously triggered
-      // a burst of up to 18 concurrent scoreboard/summary requests.
-      const boards=[];
-      for(let first=1;first<=currentWeek;first+=3){
-        const batch=await Promise.all(Array.from({length:Math.min(3,currentWeek-first+1)},(_,i)=>first+i).map(async week=>{
-          try{return {week,games:await liveNFL.loadWeek(season,week)};}
-          catch(e){return {week,games:[],error:e.message};}
-        }));
-        boards.push(...batch);
-      }
+      const boards=await Promise.all(Array.from({length:currentWeek},(_,i)=>i+1).map(async week=>{
+        try{return {week,games:await liveNFL.loadWeek(season,week)};}
+        catch(e){return {week,games:[],error:e.message};}
+      }));
       const games=boards.flatMap(x=>x.games.map(g=>({...g,week:x.week})))
         .filter(g=>g.status==='final'&&g.teams.some(t=>String(t.id)===String(team)));
-      const weeks=[];
-      // Fetch at most two completed games concurrently, preventing request
-      // storms and intermittent iOS Safari network failures.
-      for(let first=0;first<games.length;first+=2){
-        const batch=await Promise.all(games.slice(first,first+2).map(async game=>{
+      const weeks=await Promise.all(games.map(async game=>{
         try{
           const summary=await liveNFL.fetchGame(game.id);
           const stats=liveNFL.playerStats(summary);
@@ -1311,9 +1301,7 @@ async function faWeeklyESPN(season,week){
           return {week:game.week,gameId:game.id,status:'final',opponent:game.teams.find(t=>String(t.id)!==String(team))?.abbreviation||null,
             points:result.points,breakdown:result.breakdown,statDetails:isDefense?result.statDetails:undefined,unsupported:result.unsupported,provisional:true};
         }catch(e){return {week:game.week,gameId:game.id,status:'UNAVAILABLE',error:'Game statistics unavailable'};}
-        }));
-        weeks.push(...batch);
-      }
+      }));
       weeks.sort((a,b)=>b.week-a.week);
       const scored=weeks.filter(w=>w.status==='final');
       const value={player:{id,name:player.name,position:player.position},season,weeks,
@@ -1720,6 +1708,75 @@ async function syncNFLScoring(){
   }catch(e){console.error('NFL scoring sync:',e.message);}
   finally{scoringSyncBusy=false;}
 }
+// Reconcile frozen weekly lineup snapshots, never today's lineup. Conservative:
+// only a matching ESPN athlete with a verified completed game is eligible.
+// Do not change injury-substitution credits, final results with unknown roster
+// identity, or weeks for which NFL box-score coverage is incomplete.
+let historyReconcileBusy=false;
+async function reconcileHistoricalMatchups(){
+ if(historyReconcileBusy||scoringSyncBusy)return;historyReconcileBusy=true;
+ try{
+  const {state}=await snapshot();
+  if(ensureDraft(state).status!=='completed'||!state.frozenMatchupSchedule)return;
+  const season=Number(state.scheduleSeason||process.env.NFL_SEASON||new Date().getUTCFullYear());
+  const weeks=Object.keys(state.weeklyLedger||{}).map(Number).filter(w=>Number.isInteger(w)&&w>=1&&w<=18).sort((a,b)=>a-b);
+  for(const week of weeks){
+   const snapshotMatches=Object.values(state.weeklyLedger?.[week]?.matchups||{});
+   if(!snapshotMatches.length)continue;
+   let games;try{games=await liveNFL.loadWeek(season,week);}catch(e){console.warn('Historical reconciliation schedule:',week,e.message);continue;}
+   if(!games.length||games.some(g=>g.status!=='final'))continue;
+   const byTeam=new Map();for(const g of games)for(const t of g.teams)byTeam.set(String(t.id),g);
+   const candidates=[];
+   for(const m of snapshotMatches)for(const side of ['homeLineup','awayLineup'])for(const entry of m[side]||[]){
+    // Only a previously recorded snapshot is eligible, not a reconstructed lineup.
+    if(entry.scoringMode||entry.liveScoreStatus==='INJURY_SUBSTITUTION_REQUIRES_EVENT_SCORING')continue;
+    const athlete=state.players.find(p=>String(p.id)===String(entry.id));
+    if(!athlete||String(athlete.owner)!==String(m[side==='homeLineup'?'home':'away']))continue;
+    if(athlete.scoringMode)continue;
+    const id=String(entry.espnId||athlete.espnId||'');
+    if(!id&&entry.pos!=='D/ST')continue;
+    const team=String(entry.nflTeamId||liveNFL.teamId(athlete)||'');
+    const game=byTeam.get(team);if(!game)continue;
+    candidates.push({matchId:m.id,side,id:String(entry.id),athleteId:id,team,game,pos:entry.pos,name:entry.name});
+   }
+   if(!candidates.length)continue;
+   const box=new Map();
+   for(const game of [...new Map(candidates.map(c=>[c.game.id,c.game])).values()]){
+    try{const summary=await liveNFL.fetchGame(game.id);box.set(game.id,summary);await defenseStore.ingest(pool,season,game,summary);}
+    catch(e){console.warn('Historical reconciliation game:',game.id,e.message);}
+   }
+   try{await fantasyDST.ingestWeek(pool,defenseStore,season,week,games);}catch(e){console.warn('Historical D/ST feed:',week,e.message);}
+   const updates=[];
+   for(const c of candidates){
+    const summary=box.get(c.game.id);if(!summary)continue;
+    let result;
+    try{result=c.pos==='D/ST'?await defenseStore.get(pool,season,c.game,c.team,settingsOf(state).scoring):authoritativeGameScore(summary,{id:c.id,espnId:c.athleteId,name:c.name,nflTeamId:c.team,pos:c.pos},settingsOf(state).scoring,c.game);}
+    catch(e){continue;}
+    if(!result||!result.complete||!Number.isFinite(result.points))continue;
+    updates.push({...c,points:result.points});
+   }
+   if(!updates.length)continue;
+   await change((s,accounts)=>{
+    const matches=s.weeklyLedger?.[week]?.matchups||{};
+    for(const u of updates){
+     const match=matches[u.matchId];if(!match)continue;
+     const entry=(match[u.side]||[]).find(x=>String(x.id)===u.id);
+     if(!entry||entry.scoringMode||entry.liveScoreStatus==='INJURY_SUBSTITUTION_REQUIRES_EVENT_SCORING')continue;
+     const current=s.players.find(p=>String(p.id)===u.id);
+     if(!current||current.scoringMode||String(current.owner)!==String(match[u.side==='homeLineup'?'home':'away']))continue;
+     entry.points=u.points;entry.liveScoreStatus='UPDATED';entry.reconciledAt=new Date().toISOString();
+    }
+    for(const match of Object.values(matches)){
+     // Preserve original final/provisional status; don't invent verification.
+     match.homeScore=ledgerTotal(match.homeLineup||[]);match.awayScore=ledgerTotal(match.awayLineup||[]);
+     match.winner=match.status==='final'?(match.homeScore===match.awayScore?null:match.homeScore>match.awayScore?match.home:match.away):null;
+     match.updatedAt=new Date().toISOString();
+    }
+    return {ok:true};
+   });
+  }
+ }catch(e){console.error('Historical reconciliation:',e.message);}finally{historyReconcileBusy=false;}
+}
 const playerHistoryCache=new Map();
 // Independent player-directory game history. League state.week is not the NFL
 // calendar week: newly created leagues often remain on week 1.
@@ -1923,6 +1980,8 @@ setTimeout(syncPlayerDirectory,12000);
 setInterval(activateLeagueSchedule,60000);
 setTimeout(activateLeagueSchedule,3000);
 setInterval(syncNFLScoring,60000);
+setInterval(reconcileHistoricalMatchups,30*60*1000);
+setTimeout(reconcileHistoricalMatchups,90*1000);
 setInterval(updatePostseason,60000);
 setTimeout(updatePostseason,20000);
 setTimeout(syncNFLScoring,6000);
