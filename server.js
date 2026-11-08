@@ -1278,13 +1278,23 @@ async function faWeeklyESPN(season,week){
       const key=`${season}:${currentWeek}:${team}:${id}:${JSON.stringify(settingsOf(current.state).scoring)}`;
       const cached=playerHistoryCache.get(key);
       if(cached&&Date.now()-cached.at<15*60*1000)return send(res,200,cached.value);
-      const boards=await Promise.all(Array.from({length:currentWeek},(_,i)=>i+1).map(async week=>{
-        try{return {week,games:await liveNFL.loadWeek(season,week)};}
-        catch(e){return {week,games:[],error:e.message};}
-      }));
+      // Bound ESPN requests: mobile player-history views previously triggered
+      // a burst of up to 18 concurrent scoreboard/summary requests.
+      const boards=[];
+      for(let first=1;first<=currentWeek;first+=3){
+        const batch=await Promise.all(Array.from({length:Math.min(3,currentWeek-first+1)},(_,i)=>first+i).map(async week=>{
+          try{return {week,games:await liveNFL.loadWeek(season,week)};}
+          catch(e){return {week,games:[],error:e.message};}
+        }));
+        boards.push(...batch);
+      }
       const games=boards.flatMap(x=>x.games.map(g=>({...g,week:x.week})))
         .filter(g=>g.status==='final'&&g.teams.some(t=>String(t.id)===String(team)));
-      const weeks=await Promise.all(games.map(async game=>{
+      const weeks=[];
+      // Fetch at most two completed games concurrently, preventing request
+      // storms and intermittent iOS Safari network failures.
+      for(let first=0;first<games.length;first+=2){
+        const batch=await Promise.all(games.slice(first,first+2).map(async game=>{
         try{
           const summary=await liveNFL.fetchGame(game.id);
           const stats=liveNFL.playerStats(summary);
@@ -1301,7 +1311,9 @@ async function faWeeklyESPN(season,week){
           return {week:game.week,gameId:game.id,status:'final',opponent:game.teams.find(t=>String(t.id)!==String(team))?.abbreviation||null,
             points:result.points,breakdown:result.breakdown,statDetails:isDefense?result.statDetails:undefined,unsupported:result.unsupported,provisional:true};
         }catch(e){return {week:game.week,gameId:game.id,status:'UNAVAILABLE',error:'Game statistics unavailable'};}
-      }));
+        }));
+        weeks.push(...batch);
+      }
       weeks.sort((a,b)=>b.week-a.week);
       const scored=weeks.filter(w=>w.status==='final');
       const value={player:{id,name:player.name,position:player.position},season,weeks,
