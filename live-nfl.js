@@ -324,8 +324,26 @@ function defenseStats(summary,game,events=[]){
   if(opponent&&lost.has(String(opponent.id))&&!Object.hasOwn(stats,'fumbleRecovered'))
    stats.fumbleRecovered=lost.get(String(opponent.id));
   const oppBox=teams.find(t=>String(t.team?.id)!==id);
-  const oppTotal=(oppBox?.statistics||[]).find(x=>normalizedLabel(x.name||x.abbreviation||x.label)==='TOTALYARDS');
-  const yards=oppTotal?Number(oppTotal.value??oppTotal.displayValue):NaN;
+  // ESPN team-stat keys vary across summary revisions. Prefer an explicit
+  // offensive total; only derive it when both net passing and rushing exist.
+  const oppStats=new Map();
+  for(const stat of oppBox?.statistics||[]){
+   const raw=stat.value??stat.displayValue;
+   if(raw===null||raw===undefined||String(raw).trim()==='')continue;
+   const value=Number(String(raw).replace(/,/g,''));
+   if(!Number.isFinite(value))continue;
+   for(const label of [stat.name,stat.abbreviation,stat.label]){
+    const key=normalizedLabel(label);
+    if(key)oppStats.set(key,value);
+   }
+  }
+  const lookup=aliases=>aliases.map(key=>oppStats.get(key)).find(Number.isFinite);
+  let yards=lookup(['TOTALYARDS','TOTALOFFENSIVEYARDS','TOTALOFFENSE','NETTOTALYARDS','TOTYDS','TOTYARDS','YDS']);
+  if(yards===undefined){
+   const rushing=lookup(['RUSHINGYARDS','NETRUSHINGYARDS','RUSHYDS','RYDS']);
+   const passing=lookup(['NETPASSINGYARDS','NETPASSYARDS','PASSINGNETYARDS','PASSYDSNET']);
+   if(Number.isFinite(rushing)&&Number.isFinite(passing))yards=rushing+passing;
+  }
   output.set(id,{stats,playEventCounts:null,
    playFeedAvailable:false,
    pointsAllowed:opponent?.score,yardsAllowed:Number.isFinite(yards)?yards:null,
