@@ -1,6 +1,7 @@
 'use strict';
 // A missing field is not a zero. Game/team/stat keys are shared by every league.
 const {defenseStats,scoreDefense}=require('./live-nfl');
+const COUNT_FIELDS=new Set(['sacks','interceptions','forcedFumble','fumbleRecovered','safety','blockedKick','interceptionTD','fumbleReturnTD','kickoffReturnTD','puntReturnTD','twoPointReturn','onePointSafety']);
 const FIELDS=['sacks','interceptions','forcedFumble','fumbleRecovered','safety','blockedKick','interceptionTD','fumbleReturnTD','kickoffReturnTD','puntReturnTD','twoPointReturn','onePointSafety'];
 async function init(pool){
  await pool.query(`CREATE TABLE IF NOT EXISTS fantasy_audible_defense_conflicts (
@@ -20,11 +21,11 @@ function observations(summary,game){
  for(const [team,box] of defenseStats(summary,game).entries()){
   for(const field of FIELDS){
    const value=box.stats[field];
-   if(!Number.isFinite(value)||value<0)continue;
+   if(!Number.isInteger(value)||value<0)continue;
    result.push({team,field,value,source:Object.hasOwn(playerTotals.get(team)||{},field)?'ESPN attributed player defensive totals':'ESPN defensive box score',verified:true});
   }
-  if(box.opponentFound&&Number.isFinite(box.pointsAllowed))result.push({team,field:'pointsAllowed',value:box.pointsAllowed,source:'ESPN game scoreboard',verified:true});
-  if(Number.isFinite(box.yardsAllowed))result.push({team,field:'yardsAllowed',value:box.yardsAllowed,source:'ESPN offensive team total',verified:true});
+  if(box.opponentFound&&Number.isInteger(Number(box.pointsAllowed))&&Number(box.pointsAllowed)>=0&&box.pointsAllowed!==null&&box.pointsAllowed!==undefined)result.push({team,field:'pointsAllowed',value:box.pointsAllowed,source:'ESPN game scoreboard',verified:true});
+  if(Number.isInteger(box.yardsAllowed)&&box.yardsAllowed>=0)result.push({team,field:'yardsAllowed',value:box.yardsAllowed,source:'ESPN offensive team total',verified:true});
  }
  return result;
 }
@@ -43,9 +44,10 @@ async function ingest(pool,season,game,summary){
    (season,game_id,team_id,stat,value,source,verified,game_final)
    VALUES($1,$2,$3,$4,$5,$6,$7,$8)
    ON CONFLICT(season,game_id,team_id,stat) DO UPDATE SET
-   observed_at=NOW(),game_final=EXCLUDED.game_final,
-   source=CASE WHEN fantasy_audible_defense_stats.stat='forcedFumble' AND fantasy_audible_defense_stats.source LIKE 'ESPN Fantasy weekly actual%' THEN fantasy_audible_defense_stats.source WHEN EXCLUDED.source='ESPN attributed player defensive totals' THEN EXCLUDED.source ELSE fantasy_audible_defense_stats.source END,
-   value=CASE WHEN fantasy_audible_defense_stats.stat='forcedFumble' AND fantasy_audible_defense_stats.source LIKE 'ESPN Fantasy weekly actual%' THEN fantasy_audible_defense_stats.value WHEN fantasy_audible_defense_stats.value=EXCLUDED.value OR EXCLUDED.source='ESPN attributed player defensive totals' THEN EXCLUDED.value ELSE fantasy_audible_defense_stats.value END`,
+   observed_at=NOW(),game_final=(fantasy_audible_defense_stats.game_final OR EXCLUDED.game_final),
+   verified=(fantasy_audible_defense_stats.verified OR EXCLUDED.verified),
+   source=CASE WHEN fantasy_audible_defense_stats.game_final AND NOT EXCLUDED.game_final THEN fantasy_audible_defense_stats.source WHEN fantasy_audible_defense_stats.stat='forcedFumble' AND fantasy_audible_defense_stats.source LIKE 'ESPN Fantasy weekly actual%' THEN fantasy_audible_defense_stats.source ELSE EXCLUDED.source END,
+   value=CASE WHEN fantasy_audible_defense_stats.game_final AND NOT EXCLUDED.game_final THEN fantasy_audible_defense_stats.value WHEN fantasy_audible_defense_stats.stat='forcedFumble' AND fantasy_audible_defense_stats.source LIKE 'ESPN Fantasy weekly actual%' THEN fantasy_audible_defense_stats.value ELSE EXCLUDED.value END`,
    [season,String(game.id),x.team,x.field,x.value,x.source,x.verified,game.status==='final']);
  }
  return incoming.length;
@@ -81,6 +83,8 @@ async function get(pool,season,game,teamId,rules){
   details[displayKey]={value,source:row.source,verified:row.verified,final:row.game_final};
  }
  const scored=scoreDefense({stats,pointsAllowed,yardsAllowed,opponentFound:pointsAllowed!==null},rules);
- return {...scored,statDetails:details,counts:stats,pointsAllowed,yardsAllowed,complete:game.status==='final'&&!scored.unsupported.length,source:'persisted-defense-stats'};
+ const critical=[...FIELDS,'pointsAllowed','yardsAllowed'];
+ const verification=Object.fromEntries(critical.map(field=>{const d=details[({sacks:'sack',interceptions:'interception'})[field]||field];return [field,{present:!!d,verified:!!d?.verified,source:d?.source||null,final:!!d?.final}];}));
+ return {...scored,statDetails:details,verification,counts:stats,pointsAllowed,yardsAllowed,complete:game.status==='final'&&!scored.unsupported.length,source:'persisted-defense-stats'};
 }
 module.exports={init,ingest,get,observations,ingestFantasyForcedFumble};

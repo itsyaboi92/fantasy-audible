@@ -374,8 +374,9 @@ function scoreDefense(input,rules){
    twoPointReturn:'Defensive two-point returns',onePointSafety:'One-point safeties'})){
    if(Object.hasOwn(d,key))add(label,d[key],key==='sacks'?r.sack:key==='interceptions'?r.interception:r[key]);else missing.push(label);
  }
- const pa=Number(input?.pointsAllowed);
- if(input?.opponentFound&&Number.isFinite(pa)){
+ const rawPA=input?.pointsAllowed;
+ const pa=rawPA===null||rawPA===undefined||rawPA===''?NaN:Number(rawPA);
+ if(input?.opponentFound&&Number.isInteger(pa)&&pa>=0){
   const key=pa===0?'pointsAllowed0':pa<=6?'pointsAllowed1to6':pa<=13?'pointsAllowed7to13':
    pa<=17?'pointsAllowed14to17':pa<=27?'pointsAllowed18to27':pa<=34?'pointsAllowed28to34':
    pa<=45?'pointsAllowed35to45':'pointsAllowed46plus';
