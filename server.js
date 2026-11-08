@@ -1242,7 +1242,7 @@ async function faWeeklyESPN(season,week){
       if(isDefense)await defenseStore.ingest(pool,season,game,item.summary);
       const scored=isDefense?(await defenseStore.get(pool,season,game,teamId,settingsOf(current.state).scoring))||authoritativeGameScore(item.summary,{...athlete,pos:athlete.position,espnId:id},settingsOf(current.state).scoring,game):authoritativeGameScore(item.summary,{...athlete,pos:athlete.position,espnId:id},settingsOf(current.state).scoring,game);
       const groups=[];
-      const categories=isDefense?{defense:{...defense.stats,pointsAllowed:defense.pointsAllowed,yardsAllowed:defense.yardsAllowed}}:{passing:stats.passing,rushing:stats.rushing,receiving:stats.receiving,kicking:stats.kicking,miscellaneous:stats.misc};
+      const categories=isDefense?{defense:{...(scored.counts||defense.stats),pointsAllowed:scored.pointsAllowed??defense.pointsAllowed,yardsAllowed:scored.yardsAllowed??defense.yardsAllowed}}:{passing:stats.passing,rushing:stats.rushing,receiving:stats.receiving,kicking:stats.kicking,miscellaneous:stats.misc};
       for(const [name,values] of Object.entries(categories)){
         const rows=Object.entries(values||{}).map(([label,value])=>({label,value:String(value)}));
         if(rows.length)groups.push({name,rows});

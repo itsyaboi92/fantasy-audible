@@ -16,11 +16,12 @@ async function init(pool){
 }
 function observations(summary,game){
  const result=[];
+ const playerTotals=require('./live-nfl').defensivePlayerTotals(summary);
  for(const [team,box] of defenseStats(summary,game).entries()){
   for(const field of FIELDS){
    const value=box.stats[field];
    if(!Number.isFinite(value)||value<0)continue;
-   result.push({team,field,value,source:'ESPN defensive box score',verified:true});
+   result.push({team,field,value,source:Object.hasOwn(playerTotals.get(team)||{},field)?'ESPN attributed player defensive totals':'ESPN defensive box score',verified:true});
   }
   if(box.opponentFound&&Number.isFinite(box.pointsAllowed))result.push({team,field:'pointsAllowed',value:box.pointsAllowed,source:'ESPN game scoreboard',verified:true});
   if(Number.isFinite(box.yardsAllowed))result.push({team,field:'yardsAllowed',value:box.yardsAllowed,source:'ESPN offensive team total',verified:true});
@@ -43,7 +44,8 @@ async function ingest(pool,season,game,summary){
    VALUES($1,$2,$3,$4,$5,$6,$7,$8)
    ON CONFLICT(season,game_id,team_id,stat) DO UPDATE SET
    observed_at=NOW(),game_final=EXCLUDED.game_final,
-   value=CASE WHEN fantasy_audible_defense_stats.value=EXCLUDED.value THEN EXCLUDED.value ELSE fantasy_audible_defense_stats.value END`,
+   source=CASE WHEN EXCLUDED.source='ESPN attributed player defensive totals' THEN EXCLUDED.source ELSE fantasy_audible_defense_stats.source END,
+   value=CASE WHEN fantasy_audible_defense_stats.value=EXCLUDED.value OR EXCLUDED.source='ESPN attributed player defensive totals' THEN EXCLUDED.value ELSE fantasy_audible_defense_stats.value END`,
    [season,String(game.id),x.team,x.field,x.value,x.source,x.verified,game.status==='final']);
  }
  return incoming.length;

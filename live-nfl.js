@@ -325,7 +325,7 @@ function defenseStats(summary,game,events=[]){
   // Player-level defensive totals are team-owned. Prefer them for basic
   // defensive statistics; do not infer INT from offensive QB columns.
   for(const [key,value] of Object.entries(players.get(id)||{})){
-   if(!Object.hasOwn(stats,key))stats[key]=value;
+   stats[key]=value;
   }
   const opponent=game.teams.find(t=>String(t.id)!==id);
   // An opponent's officially recorded LOST fumble is a turnover credited to
