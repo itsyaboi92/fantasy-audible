@@ -6,6 +6,7 @@ const { Pool } = require('pg');
 const { initializeESPN, getESPNPlayers } = require('./espn');
 const liveNFL = require('./live-nfl');
 const eventLedger = require('./event-ledger');
+const postseason = require('./postseason');
 const matchupAnalytics = require('./matchup-analytics');
 const webpush = require('web-push');
 const PUSH_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
@@ -264,7 +265,7 @@ function fantasySchedule(s,accounts,startWeek=1){
   if(ids.length<2)return {};
   let rotation=[...ids];if(rotation.length%2)rotation.push(null);
   const rounds=rotation.length-1,result={};
-  for(let week=startWeek;week<=14;week++){
+  for(let week=startWeek;week<=postseason.endWeek(ids.length);week++){
     const matches=[];
     for(let i=0;i<rotation.length/2;i++){
       const a=rotation[i],b=rotation[rotation.length-1-i];
@@ -309,13 +310,13 @@ async function activateLeagueSchedule(){
       if(ensureDraft(s).status!=='completed'||validSchedule(s.frozenMatchupSchedule))return {ok:true};
       const count=s.managers.filter(m=>accounts.some(a=>a.manager===m.id)).length;
       if(count<2){s.matchupScheduleNotice='Only '+count+' registered team(s) available for scheduling.';return {ok:true};}
-      if(startWeek>14){s.matchupScheduleNotice='The regular-season scheduling window has ended.';return {ok:true};}
+      if(startWeek>postseason.endWeek(count)){s.matchupScheduleNotice='The regular-season scheduling window has ended.';return {ok:true};}
       const schedule=fantasySchedule(s,accounts,startWeek);
       if(!validSchedule(schedule)){s.matchupScheduleNotice='Unable to pair registered teams; schedule not saved.';return {ok:true};}
       s.frozenMatchupSchedule=schedule;
       s.scheduleStartWeek=startWeek;s.scheduleSeason=calendar.season;s.week=startWeek;
       delete s.matchupScheduleNotice;
-      audit(s,'MATCHUP_SCHEDULE_CREATED',null,'NFL Week '+startWeek+' through Week 14');
+      audit(s,'MATCHUP_SCHEDULE_CREATED',null,'NFL Week '+startWeek+' through Week '+postseason.endWeek(count));
       console.log('MATCHUP_SCHEDULE_CREATED',JSON.stringify({startWeek,season:calendar.season,teams:count,matchups:schedule[startWeek].length}));
       return {ok:true};
     });
@@ -331,7 +332,7 @@ function ledgerScore(p){return Number(p.scoringMode==='handcuff'?(p.credited??0)
 function ledgerLineup(s,id){return s.players.filter(p=>p.owner===id&&!['BENCH','IR'].includes(p.slot)).map(p=>({id:p.id,name:p.name,team:p.team,pos:p.pos,slot:p.slot,status:p.status,points:ledgerScore(p),liveScoreStatus:p.liveScoreStatus||null}));}
 function ledgerTotal(lineup){return Math.round(lineup.reduce((n,p)=>n+p.points,0)*100)/100;}
 function updateWeeklyLedger(s,accounts,week,games,failures){
-  if(!Number.isInteger(week)||week<1||week>14)return;
+  if(!Number.isInteger(week)||week<1||week>18)return;
   s.weeklyLedger ||= {};
   const schedule=s.frozenMatchupSchedule||{};
   const matches=schedule[week]||[];
@@ -352,7 +353,8 @@ function updateWeeklyLedger(s,accounts,week,games,failures){
 }
 function leagueStandings(s,accounts){
   const result={};for(const m of s.managers)result[m.id]={manager:m.id,wins:0,losses:0,ties:0,pointsFor:0,pointsAgainst:0};
-  for(const week of Object.values(s.weeklyLedger||{}))for(const match of Object.values(week.matchups||{})){
+  for(const [weekNumber,week] of Object.entries(s.weeklyLedger||{}))for(const match of Object.values(week.matchups||{})){
+    if(Number(weekNumber)>postseason.endWeek(s.managers.filter(m=>accounts.some(a=>a.manager===m.id)).length))continue;
     if(match.status!=='final'||!result[match.home]||!result[match.away])continue;
     const a=result[match.home],b=result[match.away];a.pointsFor+=match.homeScore;a.pointsAgainst+=match.awayScore;
     b.pointsFor+=match.awayScore;b.pointsAgainst+=match.homeScore;
@@ -1644,7 +1646,8 @@ async function syncNFLScoring(){
     const calendar=await currentNFLCalendar();
     if(state.scheduleSeason&&calendar.season!==state.scheduleSeason)return;
     const week=calendar.week;
-    if(week<Number(state.scheduleStartWeek||1)||week>14)return;
+    if(week<Number(state.scheduleStartWeek||1)||week>18)return;
+    if(!(state.frozenMatchupSchedule?.[week]||[]).length)return;
     const games=await liveNFL.loadWeek(season,week);
     const summaries=new Map(),failures=[];
     await Promise.all(games.filter(g=>g.status!=='upcoming').map(async g=>{
@@ -1677,6 +1680,8 @@ async function syncNFLScoring(){
       }
       s.week=week;
       updateWeeklyLedger(s,accounts,week,games,failures);
+      s.postseasonNFLFinal ||= {};
+      s.postseasonNFLFinal[week]=games.length>0&&games.every(g=>g.status==='final')&&failures.length===0;
       s.nflSync={season,week,at:new Date().toISOString(),games:games.map(g=>({id:g.id,status:g.status,kickoff:g.kickoff,teams:g.teams})),failures,updatedPlayers:changed,warning:'Hybrid event/box-score scoring: category-level box-score fallback; event-specific distances and returns retained. Check liveScoreStatus for provisional results.'};
       return {ok:true};
     });
@@ -1840,6 +1845,38 @@ async function remindPendingInjuries(){
       body:`${a.replacement} kicks off soon. Review your substitution before kickoff.`,url:'/?tab=Notifications'});
   }catch(e){console.error('Injury reminder:',e.message);}finally{reminderBusy=false;}
 }
+
+let postseasonBusy=false;
+async function updatePostseason(){
+ if(postseasonBusy)return;postseasonBusy=true;
+ try{
+  const {state,accounts}=await snapshot();
+  if(ensureDraft(state).status!=='completed'||!state.frozenMatchupSchedule)return;
+  const n=accounts.filter(a=>state.managers.some(m=>m.id===a.manager)).length;
+  if(n<6||n>12)return;
+  const end=postseason.endWeek(n);
+  const phase=state.postseason?.phase;
+  const weeks=!state.postseason?.locked?[end]:phase==='opening'?[14]:phase==='semis'?[15,16]:phase==='finals'?[17,18]:[];
+  const season=Number(state.scheduleSeason||process.env.NFL_SEASON||new Date().getUTCFullYear());
+  const finalWeeks={};
+  await Promise.all(weeks.map(async week=>{
+   try{const games=await liveNFL.loadWeek(season,week);
+    finalWeeks[week]=games.length>0&&games.every(g=>g.status==='final');}
+   catch(e){finalWeeks[week]=false;}
+  }));
+  if(!Object.values(finalWeeks).some(Boolean))return;
+  await change((s,a)=>{
+   const verified=w=>Boolean(finalWeeks[w]&&s.postseasonNFLFinal?.[w]);
+   let changed=false;
+   if(!s.postseason?.locked)changed=postseason.start(s,a,verified);
+   else changed=postseason.advance(s,a,verified);
+   if(changed)audit(s,'POSTSEASON_UPDATED',null,'Phase: '+s.postseason.phase);
+   return {ok:true};
+  });
+ }catch(e){console.error('Postseason scheduling:',e.message);}
+ finally{postseasonBusy=false;}
+}
+
 setInterval(publishEditorial,5*60000);
 setInterval(publishLockerBot,60000);
 setTimeout(publishLockerBot,35000);
@@ -1854,6 +1891,8 @@ setTimeout(syncPlayerDirectory,12000);
 setInterval(activateLeagueSchedule,60000);
 setTimeout(activateLeagueSchedule,3000);
 setInterval(syncNFLScoring,60000);
+setInterval(updatePostseason,60000);
+setTimeout(updatePostseason,20000);
 setTimeout(syncNFLScoring,6000);
 let checkingWaivers=false;setInterval(async()=>{if(checkingWaivers)return;checkingWaivers=true;
   try{await processWaivers();}catch(e){console.error('Waiver processing:',e.message);}finally{checkingWaivers=false;}},30000);
