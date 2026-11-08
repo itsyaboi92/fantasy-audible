@@ -1,0 +1,20 @@
+
+name: Diagnose ESPN D/ST data
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Inspect Cincinnati and Los Angeles Week 9
+        run: node diagnose-dst-espn.js 2026 9 > dst-diagnostic.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dst-diagnostic
+          path: dst-diagnostic.txt
