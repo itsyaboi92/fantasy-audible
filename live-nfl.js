@@ -370,7 +370,9 @@ function scoreDefense(input,rules){
   const key=pa===0?'pointsAllowed0':pa<=6?'pointsAllowed1to6':pa<=13?'pointsAllowed7to13':
    pa<=17?'pointsAllowed14to17':pa<=27?'pointsAllowed18to27':pa<=34?'pointsAllowed28to34':
    pa<=45?'pointsAllowed35to45':'pointsAllowed46plus';
-  add('Points allowed bracket',1,r[key]);
+  const range={pointsAllowed0:'0',pointsAllowed1to6:'1–6',pointsAllowed7to13:'7–13',pointsAllowed14to17:'14–17',pointsAllowed18to27:'18–27',pointsAllowed28to34:'28–34',pointsAllowed35to45:'35–45',pointsAllowed46plus:'46+'}[key];
+  const rate=Number(r[key]);
+  if(Number.isFinite(rate)){points+=rate;breakdown.push({label:`Points allowed: ${pa} (range ${range})`,quantity:1,rate,points:rate,bracket:true});}
  }else missing.push('Points allowed');
  const ya=input?.yardsAllowed;
  if(Number.isFinite(ya)){
@@ -378,7 +380,9 @@ function scoreDefense(input,rules){
    ya<300?'yardsAllowed200to299':ya<350?'yardsAllowed300to349':
    ya<400?'yardsAllowed350to399':ya<450?'yardsAllowed400to449':
    ya<500?'yardsAllowed450to499':ya<550?'yardsAllowed500to549':'yardsAllowed550plus';
-  add('Yards allowed bracket',1,r[key]);
+  const range={yardsAllowedUnder100:'0–99',yardsAllowed100to199:'100–199',yardsAllowed200to299:'200–299',yardsAllowed300to349:'300–349',yardsAllowed350to399:'350–399',yardsAllowed400to449:'400–449',yardsAllowed450to499:'450–499',yardsAllowed500to549:'500–549',yardsAllowed550plus:'550+'}[key];
+  const rate=Number(r[key]);
+  if(Number.isFinite(rate)){points+=rate;breakdown.push({label:`Yards allowed: ${ya} (range ${range})`,quantity:1,rate,points:rate,bracket:true});}
  }else missing.push('Yards allowed');
  // Missing categories above remain explicitly unresolved, not scored as zero.
  // Box-score-first D/ST does not claim play-by-play verification.
