@@ -1,3 +1,4 @@
+const defenseStore=require('./defense-store');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -547,6 +548,7 @@ async function init(){await pool.query(`CREATE TABLE IF NOT EXISTS fantasy_audib
   await pool.query(`CREATE TABLE IF NOT EXISTS fantasy_audible_push (
     endpoint TEXT PRIMARY KEY, manager TEXT NOT NULL, subscription JSONB NOT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW())`);
+  await defenseStore.init(pool);
   await initializeESPN();}
 async function snapshot(){const r=await pool.query('SELECT state,accounts FROM fantasy_audible_store WHERE id=1');
   if(!r.rows.length)throw Error('Database not initialized');return r.rows[0];}
@@ -1237,7 +1239,8 @@ async function faWeeklyESPN(season,week){
       const stats=isDefense?null:item.stats.get(id);
       const defense=isDefense?liveNFL.defenseStats(item.summary,game,item.events).get(teamId):null;
       if(!stats&&!defense)return send(res,200,{...result,status:'no-stats',notice:'ESPN has not reported statistics for this game'});
-      const scored=authoritativeGameScore(item.summary,{...athlete,pos:athlete.position,espnId:id},settingsOf(current.state).scoring,game);
+      if(isDefense)await defenseStore.ingest(pool,season,game,item.summary);
+      const scored=isDefense?(await defenseStore.get(pool,season,game,teamId,settingsOf(current.state).scoring))||authoritativeGameScore(item.summary,{...athlete,pos:athlete.position,espnId:id},settingsOf(current.state).scoring,game):authoritativeGameScore(item.summary,{...athlete,pos:athlete.position,espnId:id},settingsOf(current.state).scoring,game);
       const groups=[];
       const categories=isDefense?{defense:{...defense.stats,pointsAllowed:defense.pointsAllowed,yardsAllowed:defense.yardsAllowed}}:{passing:stats.passing,rushing:stats.rushing,receiving:stats.receiving,kicking:stats.kicking,miscellaneous:stats.misc};
       for(const [name,values] of Object.entries(categories)){
@@ -1290,7 +1293,8 @@ async function faWeeklyESPN(season,week){
           const events=liveNFL.playEvents(summary);
           const defense=isDefense?liveNFL.defenseStats(summary,game,events).get(String(team)):null;
           if(isDefense&&!defense)return {week:game.week,gameId:game.id,status:'NO_STATS',opponent:opponent?.abbreviation||null};
-          const result=authoritativeGameScore(summary,{...player,pos:player.position,espnId:id},settingsOf(current.state).scoring,game);
+          if(isDefense)await defenseStore.ingest(pool,season,game,summary);
+          const result=isDefense?(await defenseStore.get(pool,season,game,team,settingsOf(current.state).scoring))||authoritativeGameScore(summary,{...player,pos:player.position,espnId:id},settingsOf(current.state).scoring,game):authoritativeGameScore(summary,{...player,pos:player.position,espnId:id},settingsOf(current.state).scoring,game);
           return {week:game.week,gameId:game.id,status:'final',opponent:game.teams.find(t=>String(t.id)!==String(team))?.abbreviation||null,
             points:result.points,breakdown:result.breakdown,statDetails:isDefense?result.statDetails:undefined,unsupported:result.unsupported,provisional:true};
         }catch(e){return {week:game.week,gameId:game.id,status:'UNAVAILABLE',error:'Game statistics unavailable'};}
@@ -1655,6 +1659,17 @@ async function syncNFLScoring(){
         summaries.set(g.id,{summary,players:liveNFL.playerStats(summary),events:liveNFL.playEvents(summary)});}
       catch(e){failures.push(g.id+': '+e.message);}
     }));
+    for(const [gameId,box] of summaries){
+      const game=games.find(g=>String(g.id)===String(gameId));
+      if(game)await defenseStore.ingest(pool,season,game,box.summary);
+    }
+    const defenseScores=new Map();
+    for(const game of games){
+      for(const team of game.teams){
+        const saved=await defenseStore.get(pool,season,game,team.id,settingsOf(state).scoring);
+        if(saved)defenseScores.set(`${game.id}:${team.id}`,saved);
+      }
+    }
     await change((s,accounts)=>{
       // Player-directory history is updated by its own NFL-calendar sync below.
       // Never overwrite it with the fantasy league's draft/matchup week.
@@ -1668,9 +1683,10 @@ async function syncNFLScoring(){
         player.status=game.status;
         if(game.status==='upcoming')continue;
         const box=summaries.get(game.id);if(!box)continue;
-        const calculated=authoritativeGameScore(box.summary,player,settingsOf(s).scoring,game);
+        const calculated=player.pos==='D/ST'?(defenseScores.get(`${game.id}:${liveNFL.teamId(player)}`)||null):authoritativeGameScore(box.summary,player,settingsOf(s).scoring,game);
+        if(!calculated)continue;
         // Never replace a known score with a zero from an empty or incomplete feed.
-        if(!eventLedger.ledger(box.summary).length){player.liveScoreStatus='PLAY_FEED_UNAVAILABLE';continue;}
+        if(player.pos!=='D/ST'&&!eventLedger.ledger(box.summary).length){player.liveScoreStatus='PLAY_FEED_UNAVAILABLE';continue;}
         // Credit verified field-goal makes at the minimum configured rate; mark unknown distances partial.
         // Do not overwrite an in-progress injury handcuff's credited points.
         if(player.scoringMode){player.liveScoreStatus='INJURY_SUBSTITUTION_REQUIRES_EVENT_SCORING';continue;}

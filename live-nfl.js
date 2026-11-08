@@ -270,7 +270,6 @@ function officialTeamStats(team){
    if(present.every(x=>x!==null)){stats[key]=present.reduce((a,b)=>a+b,0);continue;}
   }
   for(const alias of aliases){
-   if(components&&components.includes(alias))continue;
    const n=numericStat(raw,alias);
    if(n!==null){stats[key]=n;break;}
   }
@@ -317,27 +316,9 @@ function lostFumblesByTeam(summary){
  }
  return result;
 }
-// ESPN play-by-play fallback for explicitly credited forced fumbles only.
-// Do not infer forced fumbles from generic fumbles or recoveries.
-function forcedFumblesFromPlays(summary,game){
- const counts=new Map();
- const known=new Set((game.teams||[]).map(t=>String(t.id)));
- for(const play of rawPlays(summary)){
-  const desc=String(play.text||play.shortText||'');
-  const credited=/\bforced\s+by\s+[A-Za-z]|\bFUMBLES?\s*\(\s*\d+[-–][A-Za-z]/i.test(desc);
-  if(!credited)continue;
-  const offense=String(play.team?.id||play.teamId||'');
-  if(!known.has(offense))continue;
-  const defense=(game.teams||[]).find(t=>String(t.id)!==offense);
-  if(!defense)continue;
-  const id=String(defense.id);
-  counts.set(id,(counts.get(id)||0)+1);
- }
- return counts;
-}
 function defenseStats(summary,game,events=[]){
  const teams=summary.boxscore?.teams||[];
- const output=new Map(),players=defensivePlayerTotals(summary),lost=lostFumblesByTeam(summary),forcedByPlay=forcedFumblesFromPlays(summary,game);
+ const output=new Map(),players=defensivePlayerTotals(summary),lost=lostFumblesByTeam(summary);
  for(const team of teams){
   const id=String(team.team?.id||'');if(!id)continue;
   const stats=officialTeamStats(team);
@@ -346,7 +327,6 @@ function defenseStats(summary,game,events=[]){
   for(const [key,value] of Object.entries(players.get(id)||{})){
    if(!Object.hasOwn(stats,key))stats[key]=value;
   }
-  if(!Object.hasOwn(stats,'forcedFumble')&&forcedByPlay.has(id))stats.forcedFumble=forcedByPlay.get(id);
   const opponent=game.teams.find(t=>String(t.id)!==id);
   // An opponent's officially recorded LOST fumble is a turnover credited to
   // this D/ST. Never use this team's generic REC (own recoveries included).
