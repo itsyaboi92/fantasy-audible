@@ -1266,8 +1266,8 @@ async function faWeeklyESPN(season,week){
     const id=String(url.searchParams.get('id')||'');
     if(!id||id.length>80)return send(res,400,{error:'Invalid player ID'});
     try{
-      const pool=await draftPool();
-      const player=pool.players.find(x=>String(x.id)===id);
+      const directory=await draftPool();
+      const player=directory.players.find(x=>String(x.id)===id);
       if(!player)return send(res,404,{error:'Player not found in ESPN directory'});
       const season=Number(current.state.nflDirectorySync?.season||process.env.NFL_SEASON||new Date().getUTCFullYear());
       const currentWeek=Math.min(18,Math.max(1,Number(current.state.nflDirectorySync?.currentWeek||1)));
