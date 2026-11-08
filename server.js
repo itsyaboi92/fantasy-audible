@@ -940,6 +940,55 @@ async function api(req,res,route){
     return send(res,result.status||200,result);}
   const current=await snapshot(),user=findUser(req,current.accounts);
   if(!user)return send(res,401,{error:'Please sign in'});
+  // Commissioner-only, read-only Week 9 reconciliation diagnostic.
+  // No tokens, email addresses, passwords or other managers' rosters are returned.
+  if(req.method==='GET'&&route==='/api/diagnostics/kyren-week9'){
+    if(!user.commissioner)return send(res,403,{error:'Commissioner only'});
+    const state=current.state,week=9;
+    const candidates=(state.players||[]).filter(p=>/kyren\s+williams/i.test(String(p.name||'')));
+    const ledger=state.weeklyLedger?.[week];
+    const matches=Object.values(ledger?.matchups||{});
+    const records=[];
+    for(const match of matches){
+      for(const side of ['homeLineup','awayLineup']){
+        for(const entry of match[side]||[]){
+          if(!/kyren\s+williams/i.test(String(entry.name||''))&&
+             !candidates.some(p=>String(p.id)===String(entry.id)))continue;
+          const player=candidates.find(p=>String(p.id)===String(entry.id));
+          records.push({matchId:String(match.id||''),matchStatus:match.status||null,
+            side,entry:{id:String(entry.id||''),espnId:String(entry.espnId||''),
+              nflTeamId:String(entry.nflTeamId||''),position:entry.pos||null,
+              points:entry.points??null,scoringMode:entry.scoringMode||null,
+              liveScoreStatus:entry.liveScoreStatus||null,reconciledAt:entry.reconciledAt||null},
+            checks:{currentPlayerExists:!!player,
+              currentOwnershipMatches:!!player&&String(player.owner)===String(match[side==='homeLineup'?'home':'away']),
+              currentPlayerScoringMode:player?.scoringMode||null,
+              athleteId:String(entry.espnId||player?.espnId||''),
+              teamId:String(entry.nflTeamId||(player?liveNFL.teamId(player):'')||'')}});
+        }
+      }
+    }
+    let game=null,scoring=null;
+    try{
+      const season=Number(state.scheduleSeason||process.env.NFL_SEASON||new Date().getUTCFullYear());
+      const games=await liveNFL.loadWeek(season,week);
+      const g=games.find(x=>x.teams.some(t=>String(t.id)==='14'));
+      if(g){
+        game={id:String(g.id),status:g.status,teamIds:g.teams.map(t=>String(t.id))};
+        const summary=await liveNFL.fetchGame(g.id);
+        const p=candidates[0];
+        if(p){const result=authoritativeGameScore(summary,{id:p.id,espnId:p.espnId,name:p.name,nflTeamId:'14',pos:'RB'},settingsOf(state).scoring,g);
+          scoring={points:result.points,complete:result.complete,
+            source:result.source,discrepancies:result.discrepancies||[],
+            unsupported:result.unsupported||[],playCount:eventLedger.ledger(summary).length};}
+      }
+    }catch(e){scoring={error:String(e.message||e).slice(0,200)};}
+    return send(res,200,{diagnostic:'kyren-week9-readonly-v1',season:state.scheduleSeason||null,
+      week,ledgerPresent:!!ledger,matchCount:matches.length,
+      candidates:candidates.map(p=>({id:String(p.id),espnId:String(p.espnId||''),
+        pos:p.pos,scoringMode:p.scoringMode||null,points:p.points??null})),
+      records,game,scoring});
+  }
   if(req.method==='GET'&&route==='/api/push/config')
     return send(res,200,{enabled:PUSH_READY,publicKey:PUSH_READY?PUSH_PUBLIC_KEY:null});
   if(req.method==='POST'&&route==='/api/push/subscribe'){
