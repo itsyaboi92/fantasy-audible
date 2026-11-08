@@ -1333,6 +1333,32 @@ async function faWeeklyESPN(season,week){
       }));
       const games=boards.flatMap(x=>x.games.map(g=>({...g,week:x.week})))
         .filter(g=>g.status==='final'&&g.teams.some(t=>String(t.id)===String(team)));
+      // D/ST history is a read-only view of already persisted, verified game data.
+      // Never fetch every box score or mutate defensive stats during a profile request.
+      // The background scoring sync owns ingestion and reconciliation.
+      if(player.position==='D/ST'){
+        const weeks=await Promise.all(games.map(async game=>{
+          const opponent=game.teams.find(t=>String(t.id)!==String(team));
+          try{
+            const result=await defenseStore.get(pool,season,game,team,settingsOf(current.state).scoring);
+            if(!result)return {week:game.week,gameId:game.id,status:'UNAVAILABLE',opponent:opponent?.abbreviation||null,error:'Verified defensive statistics not yet synchronized'};
+            return {week:game.week,gameId:game.id,status:'final',opponent:opponent?.abbreviation||null,
+              points:result.points,breakdown:result.breakdown,statDetails:result.statDetails,
+              unsupported:result.unsupported,provisional:!result.complete};
+          }catch(e){console.warn('Read-only D/ST history:',game.id,e.message);
+            return {week:game.week,gameId:game.id,status:'UNAVAILABLE',opponent:opponent?.abbreviation||null,error:'Stored defensive statistics unavailable'};}
+        }));
+        weeks.sort((a,b)=>b.week-a.week);
+        const scored=weeks.filter(w=>w.status==='final');
+        const total=Math.round(scored.reduce((n,w)=>n+w.points,0)*100)/100;
+        const value={player:{id,name:player.name,position:player.position},season,weeks,total,
+          average:scored.length?Math.round(total/scored.length*100)/100:null,
+          gamesPlayed:scored.length,partial:boards.some(b=>b.error)||weeks.some(w=>w.status!=='final'),
+          notice:'D/ST history uses previously synchronized defensive statistics; unavailable weeks are not scored as zero.'};
+        if(playerHistoryCache.size>250)playerHistoryCache.clear();
+        playerHistoryCache.set(key,{at:Date.now(),value});
+        return send(res,200,value);
+      }
       const weeks=await Promise.all(games.map(async game=>{
         try{
           const summary=await liveNFL.fetchGame(game.id);
