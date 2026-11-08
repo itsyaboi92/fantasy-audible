@@ -821,7 +821,10 @@ function matchupPlayerCell(x){
   if(!x)return '<span class="muted">Open slot</span>';
   const playerId=String(x.id||'');
   const directoryPlayer=espn?.players?.find(p=>String(p.id)===String(x.espnId||playerId.replace(/^espn-/,'')));
-  const clickable=!!directoryPlayer||/^\d{1,12}$/.test(String(x.espnId||playerId.replace(/^espn-/,'')));
+  // D/ST represents an NFL team, and ESPN may assign negative/synthetic IDs.
+  // Keep the normal player fallback while allowing team entries with an ESPN ID.
+  const espnPlayerId=String(x.espnId||playerId.replace(/^espn-/,''));
+  const clickable=!!directoryPlayer||(x.position==='D/ST'&&!!espnPlayerId&&playerId.startsWith('espn-'))||/^\d{1,12}$/.test(espnPlayerId);
   const name=clickable?`<button class="fa-match-player-link" onclick='openMatchupGameStats(${jsAttr(String(x.espnId||playerId.replace(/^espn-/,'')))})'>${esc(x.name)}</button>`:`<b>${esc(x.name)}</b>`;
   const {game,loaded,verified}=nflPlayerGame(x);
   const injury=String(verified?.injuryStatus||directoryPlayer?.injuryStatus||x.injuryStatus||'').toUpperCase();
