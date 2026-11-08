@@ -148,7 +148,7 @@ const normalizedLabel=x=>String(x??'').toUpperCase().replace(/[^A-Z0-9]/g,'');
 const BOX_FIELDS={
  sacks:['SACK','SACKS','SK','TOTSK','TOTALSACKS'],
  interceptions:['INT','INTS','INTERCEPTIONS'],
- forcedFumble:['FF','FORCEDFUMBLES','FORCEDFUMBLE','FUMFORCED','FUMBLESFORCED','FFUM','FFUMBLES'],
+ forcedFumble:['FF','FORCEDFUMBLES','FORCEDFUMBLE','FUMFORCED'],
  fumbleRecovered:['FR','FUMREC','FUMRECS','FUMBLERECOVERIES','FUMBLERECOVERY','FUMRECOVERED'],
  safety:['SFTY','SFTYS','SAF','SAFETIES'],
  blockedKick:['BLK','BLOCKS','BLOCKEDKICKS','KICKSBLKD'],
@@ -164,7 +164,7 @@ const PUNT_GROUP=/punt.*return|puntreturn/i;
 const TEAM_STAT_NAMES={
  sacks:['defensivesacks','sacks'],
  interceptions:['defensiveinterceptions','interceptionsmade'],
- forcedFumble:['defensivefumblesforced','specialteamsfumblesforced','defensivemiscellaneousfumblesforced','fumblesforced','forcedfumbles'],
+ forcedFumble:['defensivefumblesforced','specialteamsfumblesforced','defensivemiscellaneousfumblesforced'],
  fumbleRecovered:['defensivefumblesrecovered','specialteamsfumblesrecovered','defensivemiscellaneousfumblesrecovered'],
  safety:['defensivesafeties','safeties'],
  blockedKick:['defensivespecialteamsblocks','blockedkicks','blockedpunts'],
@@ -176,7 +176,7 @@ const TEAM_STAT_NAMES={
  onePointSafety:['onepointsafeties']
 };
 const TEAM_COMPONENTS={
- forcedFumble:['defensivefumblesforced','specialteamsfumblesforced','defensivemiscellaneousfumblesforced','fumblesforced','forcedfumbles'],
+ forcedFumble:['defensivefumblesforced','specialteamsfumblesforced','defensivemiscellaneousfumblesforced'],
  fumbleRecovered:['defensivefumblesrecovered','specialteamsfumblesrecovered','defensivemiscellaneousfumblesrecovered']
 };
 function groupContext(group){
@@ -317,9 +317,27 @@ function lostFumblesByTeam(summary){
  }
  return result;
 }
+// ESPN play-by-play fallback for explicitly credited forced fumbles only.
+// Do not infer forced fumbles from generic fumbles or recoveries.
+function forcedFumblesFromPlays(summary,game){
+ const counts=new Map();
+ const known=new Set((game.teams||[]).map(t=>String(t.id)));
+ for(const play of rawPlays(summary)){
+  const desc=String(play.text||play.shortText||'');
+  const credited=/\bforced\s+by\s+[A-Za-z]|\bFUMBLES?\s*\(\s*\d+[-–][A-Za-z]/i.test(desc);
+  if(!credited)continue;
+  const offense=String(play.team?.id||play.teamId||'');
+  if(!known.has(offense))continue;
+  const defense=(game.teams||[]).find(t=>String(t.id)!==offense);
+  if(!defense)continue;
+  const id=String(defense.id);
+  counts.set(id,(counts.get(id)||0)+1);
+ }
+ return counts;
+}
 function defenseStats(summary,game,events=[]){
  const teams=summary.boxscore?.teams||[];
- const output=new Map(),players=defensivePlayerTotals(summary),lost=lostFumblesByTeam(summary);
+ const output=new Map(),players=defensivePlayerTotals(summary),lost=lostFumblesByTeam(summary),forcedByPlay=forcedFumblesFromPlays(summary,game);
  for(const team of teams){
   const id=String(team.team?.id||'');if(!id)continue;
   const stats=officialTeamStats(team);
@@ -328,6 +346,7 @@ function defenseStats(summary,game,events=[]){
   for(const [key,value] of Object.entries(players.get(id)||{})){
    if(!Object.hasOwn(stats,key))stats[key]=value;
   }
+  if(!Object.hasOwn(stats,'forcedFumble')&&forcedByPlay.has(id))stats.forcedFumble=forcedByPlay.get(id);
   const opponent=game.teams.find(t=>String(t.id)!==id);
   // An opponent's officially recorded LOST fumble is a turnover credited to
   // this D/ST. Never use this team's generic REC (own recoveries included).
