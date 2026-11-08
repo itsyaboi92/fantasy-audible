@@ -820,12 +820,21 @@ function matchupStarters(id){const starters=state.players.filter(x=>x.owner===id
 function matchupPlayerCell(x){
   if(!x)return '<span class="muted">Open slot</span>';
   const playerId=String(x.id||'');
-  const directoryPlayer=espn?.players?.find(p=>String(p.id)===String(x.espnId||playerId.replace(/^espn-/,'')));
-  // D/ST represents an NFL team, and ESPN may assign negative/synthetic IDs.
-  // Keep the normal player fallback while allowing team entries with an ESPN ID.
-  const espnPlayerId=String(x.espnId||playerId.replace(/^espn-/,''));
-  const clickable=!!directoryPlayer||(x.position==='D/ST'&&!!espnPlayerId&&playerId.startsWith('espn-'))||/^\d{1,12}$/.test(espnPlayerId);
-  const name=clickable?`<button class="fa-match-player-link" onclick='openMatchupGameStats(${jsAttr(String(x.espnId||playerId.replace(/^espn-/,'')))})'>${esc(x.name)}</button>`:`<b>${esc(x.name)}</b>`;
+  const rawEspnId=String(x.espnId||playerId.replace(/^espn-/,''));
+  const isDefense=String(x.position||x.pos||'').toUpperCase()==='D/ST'||/\bD\/ST\b/i.test(String(x.name||''));
+  // Team defenses can be stored under roster IDs that are not ESPN athlete IDs.
+  // Resolve the canonical ESPN fantasy ID by team abbreviation or display name.
+  const directoryPlayer=espn?.players?.find(p=>String(p.id)===rawEspnId);
+  const defenseDirectoryPlayer=isDefense?espn?.players?.find(p=>{
+    if(String(p.position||p.pos||'').toUpperCase()!=='D/ST')return false;
+    const team=String(x.team||x.teamAbbr||'').toUpperCase();
+    const candidateTeam=String(p.team||p.teamAbbr||'').toUpperCase();
+    return (team&&candidateTeam&&team===candidateTeam)||
+      String(p.name||'').toLowerCase()===String(x.name||'').toLowerCase();
+  }):null;
+  const resolvedEspnId=String(defenseDirectoryPlayer?.id||directoryPlayer?.id||rawEspnId);
+  const clickable=!!resolvedEspnId&&(!!defenseDirectoryPlayer||!!directoryPlayer||isDefense||/^\d{1,12}$/.test(resolvedEspnId));
+  const name=clickable?`<button class="fa-match-player-link" onclick='openMatchupGameStats(${jsAttr(resolvedEspnId)})'>${esc(x.name)}</button>`:`<b>${esc(x.name)}</b>`;
   const {game,loaded,verified}=nflPlayerGame(x);
   const injury=String(verified?.injuryStatus||directoryPlayer?.injuryStatus||x.injuryStatus||'').toUpperCase();
   const designation=({QUESTIONABLE:'Q',DOUBTFUL:'D',OUT:'O',INJURED_RESERVE:'IR',IR:'IR',PROBABLE:'P'})[injury]||'';
