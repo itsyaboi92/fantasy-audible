@@ -944,12 +944,20 @@ function faNormalCdf(x){
   const cdf=1-density*(.319381530*t-.356563782*t*t+1.781477937*t**3-1.821255978*t**4+1.330274429*t**5);
   return x>=0?cdf:1-cdf;
 }
-function faMatchForecastView(leftPlayers,rightPlayers,week,recorded){
+function faMatchForecastView(leftPlayers,rightPlayers,week,recorded,ledgerHome,ledgerAway){
   if(recorded?.status==='final'){
     const a=Number(recorded.homeScore)||0,b=Number(recorded.awayScore)||0;
     return `<div class="fa-forecast"><div class="fa-forecast-label">Final · ${fmt(a)} – ${fmt(b)}</div></div>`;
   }
   const a=faForecastTeam(leftPlayers,week),b=faForecastTeam(rightPlayers,week);
+  // Matchup scoreboard is authoritative for earned points.
+  // Player feed totals estimate only remaining scoring opportunities.
+  const earnedA=Number(ledgerHome),earnedB=Number(ledgerAway);
+  if(!Number.isFinite(earnedA)||!Number.isFinite(earnedB))
+    return '<div class="fa-forecast muted small">Awaiting matchup scores.</div>';
+  const remainingA=Math.max(0,a.projected-a.actual);
+  const remainingB=Math.max(0,b.projected-b.actual);
+  const finalA=earnedA+remainingA,finalB=earnedB+remainingB;
   const unknown=a.missing+b.missing;
   const anyKnown=leftPlayers.concat(rightPlayers).some(p=>p&&faForecastPlayer(p,week).known);
   if(!anyKnown)return `<div class="fa-forecast muted small">Projected final scores loading or unavailable.</div>`;
@@ -958,15 +966,15 @@ function faMatchForecastView(leftPlayers,rightPlayers,week,recorded){
   const variance=a.variance+b.variance;
   // Actual scores are locked in as games begin; only future points remain uncertain.
   const live=a.live+b.live>0;
-  const actualLead=a.actual-b.actual;
-  const remainingLead=(a.projected-a.actual)-(b.projected-b.actual);
-  const modeledLead=live?actualLead+remainingLead:a.projected-b.projected;
+  const actualLead=earnedA-earnedB;
+  const remainingLead=remainingA-remainingB;
+  const modeledLead=actualLead+remainingLead;
   const chance=variance>0?faNormalCdf(modeledLead/Math.sqrt(variance)):
     (unknown?0.5:modeledLead>0?1:modeledLead<0?0:0.5);
   const percent=unknown?50:(variance===0?100*chance:Math.max(2,Math.min(98,100*chance)));
   return `<div class="fa-forecast" aria-label="Estimated matchup favorability">
-    ${live?`<div class="fa-forecast-label" style="font-weight:700;margin-bottom:8px"><span>Live earned ${fmt(a.actual)}</span><span>${fmt(b.actual)} earned</span></div>`:''}
-    <div class="fa-forecast-label"><span>${unknown?'Known projected points':'Projected final'} <b>${fmt(a.projected)}</b></span><span><b>${fmt(b.projected)}</b> ${unknown?'Known projected points':'Projected final'}</span></div>
+    ${live?`<div class="fa-forecast-label" style="font-weight:700;margin-bottom:8px"><span>Live earned ${fmt(earnedA)}</span><span>${fmt(earnedB)} earned</span></div>`:''}
+    <div class="fa-forecast-label"><span>${unknown?'Known projected points':'Projected final'} <b>${fmt(finalA)}</b></span><span><b>${fmt(finalB)}</b> ${unknown?'Known projected points':'Projected final'}</span></div>
     <div class="fa-favor-track" style="${unknown?'background:#57677f':''}">${unknown?'':`<div class="fa-favor-left" style="width:${percent.toFixed(2)}%"></div>
       <div class="fa-favor-needle" style="left:${percent.toFixed(2)}%"></div>`}</div>
     <div class="fa-forecast-label"><span>${unknown?'—':Math.round(percent)+'%'} favored</span><span>${unknown?'—':Math.round(100-percent)+'%'} favored</span></div>
@@ -1002,7 +1010,7 @@ function matchupView(){
   // future matchup. A future forecast requires that week's own verified data.
   const forecast=week>current
     ?'<div class="fa-forecast muted small">Future-week projections will appear when that week’s ESPN statistical projections are available.</div>'
-    :faMatchForecastView(leftPlayers,rightPlayers,week,recorded);
+    :faMatchForecastView(leftPlayers,rightPlayers,week,recorded,Number(total(game.home,'home')),Number(total(game.away,'away')));
   return `<style>
   .fa-forecast{padding:12px 8px 18px;margin:0 0 14px;border-top:1px solid #384357}
   .fa-forecast-label{display:flex;justify-content:space-between;gap:12px;font-size:13px;font-variant-numeric:tabular-nums}
