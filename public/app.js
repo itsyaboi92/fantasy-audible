@@ -898,6 +898,7 @@ function faForecastPlayer(p,week){
   const teamId=/^\d+$/.test(team)?team:NFL_TEAM_IDS[team];
   const game=nflMatchupCache[key]?.data?.teams?.[teamId];
   const feed=weeklyDirectory[id];
+  const liveGame=game?.status==='playing'||game?.status==='live';
   const raw=meta?.weeklyProjectedPoints;
   const baseline=raw!==null&&raw!==undefined&&Number.isFinite(Number(raw))?Math.max(0,Number(raw)):null;
   const progress=faProjectionProgress(game);
@@ -910,14 +911,14 @@ function faForecastPlayer(p,week){
   const onBye=Boolean(hasVerifiedSchedule&&teamId&&!game);
 
   const feedPoints=feed?.points==null?null:Number(feed.points);
-  const actual=Number.isFinite(feedPoints)&&feed?.gameStatus!=='upcoming'?feedPoints:Math.max(0,Number(p.points)||0);
+  const actual=Number.isFinite(feedPoints)&&feed?.gameStatus!=='upcoming'&&Number(state?.nflDirectorySync?.currentWeek||state?.week)===week?feedPoints:Math.max(0,Number(p.points)||0);
   // The fantasy substitution ledger can credit fewer points than the NFL feed.
   const credited=Number.isFinite(Number(p.credited))&&p.scoringMode?Math.max(0,Number(p.credited)):actual;
-  if(progress===1||feed?.gameStatus==='final')return {actual:credited,projected:credited,variance:0,known:true};
+  if(progress===1||feed?.gameStatus==='final')return {actual:credited,projected:credited,variance:0,known:true,live:liveGame};
   // OUT/BYE are deterministic zeros for FUTURE scoring. Already earned points
   // remain credited even if a player is ruled out during a live game.
-  if(explicitlyOut||onBye)return {actual:credited,projected:credited,variance:0,known:true};
-  if(baseline===null||progress===null)return {actual:credited,projected:null,variance:null,known:false};
+  if(explicitlyOut||onBye)return {actual:credited,projected:credited,variance:0,known:true,live:liveGame};
+  if(baseline===null||progress===null)return {actual:credited,projected:null,variance:null,known:false,live:liveGame};
   const noFurtherPoints=false;
   const remaining=noFurtherPoints?0:baseline*(1-progress);
   // Higher early-game uncertainty; decreases as scoring opportunities expire.
@@ -927,14 +928,14 @@ function faForecastPlayer(p,week){
   // player-level outcomes exist to fit and backtest distributions.
   const calibrated=faPlayerSigma(meta,baseline);
   const sigma=noFurtherPoints?0:calibrated.sigma*Math.sqrt(Math.max(0,1-progress));
-  return {actual:credited,projected:credited+remaining,variance:sigma*sigma,known:true};
+  return {actual:credited,projected:credited+remaining,variance:sigma*sigma,known:true,live:liveGame};
 }
 function faForecastTeam(players,week){
-  let actual=0,projected=0,variance=0,missing=0;
+  let actual=0,projected=0,variance=0,missing=0,live=0;
   for(const p of players){if(!p)continue;const x=faForecastPlayer(p,week);
-    actual+=x.actual;
+    actual+=x.actual;if(x.live)live++;
     if(x.known){projected+=x.projected;variance+=x.variance;}else{projected+=x.actual;missing++;}}
-  return {actual,projected,variance,missing};
+  return {actual,projected,variance,missing,live};
 }
 function faNormalCdf(x){
   // Abramowitz-Stegun approximation to the standard normal CDF.
@@ -955,14 +956,21 @@ function faMatchForecastView(leftPlayers,rightPlayers,week,recorded){
   // Without historical player-specific variance, this is a favorability indicator,
   // not a statistically calibrated probability. Missing projections prohibit odds.
   const variance=a.variance+b.variance;
-  const chance=variance>0?faNormalCdf((a.projected-b.projected)/Math.sqrt(variance)):0.5;
-  const percent=unknown?50:Math.max(2,Math.min(98,100*chance));
+  // Actual scores are locked in as games begin; only future points remain uncertain.
+  const live=a.live+b.live>0;
+  const actualLead=a.actual-b.actual;
+  const remainingLead=(a.projected-a.actual)-(b.projected-b.actual);
+  const modeledLead=live?actualLead+remainingLead:a.projected-b.projected;
+  const chance=variance>0?faNormalCdf(modeledLead/Math.sqrt(variance)):
+    (unknown?0.5:modeledLead>0?1:modeledLead<0?0:0.5);
+  const percent=unknown?50:(variance===0?100*chance:Math.max(2,Math.min(98,100*chance)));
   return `<div class="fa-forecast" aria-label="Estimated matchup favorability">
+    ${live?`<div class="fa-forecast-label" style="font-weight:700;margin-bottom:8px"><span>Live earned ${fmt(a.actual)}</span><span>${fmt(b.actual)} earned</span></div>`:''}
     <div class="fa-forecast-label"><span>${unknown?'Known projected points':'Projected final'} <b>${fmt(a.projected)}</b></span><span><b>${fmt(b.projected)}</b> ${unknown?'Known projected points':'Projected final'}</span></div>
     <div class="fa-favor-track" style="${unknown?'background:#57677f':''}">${unknown?'':`<div class="fa-favor-left" style="width:${percent.toFixed(2)}%"></div>
       <div class="fa-favor-needle" style="left:${percent.toFixed(2)}%"></div>`}</div>
     <div class="fa-forecast-label"><span>${unknown?'—':Math.round(percent)+'%'} favored</span><span>${unknown?'—':Math.round(100-percent)+'%'} favored</span></div>
-    <div class="muted small" style="text-align:center;margin-top:8px">${unknown?'Favorability unavailable · '+unknown+' missing ESPN stat projection'+(unknown===1?'':'s'):'Modeled win chance · historical variance where available · not yet backtested'}</div>
+    <div class="muted small" style="text-align:center;margin-top:8px">${unknown?'Favorability unavailable · '+unknown+' missing ESPN stat projection'+(unknown===1?'':'s'):(live?'Live: earned points + projected remaining · ':'Pregame: projected final · ')+'modeled probability, not yet backtested'}</div>
   </div>`;
 }
 function matchupView(){
