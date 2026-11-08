@@ -1,0 +1,20 @@
+
+name: Probe independent D/ST sources
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Probe sources
+        run: node probe-dst-sources.js > dst-source-probe.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dst-source-probe
+          path: dst-source-probe.txt
