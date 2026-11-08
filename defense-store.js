@@ -59,7 +59,8 @@ async function get(pool,season,game,teamId,rules){
   if(row.stat==='pointsAllowed')pointsAllowed=value;
   else if(row.stat==='yardsAllowed')yardsAllowed=value;
   else stats[row.stat]=value;
-  details[row.stat]={value,source:row.source,verified:row.verified,final:row.game_final};
+  const displayKey=({sacks:'sack',interceptions:'interception'})[row.stat]||row.stat;
+  details[displayKey]={value,source:row.source,verified:row.verified,final:row.game_final};
  }
  const scored=scoreDefense({stats,pointsAllowed,yardsAllowed,opponentFound:pointsAllowed!==null},rules);
  return {...scored,statDetails:details,counts:stats,pointsAllowed,yardsAllowed,complete:game.status==='final'&&!scored.unsupported.length,source:'persisted-defense-stats'};
