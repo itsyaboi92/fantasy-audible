@@ -233,7 +233,16 @@ function defensivePlayerTotals(summary){
   for(const [key,items] of Object.entries(candidates)){
    // Never add duplicate group totals. An independently reported defensive
    // group takes precedence over the generic fumbles group for FF/FR.
-   if(items.every(x=>x.sum===items[0].sum))stats[key]=items[0].sum;
+   if(items.every(x=>x.sum===items[0].sum)){
+    stats[key]=items[0].sum;
+   }else{
+    // ESPN may repeat FF in both defensive and generic fumble sections.
+    // A complete defensive-group column is the authoritative attribution;
+    // conflicting non-defensive columns are not safe to add together.
+    const defense=items.filter(x=>x.context==='defense');
+    if(defense.length&&defense.every(x=>x.sum===defense[0].sum))
+     stats[key]=defense[0].sum;
+   }
   }
   out.set(id,stats);
  }
