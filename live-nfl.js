@@ -148,7 +148,7 @@ const normalizedLabel=x=>String(x??'').toUpperCase().replace(/[^A-Z0-9]/g,'');
 const BOX_FIELDS={
  sacks:['SACK','SACKS','SK','TOTSK','TOTALSACKS'],
  interceptions:['INT','INTS','INTERCEPTIONS'],
- forcedFumble:['FF','FORCEDFUMBLES','FORCEDFUMBLE','FUMFORCED'],
+ forcedFumble:['FF','FORCEDFUMBLES','FORCEDFUMBLE','FUMFORCED','FUMBLESFORCED','FFUM','FFUMBLES'],
  fumbleRecovered:['FR','FUMREC','FUMRECS','FUMBLERECOVERIES','FUMBLERECOVERY','FUMRECOVERED'],
  safety:['SFTY','SFTYS','SAF','SAFETIES'],
  blockedKick:['BLK','BLOCKS','BLOCKEDKICKS','KICKSBLKD'],
@@ -164,7 +164,7 @@ const PUNT_GROUP=/punt.*return|puntreturn/i;
 const TEAM_STAT_NAMES={
  sacks:['defensivesacks','sacks'],
  interceptions:['defensiveinterceptions','interceptionsmade'],
- forcedFumble:['defensivefumblesforced','specialteamsfumblesforced','defensivemiscellaneousfumblesforced'],
+ forcedFumble:['defensivefumblesforced','specialteamsfumblesforced','defensivemiscellaneousfumblesforced','fumblesforced','forcedfumbles'],
  fumbleRecovered:['defensivefumblesrecovered','specialteamsfumblesrecovered','defensivemiscellaneousfumblesrecovered'],
  safety:['defensivesafeties','safeties'],
  blockedKick:['defensivespecialteamsblocks','blockedkicks','blockedpunts'],
@@ -176,7 +176,7 @@ const TEAM_STAT_NAMES={
  onePointSafety:['onepointsafeties']
 };
 const TEAM_COMPONENTS={
- forcedFumble:['defensivefumblesforced','specialteamsfumblesforced','defensivemiscellaneousfumblesforced'],
+ forcedFumble:['defensivefumblesforced','specialteamsfumblesforced','defensivemiscellaneousfumblesforced','fumblesforced','forcedfumbles'],
  fumbleRecovered:['defensivefumblesrecovered','specialteamsfumblesrecovered','defensivemiscellaneousfumblesrecovered']
 };
 function groupContext(group){
@@ -270,6 +270,7 @@ function officialTeamStats(team){
    if(present.every(x=>x!==null)){stats[key]=present.reduce((a,b)=>a+b,0);continue;}
   }
   for(const alias of aliases){
+   if(components&&components.includes(alias))continue;
    const n=numericStat(raw,alias);
    if(n!==null){stats[key]=n;break;}
   }
