@@ -66,8 +66,10 @@ async function ingestFantasyForcedFumble(pool,season,game,teamId,value,explicit)
  (season,game_id,team_id,stat,value,source,verified,game_final)
  VALUES($1,$2,$3,$4,$5,$6,$7,$8)
  ON CONFLICT(season,game_id,team_id,stat) DO UPDATE SET
- value=EXCLUDED.value,source=EXCLUDED.source,verified=EXCLUDED.verified,
- game_final=EXCLUDED.game_final,observed_at=NOW()`,
+ value=CASE WHEN NOT EXCLUDED.verified AND fantasy_audible_defense_stats.verified THEN fantasy_audible_defense_stats.value ELSE EXCLUDED.value END,
+ source=CASE WHEN NOT EXCLUDED.verified AND fantasy_audible_defense_stats.verified THEN fantasy_audible_defense_stats.source ELSE EXCLUDED.source END,
+ verified=(fantasy_audible_defense_stats.verified OR EXCLUDED.verified),
+ game_final=(fantasy_audible_defense_stats.game_final OR EXCLUDED.game_final),observed_at=NOW()`,
  [...params,explicit?'ESPN Fantasy weekly actual':'ESPN Fantasy weekly actual (omitted zero inferred)',explicit,game.status==='final']);
 }
 async function get(pool,season,game,teamId,rules){
