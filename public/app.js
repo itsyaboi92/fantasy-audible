@@ -810,8 +810,8 @@ function nflPlayerGame(x){
   const id=/^\d+$/.test(team)?team:NFL_TEAM_IDS[team];
   return {game:board?.teams?.[id]||null,loaded:!!board,verified};
 }
-function selectedMatchupWeek(){return Math.min(14,Math.max(1,matchupWeek??Number(state.scheduleStartWeek||state.nflDirectorySync?.currentWeek||state.week||1)));}
-function setMatchupWeek(week){closeMatchupGameStats();matchupWeek=Math.min(14,Math.max(1,Number(week)||1));matchupIndex=0;render();fetchNFLMatchups(matchupWeek);}
+function selectedMatchupWeek(){return Math.min(18,Math.max(1,matchupWeek??Number(state.scheduleStartWeek||state.nflDirectorySync?.currentWeek||state.week||1)));}
+function setMatchupWeek(week){closeMatchupGameStats();matchupWeek=Math.min(18,Math.max(1,Number(week)||1));matchupIndex=0;render();fetchNFLMatchups(matchupWeek);}
 function selectMatchup(index){const games=state.matchupSchedule?.[selectedMatchupWeek()]||[];if(!games.length)return;matchupIndex=(index+games.length)%games.length;render();}
 function matchupSwipeStart(e){matchupTouchX=e.touches?.[0]?.clientX??null;}
 function matchupSwipeEnd(e){if(matchupTouchX===null)return;const diff=(e.changedTouches?.[0]?.clientX??matchupTouchX)-matchupTouchX;matchupTouchX=null;if(Math.abs(diff)>55)selectMatchup(matchupIndex+(diff<0?1:-1));}
@@ -968,8 +968,8 @@ function faMatchForecastView(leftPlayers,rightPlayers,week,recorded){
 function matchupView(){
   const week=selectedMatchupWeek(),games=state.matchupSchedule?.[week]||[];
   if(!games.length){const count=state.managers.filter(x=>x.claimed).length;
-    const reason=count<2?'At least two registered teams are required.':state.draft?.status!=='completed'?'Matchups will be generated automatically when the draft finishes.':state.matchupScheduleNotice||(!state.scheduleStartWeek?'Draft completed. Automatic schedule activation pending; checking ESPN NFL kickoff calendar.':week<state.scheduleStartWeek?'Your league begins in NFL Week '+state.scheduleStartWeek+'.':'No matchup scheduled for this week.');
-    return `<h1>Week ${week} Matchups</h1><div class="fa-week" style="display:flex;justify-content:center;align-items:center;gap:12px;margin:18px auto 22px;width:100%;"><button onclick="setMatchupWeek(${week-1})" ${week===1?'disabled':''}>‹</button><label>NFL Week <select onchange="setMatchupWeek(this.value)">${Array.from({length:14},(_,i)=>`<option value="${i+1}" ${week===i+1?'selected':''}>${i+1}</option>`).join('')}</select></label><button onclick="setMatchupWeek(${week+1})" ${week===14?'disabled':''}>›</button></div>${card('League matchups',esc(reason))}`;
+    const reason=count<2?'At least two registered teams are required.':state.draft?.status!=='completed'?'Matchups will be generated automatically when the draft finishes.':state.matchupScheduleNotice||(!state.scheduleStartWeek?'Draft completed. Automatic schedule activation pending; checking ESPN NFL kickoff calendar.':week<state.scheduleStartWeek?'Your league begins in NFL Week '+state.scheduleStartWeek+'.':week>=(state.postseason?.regularSeasonEnd||((state.managers||[]).filter(m=>m.claimed).length<=8?14:13))?'Awaiting verified final scoring and official postseason bracket activation or previous-round advancement.':'No matchup scheduled for this week.');
+    return `<h1>Week ${week} Matchups</h1><div class="fa-week" style="display:flex;justify-content:center;align-items:center;gap:12px;margin:18px auto 22px;width:100%;"><button onclick="setMatchupWeek(${week-1})" ${week===1?'disabled':''}>‹</button><label>NFL Week <select onchange="setMatchupWeek(this.value)">${Array.from({length:18},(_,i)=>`<option value="${i+1}" ${week===i+1?'selected':''}>${i+1}</option>`).join('')}</select></label><button onclick="setMatchupWeek(${week+1})" ${week===18?'disabled':''}>›</button></div>${card('League matchups',esc(reason))}`;
   }
   if(matchupIndex>=games.length)matchupIndex=0;
   if(matchupWeek===null){matchupWeek=week;const mine=games.findIndex(g=>g.home===manager||g.away===manager);if(mine>=0)matchupIndex=mine;}
@@ -1014,7 +1014,7 @@ function matchupView(){
   .fa-match-meta{text-align:center;margin:4px 0 16px}.fa-match-nav{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:10px 0}
   @media(max-width:420px){.fa-head .fa-total{font-size:26px}.fa-player{font-size:12px}.fa-position{font-size:11px}}
   </style>
-  <h1>Week ${week} Matchups</h1><div class="fa-week"><button onclick="setMatchupWeek(${week-1})" ${week===1?'disabled':''}>‹</button><label>NFL Week <select onchange="setMatchupWeek(this.value)">${Array.from({length:14},(_,i)=>`<option value="${i+1}" ${week===i+1?'selected':''}>${i+1}</option>`).join('')}</select></label><button onclick="setMatchupWeek(${week+1})" ${week===14?'disabled':''}>›</button></div>
+  <h1>Week ${week} Matchups</h1><div class="fa-week"><button onclick="setMatchupWeek(${week-1})" ${week===1?'disabled':''}>‹</button><label>NFL Week <select onchange="setMatchupWeek(this.value)">${Array.from({length:18},(_,i)=>`<option value="${i+1}" ${week===i+1?'selected':''}>${i+1}</option>`).join('')}</select></label><button onclick="setMatchupWeek(${week+1})" ${week===18?'disabled':''}>›</button></div>
   <div class="fa-match-strip">${games.map((g,i)=>`<button class="fa-match-pill ${i===matchupIndex?'active':''}" onclick="selectMatchup(${i})">${teamPhoto(g.home,24)} ${esc(m(g.home)?.team||g.home)} vs ${teamPhoto(g.away,24)} ${esc(m(g.away)?.team||g.away)}</button>`).join('')}</div>
   <section class="card fa-match-surface" ontouchstart="matchupSwipeStart(event)" ontouchend="matchupSwipeEnd(event)">
     <div class="fa-match-nav"><button onclick="selectMatchup(${matchupIndex-1})">‹ Previous</button><span class="muted small">Matchup ${matchupIndex+1} of ${games.length}</span><button onclick="selectMatchup(${matchupIndex+1})">Next ›</button></div>
@@ -1218,6 +1218,19 @@ function postseasonData(){
  });return {rows,n,slots,end,status};
 }
 function postseasonView(){
+ if(state.postseason?.locked){
+  const p=state.postseason,team=id=>esc(m(id)?.team||id||'TBD');
+  const stage=week=>{
+   const fixtures=(state.matchupSchedule?.[week]||[]).filter(g=>g.kind&&g.kind!=='placement');
+   return '<div style="min-width:180px;flex:1;border:1px solid #394960;border-radius:12px;padding:12px"><b>Week '+week+'</b>'+(
+    fixtures.length?fixtures.map(g=>'<div style="border:1px solid #4a607b;border-radius:8px;padding:10px;margin:8px 0">'+team(g.home)+'<div class="muted small">vs</div>'+team(g.away)+' <span class="muted small">('+esc(g.kind)+')</span></div>').join(''):'<p class="muted">Awaiting previous round</p>')+'</div>';
+  };
+  return '<h1>Postseason · Official Bracket</h1><p>Seeds locked after Week '+p.regularSeasonEnd+'. Phase: <b>'+esc(p.phase)+'</b></p>'+
+   card('Official seeds',p.seeds.map((id,i)=>'<div class="row"><b>#'+(i+1)+' '+team(id)+'</b><span>'+(i<p.qualifiers?'Championship':'Consolation')+'</span></div>').join(''))+
+   card('Postseason schedule','<div style="display:flex;flex-wrap:wrap;gap:10px">'+[14,15,16,17,18].filter(w=>w>p.regularSeasonEnd).map(stage).join('')+'</div>')+
+   (p.championshipFinal?card('Final results','Champion: '+team(p.championshipFinal.champion)+' · Runner-up: '+team(p.championshipFinal.runnerUp)+' · Third: '+team(p.championshipFinal.third)):'')+
+   '<p class="muted small">Future rounds remain hidden until all preceding NFL games and fantasy scores are verified.</p>';
+ }
  const d=postseasonData();if(d.n<6)return '<h1>Postseason</h1>'+card('Bracket projections','Six registered teams are required.');
  const seed=i=>d.rows[i]?'#'+(i+1)+' '+esc(d.rows[i].name):'TBD';
  const game=(a,b)=>'<div style="border:1px solid #4a607b;border-radius:9px;margin:10px 0;padding:12px"><b>'+a+'</b><div class="muted small">vs</div><b>'+b+'</b></div>';
