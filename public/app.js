@@ -882,14 +882,35 @@ function faProjectionProgress(game){
   if(game.status==='final')return 1;
   if(game.status==='upcoming'||game.status==='scheduled')return 0;
   if(game.status!=='playing'&&game.status!=='live')return null;
+  // Prefer ESPN game clock/period when available. NFL quarters are 15 min;
+  // overtime extends the available time, never forces a premature final.
+  const period=Number(game.period||game.quarter);
+  const clock=String(game.clock||game.displayClock||'');
+  const match=clock.match(/^(\d{1,2}):(\d{2})$/);
+  if(Number.isInteger(period)&&period>=1&&period<=4&&match){
+    const seconds=Number(match[1])*60+Number(match[2]);
+    if(seconds<=900)return Math.max(0,Math.min(.995,((period-1)*900+900-seconds)/3600));
+  }
   const kickoff=Date.parse(game.kickoff||'');
-  // Game clock is not exposed by the current week-matchups endpoint. Estimate
-  // game progress from kickoff, capped to avoid claiming a final before ESPN does.
+  // Fallback is approximate wall-clock progress; never treat it as final.
   if(!Number.isFinite(kickoff))return .5;
-  return Math.max(.06,Math.min(.94,(Date.now()-kickoff)/(3.25*3600000)));
+  return Math.max(.025,Math.min(.95,(Date.now()-kickoff)/(3.25*3600000)));
+}
+function faLiveRemaining(baseline,actual,progress){
+  if(progress>=1)return 0;
+  if(progress<=0)return baseline;
+  const remainingFraction=Math.max(0,1-progress);
+  // Stabilize early spikes with a pregame prior, then gradually give more
+  // weight to observed performance. Limit pace multipliers to avoid an early TD
+  // projecting a historically impossible full-game total.
+  const observedFullGame=actual/Math.max(.08,progress);
+  const paceRatio=baseline>0?Math.max(.25,Math.min(2.5,observedFullGame/baseline)):1;
+  const evidenceWeight=Math.min(.75,.75*progress);
+  const futureRate=baseline*((1-evidenceWeight)+evidenceWeight*paceRatio);
+  return Math.max(0,futureRate*remainingFraction);
 }
 function faForecastPlayer(p,week){
-  if(!p)return {actual:0,projected:0,variance:0,known:false};
+  if(!p)return {actual:0,projected:0,variance:0,known:false,live:false};
   const season=Number(state?.nflDirectorySync?.season||new Date().getFullYear());
   const key=season+':'+week;
   const id=String(p.espnId||String(p.id||'').replace(/^espn-/,''));
@@ -899,35 +920,28 @@ function faForecastPlayer(p,week){
   const game=nflMatchupCache[key]?.data?.teams?.[teamId];
   const feed=weeklyDirectory[id];
   const liveGame=game?.status==='playing'||game?.status==='live';
+  const finalGame=game?.status==='final';
   const raw=meta?.weeklyProjectedPoints;
   const baseline=raw!==null&&raw!==undefined&&Number.isFinite(Number(raw))?Math.max(0,Number(raw)):null;
   const progress=faProjectionProgress(game);
   const injury=String(meta?.injuryStatus||p.injuryStatus||'').toUpperCase().replace(/[ -]/g,'_');
   const explicitlyOut=['OUT','INJURED_RESERVE','IR','SUSPENDED','PUP','NON_FOOTBALL_INJURY'].includes(injury);
-  // A verified bye means no NFL game is scheduled for this team in this week.
-  // Do not mistake a missing/failed schedule response for a bye.
   const schedule=nflMatchupCache[key]?.data;
   const hasVerifiedSchedule=Boolean(schedule&&schedule.teams&&Object.keys(schedule.teams).length);
   const onBye=Boolean(hasVerifiedSchedule&&teamId&&!game);
-
   const feedPoints=feed?.points==null?null:Number(feed.points);
-  const actual=Number.isFinite(feedPoints)&&feed?.gameStatus!=='upcoming'&&Number(state?.nflDirectorySync?.currentWeek||state?.week)===week?feedPoints:Math.max(0,Number(p.points)||0);
-  // The fantasy substitution ledger can credit fewer points than the NFL feed.
-  const credited=Number.isFinite(Number(p.credited))&&p.scoringMode?Math.max(0,Number(p.credited)):actual;
-  if(progress===1||feed?.gameStatus==='final')return {actual:credited,projected:credited,variance:0,known:true,live:liveGame};
-  // OUT/BYE are deterministic zeros for FUTURE scoring. Already earned points
-  // remain credited even if a player is ruled out during a live game.
+  const feedCurrent=Number(state?.nflDirectorySync?.currentWeek||state?.week)===Number(week);
+  // Do not carry stale NFL directory scores into upcoming or future games.
+  const actual=(liveGame||finalGame)&&feedCurrent&&Number.isFinite(feedPoints)
+    ?feedPoints:(liveGame||finalGame?Math.max(0,Number(p.points)||0):0);
+  const credited=Number.isFinite(Number(p.credited))&&p.scoringMode
+    ?Math.max(0,Number(p.credited)):actual;
+  if(finalGame||progress===1)return {actual:credited,projected:credited,variance:0,known:true,live:false};
   if(explicitlyOut||onBye)return {actual:credited,projected:credited,variance:0,known:true,live:liveGame};
-  if(baseline===null||progress===null)return {actual:credited,projected:null,variance:null,known:false,live:liveGame};
-  const noFurtherPoints=false;
-  const remaining=noFurtherPoints?0:baseline*(1-progress);
-  // Higher early-game uncertainty; decreases as scoring opportunities expire.
-  // Fantasy scoring has a wide weekly distribution. Do not let a projected
-  // advantage of 8-40 points create near-certain pregame odds. This is a
-  // conservative, explicitly uncalibrated uncertainty estimate until enough
-  // player-level outcomes exist to fit and backtest distributions.
+  if(baseline===null||progress===null)return {actual:credited,projected:credited,variance:0,known:false,live:liveGame};
+  const remaining=liveGame?faLiveRemaining(baseline,actual,progress):baseline;
   const calibrated=faPlayerSigma(meta,baseline);
-  const sigma=noFurtherPoints?0:calibrated.sigma*Math.sqrt(Math.max(0,1-progress));
+  const sigma=calibrated.sigma*Math.sqrt(Math.max(0,1-(liveGame?progress:0)));
   return {actual:credited,projected:credited+remaining,variance:sigma*sigma,known:true,live:liveGame};
 }
 function faForecastTeam(players,week){
