@@ -1,3 +1,4 @@
+const fantasyDST=require('./fantasy-dst-actual');
 const defenseStore=require('./defense-store');
 const http = require('http');
 const fs = require('fs');
@@ -1240,6 +1241,7 @@ async function faWeeklyESPN(season,week){
       const defense=isDefense?liveNFL.defenseStats(item.summary,game,item.events).get(teamId):null;
       if(!stats&&!defense)return send(res,200,{...result,status:'no-stats',notice:'ESPN has not reported statistics for this game'});
       if(isDefense)await defenseStore.ingest(pool,season,game,item.summary);
+      if(isDefense)try{await fantasyDST.ingestWeek(pool,defenseStore,season,week,games);}catch(e){console.warn('ESPN Fantasy D/ST actuals:',e.message);}
       const scored=isDefense?(await defenseStore.get(pool,season,game,teamId,settingsOf(current.state).scoring))||authoritativeGameScore(item.summary,{...athlete,pos:athlete.position,espnId:id},settingsOf(current.state).scoring,game):authoritativeGameScore(item.summary,{...athlete,pos:athlete.position,espnId:id},settingsOf(current.state).scoring,game);
       const groups=[];
       const categories=isDefense?{defense:{...(scored.counts||defense.stats),pointsAllowed:scored.pointsAllowed??defense.pointsAllowed,yardsAllowed:scored.yardsAllowed??defense.yardsAllowed}}:{passing:stats.passing,rushing:stats.rushing,receiving:stats.receiving,kicking:stats.kicking,miscellaneous:stats.misc};
@@ -1294,6 +1296,7 @@ async function faWeeklyESPN(season,week){
           const defense=isDefense?liveNFL.defenseStats(summary,game,events).get(String(team)):null;
           if(isDefense&&!defense)return {week:game.week,gameId:game.id,status:'NO_STATS',opponent:opponent?.abbreviation||null};
           if(isDefense)await defenseStore.ingest(pool,season,game,summary);
+          if(isDefense)try{await fantasyDST.ingestWeek(pool,defenseStore,season,game.week,[game]);}catch(e){console.warn('ESPN Fantasy historical D/ST:',e.message);}
           const result=isDefense?(await defenseStore.get(pool,season,game,team,settingsOf(current.state).scoring))||authoritativeGameScore(summary,{...player,pos:player.position,espnId:id},settingsOf(current.state).scoring,game):authoritativeGameScore(summary,{...player,pos:player.position,espnId:id},settingsOf(current.state).scoring,game);
           return {week:game.week,gameId:game.id,status:'final',opponent:game.teams.find(t=>String(t.id)!==String(team))?.abbreviation||null,
             points:result.points,breakdown:result.breakdown,statDetails:isDefense?result.statDetails:undefined,unsupported:result.unsupported,provisional:true};
@@ -1663,6 +1666,7 @@ async function syncNFLScoring(){
       const game=games.find(g=>String(g.id)===String(gameId));
       if(game)await defenseStore.ingest(pool,season,game,box.summary);
     }
+    try{const ff=await fantasyDST.ingestWeek(pool,defenseStore,season,week,games);if(ff.conflicts||ff.missing)console.warn('ESPN Fantasy D/ST coverage:',ff);}catch(e){console.warn('ESPN Fantasy D/ST sync unavailable:',e.message);}
     const defenseScores=new Map();
     for(const game of games){
       for(const team of game.teams){

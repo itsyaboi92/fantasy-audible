@@ -44,11 +44,29 @@ async function ingest(pool,season,game,summary){
    VALUES($1,$2,$3,$4,$5,$6,$7,$8)
    ON CONFLICT(season,game_id,team_id,stat) DO UPDATE SET
    observed_at=NOW(),game_final=EXCLUDED.game_final,
-   source=CASE WHEN EXCLUDED.source='ESPN attributed player defensive totals' THEN EXCLUDED.source ELSE fantasy_audible_defense_stats.source END,
-   value=CASE WHEN fantasy_audible_defense_stats.value=EXCLUDED.value OR EXCLUDED.source='ESPN attributed player defensive totals' THEN EXCLUDED.value ELSE fantasy_audible_defense_stats.value END`,
+   source=CASE WHEN fantasy_audible_defense_stats.stat='forcedFumble' AND fantasy_audible_defense_stats.source LIKE 'ESPN Fantasy weekly actual%' THEN fantasy_audible_defense_stats.source WHEN EXCLUDED.source='ESPN attributed player defensive totals' THEN EXCLUDED.source ELSE fantasy_audible_defense_stats.source END,
+   value=CASE WHEN fantasy_audible_defense_stats.stat='forcedFumble' AND fantasy_audible_defense_stats.source LIKE 'ESPN Fantasy weekly actual%' THEN fantasy_audible_defense_stats.value WHEN fantasy_audible_defense_stats.value=EXCLUDED.value OR EXCLUDED.source='ESPN attributed player defensive totals' THEN EXCLUDED.value ELSE fantasy_audible_defense_stats.value END`,
    [season,String(game.id),x.team,x.field,x.value,x.source,x.verified,game.status==='final']);
  }
  return incoming.length;
+}
+// ESPN Fantasy weekly actual is authoritative for forced fumbles only.
+// Its omitted zero is inferred (not verified); no week record means NO update.
+async function ingestFantasyForcedFumble(pool,season,game,teamId,value,explicit){
+ if(!Number.isInteger(value)||value<0)throw Error('Invalid ESPN Fantasy forced-fumble count');
+ const params=[season,String(game.id),String(teamId),'forcedFumble',value];
+ await pool.query(`INSERT INTO fantasy_audible_defense_conflicts
+ (season,game_id,team_id,stat,stored_value,incoming_value)
+ SELECT $1,$2,$3,$4,value,$5 FROM fantasy_audible_defense_stats
+ WHERE season=$1 AND game_id=$2 AND team_id=$3 AND stat=$4 AND value<>$5
+ ON CONFLICT(season,game_id,team_id,stat,incoming_value) DO UPDATE SET last_seen=NOW()`,params);
+ await pool.query(`INSERT INTO fantasy_audible_defense_stats
+ (season,game_id,team_id,stat,value,source,verified,game_final)
+ VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+ ON CONFLICT(season,game_id,team_id,stat) DO UPDATE SET
+ value=EXCLUDED.value,source=EXCLUDED.source,verified=EXCLUDED.verified,
+ game_final=EXCLUDED.game_final,observed_at=NOW()`,
+ [...params,explicit?'ESPN Fantasy weekly actual':'ESPN Fantasy weekly actual (omitted zero inferred)',explicit,game.status==='final']);
 }
 async function get(pool,season,game,teamId,rules){
  const r=await pool.query('SELECT stat,value,source,verified,game_final FROM fantasy_audible_defense_stats WHERE season=$1 AND game_id=$2 AND team_id=$3',[season,String(game.id),String(teamId)]);
@@ -65,4 +83,4 @@ async function get(pool,season,game,teamId,rules){
  const scored=scoreDefense({stats,pointsAllowed,yardsAllowed,opponentFound:pointsAllowed!==null},rules);
  return {...scored,statDetails:details,counts:stats,pointsAllowed,yardsAllowed,complete:game.status==='final'&&!scored.unsupported.length,source:'persisted-defense-stats'};
 }
-module.exports={init,ingest,get,observations};
+module.exports={init,ingest,get,observations,ingestFantasyForcedFumble};
