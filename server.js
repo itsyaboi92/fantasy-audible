@@ -942,6 +942,43 @@ async function api(req,res,route){
   if(!user)return send(res,401,{error:'Please sign in'});
   // Commissioner-only, read-only Week 9 reconciliation diagnostic.
   // No tokens, email addresses, passwords or other managers' rosters are returned.
+  // Commissioner-only read-only injury event audit. Never mutates league state.
+  if(req.method==='GET'&&route==='/api/diagnostics/attack-on-tight-end-injuries'){
+    if(!user.commissioner)return send(res,403,{error:'Commissioner only'});
+    const s=current.state;
+    const manager=(s.managers||[]).find(m=>String(m.team||'').trim().toLowerCase()==='attack on tight end');
+    if(!manager)return send(res,404,{error:'Attack on Tight End team not found'});
+    const targets=['Mike Evans','Josh Jacobs'];
+    const roster=(s.players||[]).filter(p=>String(p.owner)===String(manager.id));
+    const games=s.nflSync?.games||[];
+    const records=targets.map(name=>{
+      const player=roster.find(p=>String(p.name||'').trim().toLowerCase()===name.toLowerCase());
+      if(!player)return {name,foundOnRoster:false};
+      const observations=s.injuryObservations||{};
+      const history=(s.injuries||[]).filter(i=>String(i.player)===String(player.id))
+        .map(i=>({id:String(i.id||''),source:i.source||null,description:i.description||null,
+          at:i.at||null,active:Boolean(i.active),reminderSent:Boolean(i.reminderSent)}));
+      const game=games.find(g=>(g.teams||[]).some(t=>String(t.id)===String(liveNFL.teamId(player))));
+      const replacements=roster.filter(b=>String(b.id)!==String(player.id)&&b.slot==='BENCH')
+        .map(b=>({player:b,mode:eligibility(s,player,b)}))
+        .filter(x=>x.mode)
+        .map(x=>({name:x.player.name,position:x.player.pos,mode:x.mode}));
+      const retired=injurySwapRetired(s,player);
+      return {name,foundOnRoster:true,position:player.pos,slot:player.slot,
+        currentDesignation:player.injuryStatus||null,
+        lastObservedDesignation:Object.prototype.hasOwnProperty.call(observations,player.id)?observations[player.id]:null,
+        game:game?{status:game.status,kickoff:game.kickoff}:null,
+        events:history,activeEventCount:history.filter(i=>i.active).length,
+        eligibleBenchReplacementsNow:replacements,
+        substitutedOutThisWeek:retired,
+        hasCommittedSubstitutionMode:Boolean(player.scoringMode),
+        note:history.length?'Stored injury events found':'No stored injury event for this player'};
+    });
+    return send(res,200,{diagnostic:'attack-on-tight-end-injury-events-v1',readOnly:true,
+      generatedAt:new Date().toISOString(),leagueWeek:s.week||null,
+      lastNFLScoringSync:s.nflSync?.at||null,team:manager.team,players:records,
+      interpretation:'A current O/Q designation does not establish that a live status transition was observed. Eligibility is evaluated against current bench and kickoff state, not reconstructed historical availability.'});
+  }
   if(req.method==='GET'&&route==='/api/diagnostics/kyren-week9'){
     if(!user.commissioner)return send(res,403,{error:'Commissioner only'});
     const state=current.state,week=9;
