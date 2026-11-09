@@ -245,6 +245,20 @@ async function openPlayerProfile(id){
   }
   finally{if(profilePlayerId===String(id)){profileLoading=false;render();}}
 }
+async function downloadAttackInjuryDiagnostic(){
+  try{
+    const response=await fetch('/api/diagnostics/attack-on-tight-end-injuries',
+      {headers:{Authorization:'Bearer '+token},cache:'no-store'});
+    const data=await response.json();
+    if(!response.ok)throw Error(data.error||'Injury diagnostic unavailable');
+    const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');a.href=url;
+    a.download='fantasy-audible-attack-on-tight-end-injuries.json';
+    document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),10000);
+  }catch(e){alert('Injury diagnostic: '+e.message);}
+}
 async function downloadKyrenDiagnostic(){
   try{
     const response=await fetch('/api/diagnostics/kyren-week9',
@@ -1353,6 +1367,7 @@ function render(){if(!state||!manager)return;const mine=state.players.filter(x=>
   if(tab==='Commissioner'&&state.viewer.commissioner)content=`<h1>Commissioner Controls</h1>
     ${card('Draft management','<p>Manage the snake draft.</p><button onclick="changeTab(\'Draft\')">Open draft controls</button>')}
     ${commissionerDraftOrderUI()}
+    ${card('Attack on Tight End — injury event audit',`<p class="muted small">Read-only check of Mike Evans and Josh Jacobs: stored injury events, observed designations, and currently eligible bench replacements. Does not change rosters.</p><button onclick="downloadAttackInjuryDiagnostic()">Download injury audit</button>`)}
     ${card('Kyren Williams — Week 9 diagnostic',`<p class="muted small">Read-only commissioner diagnostic of stored matchup points, player identity, and substitution flags. Downloads a JSON report; no league data is changed.</p><button onclick="downloadKyrenDiagnostic()">Download Week 9 diagnostic</button>`)}
     ${card('Restart league',`<p><b>Destructive action:</b> clear the current draft order, all picks, draft history, drafted rosters, and injuries. Keep manager accounts, team names, commissioner scoring/roster rules, and each manager's draft preferences.</p>
       <p>The next draft will use your configured roster size (16 rounds by default).</p>
