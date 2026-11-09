@@ -16,6 +16,96 @@ const PUSH_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
 const PUSH_READY = Boolean(PUSH_PUBLIC_KEY && PUSH_PRIVATE_KEY);
 if (PUSH_READY) webpush.setVapidDetails(process.env.VAPID_SUBJECT || 'mailto:admin@example.com', PUSH_PUBLIC_KEY, PUSH_PRIVATE_KEY);
 
+// Fresh ESPN weekly data, separate from the six-hour draft directory cache.
+// Null is unknown; zero is a legitimate ESPN weekly projection.
+const faWeeklyFeedCache=new Map();
+let faWeeklyFeedPending=new Map();
+// League-scored projections from ESPN statistical forecasts only.
+// Never use ESPN appliedTotal (its scoring rules may differ).
+function faStatProjection(record,position,rules){
+  const stats=record?.stats;
+  if(!stats||typeof stats!=='object'||Array.isArray(stats))return null;
+  const get=(id)=>{const raw=stats[id];return raw===null||raw===undefined||raw===''||!Number.isFinite(Number(raw))?null:Number(raw);};
+  const v=(id)=>get(id)??0;
+  const r=rules||DEFAULT_SCORING;
+  if(['QB','RB','WR','TE'].includes(position)){
+    const required=position==='QB'?['3','4','20']:position==='RB'?['24','25','53','42']:['53','42','43'];
+    if(!required.every(id=>get(id)!==null))return null;
+    const total=v('3')*r.passing.yards+v('4')*r.passing.touchdowns+v('20')*r.passing.interceptions+
+      v('24')*r.rushing.yards+v('25')*r.rushing.touchdowns+
+      v('42')*r.receiving.yards+v('43')*r.receiving.touchdowns+v('53')*r.receiving.receptions+
+      v('72')*r.miscellaneous.fumblesLost;
+    // Long TD and yardage threshold bonuses cannot be calculated reliably from aggregates.
+    return Math.round(total*100)/100;
+  }
+  // ESPN fantasy raw stat IDs documented by espn-api and ffscrapr.
+  // The league's configured scoring, NEVER ESPN appliedTotal, determines points.
+  if(position==='K'){
+    // 74 = made 50+; 77 = made 40-49; 80 = made under 40;
+    // 82 = missed under 40; 86 = made PAT; 88 = missed PAT.
+    // 50+ is not split into 50-59 and 60+ by ESPN's standard stat feed.
+    if(!['74','77','80','86'].every(id=>get(id)!==null))return null;
+    const k=r.kicking;
+    const total=v('80')*k.fg0to39+v('77')*k.fg40to49+
+      v('74')*k.fg50to59+v('86')*k.patMade+
+      v('88')*k.patMissed+v('82')*k.fgMiss0to39;
+    return Math.round(total*100)/100;
+  }
+  if(position==='D/ST'){
+    // 95 INT, 96 FR, 97 blocked kicks, 98 safeties, 99 sacks,
+    // 101 kickoff return TD, 102 punt return TD, 103 INT return TD,
+    // 104 fumble return TD, 106 forced fumbles, 120 PA, 127 YA.
+    // Use expected PA/YA to select a tier as an APPROXIMATION; unlike
+    // actual scoring, expected values do not determine a guaranteed tier.
+    if(!['95','96','99','120','127'].every(id=>get(id)!==null))return null;
+    const d=r.defense;
+    const pa=v('120'),ya=v('127');
+    const paKey=pa<=0?'pointsAllowed0':pa<=6?'pointsAllowed1to6':
+      pa<=13?'pointsAllowed7to13':pa<=17?'pointsAllowed14to17':
+      pa<=27?'pointsAllowed18to27':pa<=34?'pointsAllowed28to34':
+      pa<=45?'pointsAllowed35to45':'pointsAllowed46plus';
+    const yaKey=ya<100?'yardsAllowedUnder100':ya<200?'yardsAllowed100to199':
+      ya<300?'yardsAllowed200to299':ya<350?'yardsAllowed300to349':
+      ya<400?'yardsAllowed350to399':ya<450?'yardsAllowed400to449':
+      ya<500?'yardsAllowed450to499':ya<550?'yardsAllowed500to549':'yardsAllowed550plus';
+    const total=v('99')*d.sack+v('95')*d.interception+v('96')*d.fumbleRecovered+
+      v('106')*d.forcedFumble+v('97')*d.blockedKick+v('98')*d.safety+
+      v('101')*d.kickoffReturnTD+v('102')*d.puntReturnTD+
+      v('103')*d.interceptionTD+v('104')*d.fumbleReturnTD+
+      v('93')*d.blockedKickReturnTD+
+      (Number(d[paKey])||0)+(Number(d[yaKey])||0);
+    return Math.round(total*100)/100;
+  }
+  return null;
+}
+function faWeeklyRecord(raw,week){
+  const p=raw.player||raw;
+  const records=[...(Array.isArray(p.stats)?p.stats:[]),...(Array.isArray(raw.stats)?raw.stats:[])];
+  const record=records.find(x=>Number(x.statSourceId)===1&&Number(x.scoringPeriodId)===week&&
+    (x.seasonId==null||Number(x.seasonId)===Number(process.env.ESPN_SEASON||2026)));
+  return {id:String(p.id),injuryStatus:String(p.injuryStatus||'UNKNOWN').toUpperCase(),
+    teamId:p.proTeamId==null?null:String(p.proTeamId),
+    projectedStats:record?.stats&&typeof record.stats==='object'?record.stats:null,
+    projectionMethod:record?.stats?'ESPN_STATISTICS_AVAILABLE':'STATS_UNAVAILABLE'};
+}
+async function faWeeklyESPN(season,week){
+  const key=season+':'+week,old=faWeeklyFeedCache.get(key);
+  if(old&&Date.now()-old.at<5*60000)return old;
+  if(faWeeklyFeedPending.has(key))return faWeeklyFeedPending.get(key);
+  const job=(async()=>{
+    const url=`https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/players?scoringPeriodId=${week}&view=kona_player_info`;
+    const res=await fetch(url,{headers:{Accept:'application/json',
+      'X-Fantasy-Filter':JSON.stringify({players:{limit:1500,offset:0}})},signal:AbortSignal.timeout(20000)});
+    if(!res.ok)throw Error('ESPN weekly feed HTTP '+res.status);
+    const raw=await res.json(),entries=Array.isArray(raw)?raw:raw.players||[];
+    const players={};for(const item of entries){const entry=faWeeklyRecord(item,week);if(entry.id!=='undefined')players[entry.id]=entry;}
+    if(!Object.keys(players).length)throw Error('Empty ESPN weekly feed');
+    const result={at:Date.now(),players};faWeeklyFeedCache.set(key,result);return result;
+  })().finally(()=>faWeeklyFeedPending.delete(key));
+  faWeeklyFeedPending.set(key,job);
+  try{return await job;}catch(e){if(old){console.warn('ESPN weekly feed stale:',e.message);return {...old,stale:true};}throw e;}
+}
+
 const PORT = process.env.PORT || 3000;
 const MAX_TEAMS = 12;
 const DEFAULT_ROUNDS = 16;
@@ -1129,95 +1219,6 @@ async function api(req,res,route){
   if(req.method==='GET'&&route==='/api/espn/players'){
     try{const data=await draftPool();return send(res,200,{...data,count:data.players.length});}
     catch(e){return send(res,503,{error:'ESPN player data is not available yet',details:e.message});}}
-// Fresh ESPN weekly data, separate from the six-hour draft directory cache.
-// Null is unknown; zero is a legitimate ESPN weekly projection.
-const faWeeklyFeedCache=new Map();
-let faWeeklyFeedPending=new Map();
-// League-scored projections from ESPN statistical forecasts only.
-// Never use ESPN appliedTotal (its scoring rules may differ).
-function faStatProjection(record,position,rules){
-  const stats=record?.stats;
-  if(!stats||typeof stats!=='object'||Array.isArray(stats))return null;
-  const get=(id)=>{const raw=stats[id];return raw===null||raw===undefined||raw===''||!Number.isFinite(Number(raw))?null:Number(raw);};
-  const v=(id)=>get(id)??0;
-  const r=rules||DEFAULT_SCORING;
-  if(['QB','RB','WR','TE'].includes(position)){
-    const required=position==='QB'?['3','4','20']:position==='RB'?['24','25','53','42']:['53','42','43'];
-    if(!required.every(id=>get(id)!==null))return null;
-    const total=v('3')*r.passing.yards+v('4')*r.passing.touchdowns+v('20')*r.passing.interceptions+
-      v('24')*r.rushing.yards+v('25')*r.rushing.touchdowns+
-      v('42')*r.receiving.yards+v('43')*r.receiving.touchdowns+v('53')*r.receiving.receptions+
-      v('72')*r.miscellaneous.fumblesLost;
-    // Long TD and yardage threshold bonuses cannot be calculated reliably from aggregates.
-    return Math.round(total*100)/100;
-  }
-  // ESPN fantasy raw stat IDs documented by espn-api and ffscrapr.
-  // The league's configured scoring, NEVER ESPN appliedTotal, determines points.
-  if(position==='K'){
-    // 74 = made 50+; 77 = made 40-49; 80 = made under 40;
-    // 82 = missed under 40; 86 = made PAT; 88 = missed PAT.
-    // 50+ is not split into 50-59 and 60+ by ESPN's standard stat feed.
-    if(!['74','77','80','86'].every(id=>get(id)!==null))return null;
-    const k=r.kicking;
-    const total=v('80')*k.fg0to39+v('77')*k.fg40to49+
-      v('74')*k.fg50to59+v('86')*k.patMade+
-      v('88')*k.patMissed+v('82')*k.fgMiss0to39;
-    return Math.round(total*100)/100;
-  }
-  if(position==='D/ST'){
-    // 95 INT, 96 FR, 97 blocked kicks, 98 safeties, 99 sacks,
-    // 101 kickoff return TD, 102 punt return TD, 103 INT return TD,
-    // 104 fumble return TD, 106 forced fumbles, 120 PA, 127 YA.
-    // Use expected PA/YA to select a tier as an APPROXIMATION; unlike
-    // actual scoring, expected values do not determine a guaranteed tier.
-    if(!['95','96','99','120','127'].every(id=>get(id)!==null))return null;
-    const d=r.defense;
-    const pa=v('120'),ya=v('127');
-    const paKey=pa<=0?'pointsAllowed0':pa<=6?'pointsAllowed1to6':
-      pa<=13?'pointsAllowed7to13':pa<=17?'pointsAllowed14to17':
-      pa<=27?'pointsAllowed18to27':pa<=34?'pointsAllowed28to34':
-      pa<=45?'pointsAllowed35to45':'pointsAllowed46plus';
-    const yaKey=ya<100?'yardsAllowedUnder100':ya<200?'yardsAllowed100to199':
-      ya<300?'yardsAllowed200to299':ya<350?'yardsAllowed300to349':
-      ya<400?'yardsAllowed350to399':ya<450?'yardsAllowed400to449':
-      ya<500?'yardsAllowed450to499':ya<550?'yardsAllowed500to549':'yardsAllowed550plus';
-    const total=v('99')*d.sack+v('95')*d.interception+v('96')*d.fumbleRecovered+
-      v('106')*d.forcedFumble+v('97')*d.blockedKick+v('98')*d.safety+
-      v('101')*d.kickoffReturnTD+v('102')*d.puntReturnTD+
-      v('103')*d.interceptionTD+v('104')*d.fumbleReturnTD+
-      v('93')*d.blockedKickReturnTD+
-      (Number(d[paKey])||0)+(Number(d[yaKey])||0);
-    return Math.round(total*100)/100;
-  }
-  return null;
-}
-function faWeeklyRecord(raw,week){
-  const p=raw.player||raw;
-  const records=[...(Array.isArray(p.stats)?p.stats:[]),...(Array.isArray(raw.stats)?raw.stats:[])];
-  const record=records.find(x=>Number(x.statSourceId)===1&&Number(x.scoringPeriodId)===week&&
-    (x.seasonId==null||Number(x.seasonId)===Number(process.env.ESPN_SEASON||2026)));
-  return {id:String(p.id),injuryStatus:String(p.injuryStatus||'UNKNOWN').toUpperCase(),
-    teamId:p.proTeamId==null?null:String(p.proTeamId),
-    projectedStats:record?.stats&&typeof record.stats==='object'?record.stats:null,
-    projectionMethod:record?.stats?'ESPN_STATISTICS_AVAILABLE':'STATS_UNAVAILABLE'};
-}
-async function faWeeklyESPN(season,week){
-  const key=season+':'+week,old=faWeeklyFeedCache.get(key);
-  if(old&&Date.now()-old.at<5*60000)return old;
-  if(faWeeklyFeedPending.has(key))return faWeeklyFeedPending.get(key);
-  const job=(async()=>{
-    const url=`https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${season}/players?scoringPeriodId=${week}&view=kona_player_info`;
-    const res=await fetch(url,{headers:{Accept:'application/json',
-      'X-Fantasy-Filter':JSON.stringify({players:{limit:1500,offset:0}})},signal:AbortSignal.timeout(20000)});
-    if(!res.ok)throw Error('ESPN weekly feed HTTP '+res.status);
-    const raw=await res.json(),entries=Array.isArray(raw)?raw:raw.players||[];
-    const players={};for(const item of entries){const entry=faWeeklyRecord(item,week);if(entry.id!=='undefined')players[entry.id]=entry;}
-    if(!Object.keys(players).length)throw Error('Empty ESPN weekly feed');
-    const result={at:Date.now(),players};faWeeklyFeedCache.set(key,result);return result;
-  })().finally(()=>faWeeklyFeedPending.delete(key));
-  faWeeklyFeedPending.set(key,job);
-  try{return await job;}catch(e){if(old){console.warn('ESPN weekly feed stale:',e.message);return {...old,stale:true};}throw e;}
-}
   if(req.method==='GET'&&route==='/api/nfl/player-metadata'){
     const season=Number(url.searchParams.get('season')||current.state.nflDirectorySync?.season||new Date().getUTCFullYear());
     const week=Number(url.searchParams.get('week'));
