@@ -1966,9 +1966,13 @@ async function faSyncRosterStatuses(){
       s.injuryObservations ||= {};
       for(const p of s.players){if(!p.espnId)continue;
         const current=data.players[String(p.espnId)];if(!current)continue;
-        // Establish pregame baseline; a pre-existing designation never triggers an alert.
-        if(!Object.prototype.hasOwnProperty.call(s.injuryObservations,p.id))
-          s.injuryObservations[p.id]=current.injuryStatus;
+        // Roster refresh must not advance the live injury detector's observation.
+        // Establish a baseline only before kickoff; the dedicated live poll owns
+        // injuryObservations while games are in progress.
+        const games=s.nflSync?.games||[];
+        const game=games.find(g=>g.teams?.some(t=>String(t.id||t)===String(p.nflTeamId||p.proTeamId||p.teamId||'')));
+        if(game?.status==='upcoming' && !Object.prototype.hasOwnProperty.call(s.injuryObservations,p.id))
+          s.injuryObservations[p.id]=String(current.injuryStatus||'UNKNOWN').toUpperCase();
         p.injuryStatus=current.injuryStatus;
       }
       return {ok:true};
@@ -2008,10 +2012,11 @@ async function pollLiveInjuries(){
         // while the player's game is live, preventing pre-existing injury false alerts.
         if(!previous||previous===status||!injuryStatuses.has(status))continue;
         if(s.injuries.some(i=>i.player===player.id&&i.active))continue;
-        const eligible=s.players.filter(b=>b.owner===player.owner&&eligibility(s,player,b));
-        if(!eligible.length)continue;
+        // Detection and persistence must not depend on the current bench.
+        // Replacement eligibility is checked when a manager chooses to substitute.
         const event={id:crypto.randomUUID(),player:player.id,active:true,
-          description:`ESPN live injury designation: ${status}`,source:'ESPN',at:new Date().toISOString()};
+          description:`ESPN live injury designation: ${status}`,source:'ESPN',at:new Date().toISOString(),
+          previousDesignation:previous,newDesignation:status,week:Number(s.week||0)};
         s.injuries.push(event);
         alerts.push({manager:player.owner,player:player.name,status,eventId:event.id});
       }
