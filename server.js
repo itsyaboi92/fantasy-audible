@@ -1879,9 +1879,24 @@ async function reconcileHistoricalMatchups(){
      if(!current||current.scoringMode||String(current.owner)!==String(match[u.side==='homeLineup'?'home':'away']))continue;
      entry.points=u.points;entry.liveScoreStatus='UPDATED';entry.reconciledAt=new Date().toISOString();
     }
+    // Historical results are certified only after every NFL game is final,
+    // every required lineup score is verified, and the stored lineups are intact.
+    // Never rebuild historical lineups from today's roster.
+    const weekGamesFinal=games.length>0&&games.every(g=>g.status==='final');
     for(const match of Object.values(matches)){
-     // Preserve original final/provisional status; don't invent verification.
-     match.homeScore=ledgerTotal(match.homeLineup||[]);match.awayScore=ledgerTotal(match.awayLineup||[]);
+     const home=match.homeLineup,away=match.awayLineup;
+     if(!Array.isArray(home)||!Array.isArray(away))continue;
+     if(match.status!=='final'){
+      const lineup=[...home,...away];
+      const verified=lineup.length>0&&lineup.every(p=>
+       p.liveScoreStatus==='UPDATED'&&Number.isFinite(Number(p.points)));
+      if(weekGamesFinal&&verified){
+       match.status='final';
+       match.warning=null;
+       match.finalizedAt=new Date().toISOString();
+      }
+     }
+     match.homeScore=ledgerTotal(home);match.awayScore=ledgerTotal(away);
      match.winner=match.status==='final'?(match.homeScore===match.awayScore?null:match.homeScore>match.awayScore?match.home:match.away):null;
      match.updatedAt=new Date().toISOString();
     }
