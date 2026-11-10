@@ -1852,7 +1852,7 @@ async function reconcileHistoricalMatchups(){
     const game=byTeam.get(team);if(!game)continue;
     candidates.push({matchId:m.id,side,id:String(entry.id),athleteId:id,team,game,pos:entry.pos,name:entry.name});
    }
-   if(!candidates.length)continue;
+   // No new candidates does not prevent certifying existing verified snapshots.
    const box=new Map();
    for(const game of [...new Map(candidates.map(c=>[c.game.id,c.game])).values()]){
     try{const summary=await liveNFL.fetchGame(game.id);box.set(game.id,summary);await defenseStore.ingest(pool,season,game,summary);}
@@ -1868,7 +1868,7 @@ async function reconcileHistoricalMatchups(){
     if(!result||!result.complete||!Number.isFinite(result.points))continue;
     updates.push({...c,points:result.points});
    }
-   if(!updates.length)continue;
+   // Always evaluate saved matchups, including cycles with zero ESPN score changes.
    await change((s,accounts)=>{
     const matches=s.weeklyLedger?.[week]?.matchups||{};
     for(const u of updates){
@@ -1885,19 +1885,35 @@ async function reconcileHistoricalMatchups(){
     const weekGamesFinal=games.length>0&&games.every(g=>g.status==='final');
     for(const match of Object.values(matches)){
      const home=match.homeLineup,away=match.awayLineup;
-     if(!Array.isArray(home)||!Array.isArray(away))continue;
-     if(match.status!=='final'){
-      const lineup=[...home,...away];
-      const verified=lineup.length>0&&lineup.every(p=>
-       p.liveScoreStatus==='UPDATED'&&Number.isFinite(Number(p.points)));
-      if(weekGamesFinal&&verified){
-       match.status='final';
-       match.warning=null;
-       match.finalizedAt=new Date().toISOString();
-      }
+     // Final results are immutable: do not recompute them from later data.
+     if(match.status==='final')continue;
+     if(!Array.isArray(home)||!Array.isArray(away)){
+      match.warning='Verification blocked: historical lineup snapshot is missing.';
+      continue;
      }
-     match.homeScore=ledgerTotal(home);match.awayScore=ledgerTotal(away);
-     match.winner=match.status==='final'?(match.homeScore===match.awayScore?null:match.homeScore>match.awayScore?match.home:match.away):null;
+     const lineup=[...home,...away];
+     const unresolved=lineup.filter(p=>
+       p.scoringMode ||
+       p.liveScoreStatus!=='UPDATED' ||
+       !Number.isFinite(p.points));
+     if(!weekGamesFinal){
+      match.warning='Verification blocked: NFL games are not all final.';
+     }else if(!lineup.length){
+      match.warning='Verification blocked: no historical starters recorded.';
+     }else if(unresolved.length){
+      match.warning='Verification blocked: '+unresolved.slice(0,8).map(p=>
+       String(p.name||p.id)+' ('+String(p.liveScoreStatus||'NO_VERIFICATION')+
+       (p.scoringMode?', substitution '+p.scoringMode:'')+')').join(', ')+
+       (unresolved.length>8?' and '+(unresolved.length-8)+' more':'');
+     }else{
+      match.homeScore=ledgerTotal(home);match.awayScore=ledgerTotal(away);
+      match.status='final';
+      match.winner=match.homeScore===match.awayScore?null:match.homeScore>match.awayScore?match.home:match.away;
+      match.warning=null;
+      match.finalizedAt=new Date().toISOString();
+      console.log('Historical matchup finalized:',week,match.id);
+     }
+     if(match.status!=='final')console.log('Historical matchup pending:',week,match.id,match.warning);
      match.updatedAt=new Date().toISOString();
     }
     return {ok:true};
