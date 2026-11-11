@@ -1909,19 +1909,21 @@ async function reconcileHistoricalMatchups(){
     const game=byTeam.get(team);if(!game)continue;
     candidates.push({matchId:m.id,side,id:String(entry.id),athleteId:id,team,game,pos:entry.pos,name:entry.name});
    }
-   // No new candidates does not prevent certifying existing verified snapshots.
+   // Fetch each required game once. A missing play-by-play feed must not prevent
+   // checking independently persisted ESPN Fantasy D/ST categories.
    const box=new Map();
-   for(const game of [...new Map(candidates.map(c=>[c.game.id,c.game])).values()]){
-    try{const summary=await liveNFL.fetchGame(game.id);box.set(game.id,summary);await defenseStore.ingest(pool,season,game,summary);}
+   for(const game of [...new Map(candidates.filter(c=>c.pos!=='D/ST').map(c=>[c.game.id,c.game])).values()]){
+    try{const summary=await liveNFL.fetchGame(game.id);box.set(String(game.id),summary);await defenseStore.ingest(pool,season,game,summary);}
     catch(e){console.warn('Historical reconciliation game:',game.id,e.message);}
    }
    try{await fantasyDST.ingestWeek(pool,defenseStore,season,week,games);}catch(e){console.warn('Historical D/ST feed:',week,e.message);}
    const updates=[];
    for(const c of candidates){
-    const summary=box.get(c.game.id);if(!summary)continue;
+    const summary=box.get(String(c.game.id));
+    if(c.pos!=='D/ST'&&!summary)continue;
     let result;
     try{result=c.pos==='D/ST'?await defenseStore.get(pool,season,c.game,c.team,settingsOf(state).scoring):authoritativeGameScore(summary,{id:c.id,espnId:c.athleteId,name:c.name,nflTeamId:c.team,pos:c.pos},settingsOf(state).scoring,c.game);}
-    catch(e){continue;}
+    catch(e){console.warn('Historical score verification:',week,c.name,e.message);continue;}
     if(!result||!result.complete||!Number.isFinite(result.points))continue;
     updates.push({...c,points:result.points});
    }
