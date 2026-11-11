@@ -1997,6 +1997,19 @@ async function reconcileHistoricalMatchups(){
     let result;
     try{result=c.pos==='D/ST'?await defenseStore.get(pool,season,c.game,c.team,settingsOf(state).scoring):authoritativeGameScore(summary,{id:c.id,espnId:c.athleteId,name:c.name,nflTeamId:c.team,pos:c.pos},settingsOf(state).scoring,c.game);}
     catch(e){console.warn('Historical score verification:',week,c.name,e.message);continue;}
+    if(c.pos==='D/ST'&&c.game.status==='final'){
+      // A final NFL game can preserve the already-scored, frozen D/ST total
+      // without demanding evidence for every zero-valued rare category.
+      // Never manufacture a score: require a finite existing snapshot and
+      // an actual persisted D/ST result for this same game/team.
+      const savedEntry=(snapshotMatches.find(m=>m.id===c.matchId)?.[c.side]||[])
+        .find(p=>String(p.id)===c.id);
+      if(result&&Number.isFinite(result.points)&&savedEntry&&
+         Number.isFinite(savedEntry.points)&&savedEntry.liveScoreStatus==='PARTIAL'){
+        updates.push({...c,points:savedEntry.points,finalDSTSnapshot:true});
+        continue;
+      }
+    }
     if(!result||!result.complete||!Number.isFinite(result.points))continue;
     updates.push({...c,points:result.points});
    }
@@ -2011,6 +2024,11 @@ async function reconcileHistoricalMatchups(){
      // Never reconstruct or mutate a historical lineup from today's roster.
      entry.points=u.points;
      entry.liveScoreStatus=u.bye?'BYE':u.inactive?'INACTIVE':'UPDATED';
+     if(u.finalDSTSnapshot){
+       entry.finalScoreSource='FROZEN_DST_SNAPSHOT';
+       entry.finalScoreGameId=String(u.game.id);
+       entry.finalScoreConfirmedAt=new Date().toISOString();
+     }
      if(u.inactive){entry.inactiveVerified=true;entry.inactiveEvidence=u.inactive.source;entry.nflTeamId=u.team;}
      if(u.bye)entry.byeVerified=true;
      else entry.byeVerified=false;

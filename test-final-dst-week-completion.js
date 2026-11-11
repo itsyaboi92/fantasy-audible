@@ -1,0 +1,15 @@
+'use strict';
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const src=fs.readFileSync(__dirname+'/server.js','utf8');
+const fn=src.slice(src.indexOf('async function reconcileHistoricalMatchups()'),src.indexOf('const playerHistoryCache='));
+assert.match(fn,/c\.pos==='D\/ST'&&c\.game\.status==='final'/);
+assert.match(fn,/Number\.isFinite\(savedEntry\.points\)&&savedEntry\.liveScoreStatus==='PARTIAL'/);
+assert.match(fn,/finalDSTSnapshot:true/);
+assert.match(fn,/points:savedEntry\.points/);
+assert.match(fn,/entry\.finalScoreSource='FROZEN_DST_SNAPSHOT'/);
+assert.match(fn,/if\(match\.status==='final'\)continue/);
+assert.match(fn,/match\.homeScore=ledgerTotal\(home\);match\.awayScore=ledgerTotal\(away\)/);
+assert.match(fn,/match\.status='final'/);
+assert.match(fn,/!result\|\|!result\.complete\|\|!Number\.isFinite\(result\.points\)/);
+console.log('PASS: final D/ST frozen scores can complete weeks without changing scores; final matchups remain immutable');
