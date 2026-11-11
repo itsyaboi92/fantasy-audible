@@ -288,7 +288,7 @@ function dropValidation(s,owner,id,gameMap){
   }else if(lineupLocked(s,player)){
     return failure(409,'Cannot drop a locked lineup player');
   }
-  if(injurySwapRetired(s,player)||injurySwapCurrentSlot(s,player)||player.scoringMode||player.scoreAtSwap!==undefined)
+  if(injurySwapRetired(s,player)||activeSwapMode(s,player))
     return failure(409,'Cannot drop a player involved in a committed injury substitution');
   return player;
 }
@@ -796,6 +796,27 @@ function injurySwapRetired(s,player){return Boolean(player&&s.injurySwapHistory?
   x.week===injurySwapWeek(s)&&x.removedId===player.id));}
 function injurySwapCurrentSlot(s,player){return Boolean(player&&s.injurySwapHistory?.some(x=>
   x.week===injurySwapWeek(s)&&x.replacementId===player.id));}
+// Live swap metadata belongs only to the week containing its committed event.
+// Historical weeklyLedger/injurySwapHistory entries remain immutable.
+function activeSwapMode(s,player){return Boolean(player&&injurySwapCurrentSlot(s,player));}
+function activeSwapOffset(s,player){return activeSwapMode(s,player)&&player.scoreAtSwap!==undefined;}
+function pendingInjury(s,player){return Boolean(player&&s.injuries?.some(i=>
+  i.active&&i.player===player.id&&Number(i.week||s.week)===injurySwapWeek(s)));}
+function expireOldInjuryState(s){
+  const week=injurySwapWeek(s);
+  for(const p of s.players||[]){
+    if(!activeSwapMode(s,p)){
+      delete p.scoringMode;delete p.scoreAtSwap;delete p.credited;
+    }
+  }
+  for(const injury of s.injuries||[]){
+    if(!injury.active)continue;
+    // Legacy pending injuries have no week tag. Only preserve one when it
+    // has an explicit current-week designation; otherwise expire on rollover.
+    if(Number(injury.week)!==week)injury.active=false;
+  }
+}
+
 function eligibility(s,starter,bench){if(!starter||!bench||starter.owner!==bench.owner||
   starter.slot==='BENCH'||bench.slot!=='BENCH'||
   !(starter.slot==='FLEX'?['RB','WR','TE'].includes(bench.pos):starter.pos===bench.pos)||
@@ -855,9 +876,9 @@ function assignLineup(s,actor,body,verifiedSchedule){
   if(target==='IR'&&!eligibleIR(player))return failure(409,'Only IR/out-designated players can enter IR');
   if(!['BENCH','IR'].includes(target)&&!slotEligible(player,target))
     return failure(409,'Player is not eligible for this starting position');
-  if(s.injuries?.some(i=>i.active&&i.player===player.id))
+  if(pendingInjury(s,player))
     return failure(409,'Resolve the pending injury decision first');
-  if(player.scoringMode||player.scoreAtSwap!==undefined)
+  if(activeSwapMode(s,player))
     return failure(409,'An injury substitution cannot be reversed through lineup management');
   const mine=s.players.filter(p=>p.owner===actor.manager);
   const occupied=mine.filter(p=>p.slot===target&&p.id!==player.id);
@@ -870,7 +891,7 @@ function assignLineup(s,actor,body,verifiedSchedule){
     if(!displaced)return failure(409,'Choose which starter to replace');
     if(injurySwapRetired(s,displaced))return failure(409,'Substituted-out player cannot return this NFL week');
     if(lineupLocked(s,displaced,verifiedSchedule))return failure(409,'The current starter is locked');
-    if(s.injuries?.some(i=>i.active&&i.player===displaced.id)||displaced.scoringMode)
+    if(pendingInjury(s,displaced)||activeSwapMode(s,displaced))
       return failure(409,'The current starter cannot be moved');
     if(player.slot==='IR'&&!eligibleIR(displaced))return failure(409,'Cannot swap a healthy player into IR');
     if(!['BENCH','IR'].includes(player.slot)&&!slotEligible(displaced,player.slot))
@@ -917,9 +938,9 @@ function saveStartingLineup(s,actor,body,verifiedSchedule){
     for(let index=0;index<existing.length;index++){
       const player=existing[index];
       const key=position+':'+index;
-      if((lineupLocked(s,player,verifiedSchedule)||injurySwapCurrentSlot(s,player)||player.scoringMode||
-        s.injuries?.some(i=>i.active&&i.player===player.id))&&requested[key]!==player.id)
-        return failure(409,player.name+' is locked in '+key+' ('+(lineupLockReason(s,player,verifiedSchedule)|| (player.scoringMode?'injury substitution already committed':'pending injury decision'))+')');
+      if((lineupLocked(s,player,verifiedSchedule)||activeSwapMode(s,player)||
+        pendingInjury(s,player))&&requested[key]!==player.id)
+        return failure(409,player.name+' is locked in '+key+' ('+(lineupLockReason(s,player,verifiedSchedule)|| (activeSwapMode(s,player)?'injury substitution already committed':'pending injury decision'))+')');
     }
   }
   for(const player of mine){
@@ -927,8 +948,8 @@ function saveStartingLineup(s,actor,body,verifiedSchedule){
       (player.slot==='IR'?'IR':'BENCH');
     if(target!==player.slot&&lineupLocked(s,player,verifiedSchedule))
       return failure(409,player.name+' is locked after kickoff ('+lineupLockReason(s,player,verifiedSchedule)+')');
-    if(target!==player.slot&&(injurySwapRetired(s,player)||injurySwapCurrentSlot(s,player)||player.scoringMode||player.scoreAtSwap!==undefined||
-      s.injuries?.some(i=>i.active&&i.player===player.id)))
+    if(target!==player.slot&&(injurySwapRetired(s,player)||activeSwapMode(s,player)||
+      pendingInjury(s,player)))
       return failure(409,player.name+' cannot be moved after an injury decision');
   }
   const benchCount=mine.filter(p=>!proposed.has(p.id)&&p.slot!=='IR').length;
@@ -1815,7 +1836,7 @@ async function api(req,res,route){
         if(!player)return failure(400,'Choose a starter');
         if(injurySwapRetired(s,player))return failure(409,'Player already substituted out this week');
         if(s.injuries.some(i=>i.player===player.id&&i.active))return failure(409,'Injury already pending');
-        player.status='injured';s.injuries.push({id:crypto.randomUUID(),player:player.id,active:true,description:'Demo injury event'});
+        player.status='injured';s.injuries.push({id:crypto.randomUUID(),player:player.id,week:injurySwapWeek(s),active:true,description:'Demo injury event'});
       }else if(body.action==='points'){
         const player=s.players.find(p=>p.id===body.player),amount=Number(body.amount);
         if(!player||!Number.isFinite(amount)||Math.abs(amount)>100)return failure(400,'Invalid player or points');
@@ -1929,11 +1950,12 @@ async function syncNFLScoring(){
       // Preserve frozen Week 9 matchups and every injury-substitution history entry.
       if(Number(s.week)!==week){
         for(const p of s.players){
-          p.points=0;p.credited=0;p.scoreAtSwap=0;p.scoreWeek=week;
+          p.points=0;p.credited=0;delete p.scoreAtSwap;p.scoreWeek=week;
           p.liveScoreStatus='UPCOMING';p.liveScoreUpdatedAt=null;
         }
         s.demoPointAdjustments={};
       }
+      expireOldInjuryState(s);
       for(const player of s.players){
         if(!player.espnId&&player.pos!=='D/ST')continue; // Demo data must never be overwritten.
         const game=ids.get(liveNFL.teamId(player));
