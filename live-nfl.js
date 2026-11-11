@@ -408,6 +408,24 @@ function teamId(player){
  return TEAM_IDS[v.toUpperCase()]||TEAM_IDS[aliases[normalized]]||null;
 }
 async function loadWeek(season,week){const board=await json(`${BASE}/scoreboard?season=${season}&seasontype=2&week=${week}&limit=100`);const games=eventGames(board);if(!games.length)throw Error('No NFL games returned for requested week');return games;}
+// A scoreboard omission is NOT proof of a bye. Verify the team's own complete
+// regular-season schedule before accepting a zero-point historical starter.
+const byeScheduleCache=new Map();
+async function verifyTeamBye(season,week,teamId){
+ const id=String(teamId||'');
+ if(!Object.values(TEAM_IDS).includes(id)||!Number.isInteger(Number(week))||Number(week)<1||Number(week)>18)return false;
+ const key=`${season}:${id}`;
+ let schedule=byeScheduleCache.get(key);
+ if(!schedule){
+  const response=await json(`${BASE}/teams/${encodeURIComponent(id)}/schedule?season=${season}&seasontype=2`);
+  const weeks=(response.events||[]).map(e=>Number(e.week?.number||e.week?.week||0)).filter(w=>w>=1&&w<=18);
+  // All 17 games in 17 distinct weeks must be visible. If the feed is partial,
+  // never infer a bye; a transient API failure is not a zero-point game.
+  if(weeks.length!==17||new Set(weeks).size!==17)return false;
+  schedule=new Set(weeks);byeScheduleCache.set(key,schedule);
+ }
+ return !schedule.has(Number(week));
+}
 async function fetchGame(id){
  const summary=await json(`${BASE}/summary?event=${encodeURIComponent(id)}`);
  // ESPN's summary can omit older drives or individual plays. Merge the CDN
@@ -423,4 +441,4 @@ async function fetchGame(id){
  }catch(e){console.warn('NFL CDN play feed unavailable for',id,e.message);}
  return summary;
 }
-module.exports={loadWeek,fetchGame,playerStats,rawPlays,playEvents,resolveKickerEvents,defenseEvents,scorePlayer,defenseStats,scoreDefense,teamId,defensivePlayerTotals,lostFumblesByTeam};
+module.exports={TEAM_IDS,loadWeek,verifyTeamBye,fetchGame,playerStats,rawPlays,playEvents,resolveKickerEvents,defenseEvents,scorePlayer,defenseStats,scoreDefense,teamId,defensivePlayerTotals,lostFumblesByTeam};

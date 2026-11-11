@@ -6,7 +6,7 @@ const a=source.indexOf('let historyReconcileBusy=false;');
 const b=source.indexOf('const playerHistoryCache=new Map();',a);
 assert(a>0&&b>a);
 const fn=source.slice(a,b);
-async function run({mode='later',swap=true,ownerChanged=false,complete=true,bye=false}={}){
+async function run({mode='later',swap=true,ownerChanged=false,complete=true,bye=false,byeProof=true}={}){
  const player={id:'espn-1',name:'Replacement',pos:'RB',espnId:'1',nflTeamId:bye?23:14,owner:ownerChanged?'other':'home',scoringMode:mode,points:7};
  const entry={id:player.id,name:player.name,pos:'RB',espnId:'1',nflTeamId:bye?23:14,scoringMode:bye?null:mode,liveScoreStatus:'INJURY_SUBSTITUTION_REQUIRES_EVENT_SCORING',points:7};
  if(bye)player.scoringMode=null;
@@ -16,7 +16,7 @@ async function run({mode='later',swap=true,ownerChanged=false,complete=true,bye=
  const ctx={console:{warn(){},error(e){throw e},log(){}},process:{env:{}},Date,Number,String,Map,Object,
   scoringSyncBusy:false,ensureDraft:()=>({status:'completed'}),
   snapshot:async()=>({state}),liveNFL:{loadWeek:async()=>[{id:'g',status:'final',teams:[{id:14},{id:15}]}],
-   teamId:p=>p?.nflTeamId,fetchGame:async()=>({})},
+   TEAM_IDS:{PIT:'23',LAR:'14'},verifyTeamBye:async()=>byeProof,teamId:p=>p?.nflTeamId,fetchGame:async()=>({})},
   defenseStore:{ingest:async()=>{},get:async()=>null},
   fantasyDST:{ingestWeek:async()=>{}},
   pool:{},settingsOf:()=>({scoring:{}}),
@@ -42,6 +42,8 @@ async function run({mode='later',swap=true,ownerChanged=false,complete=true,bye=
  assert.equal(r.state.weeklyLedger[9].matchups.m.homeLineup[0].liveScoreStatus,'BYE');
  assert.equal(r.state.weeklyLedger[9].matchups.m.homeLineup[0].points,0);
  assert.equal(r.state.weeklyLedger[9].matchups.m.status,'final');
+ r=await run({bye:true,byeProof:false});
+ assert.equal(r.state.weeklyLedger[9].matchups.m.status,'provisional','unverified bye must not finalize');
  r=await run({complete:false});
  assert.equal(r.state.weeklyLedger[9].matchups.m.status,'provisional');
  console.log('PASS: later kickoff replacement, changed owner, handcuff block, missing swap block, incomplete score block');

@@ -432,6 +432,9 @@ function updateWeeklyLedger(s,accounts,week,games,failures){
   const allFinal=games.length>0&&games.every(g=>g.status==='final')&&failures.length===0;
   for(const match of matches){
     const prior=entry.matchups[match.id];if(prior?.status==='final')continue;
+    // A completed week's frozen lineup must never be rebuilt from today's
+    // roster. Historical reconciliation updates the saved entries directly.
+    if(prior&&allFinal)continue;
     const homeLineup=ledgerLineup(s,match.home),awayLineup=ledgerLineup(s,match.away);
     const allPlayers=[...homeLineup,...awayLineup];
     const verified=allPlayers.every(p=>p.liveScoreStatus==='UPDATED'&&
@@ -1935,6 +1938,7 @@ async function reconcileHistoricalMatchups(){
    if(!games.length||games.some(g=>g.status!=='final'))continue;
    const byTeam=new Map();for(const g of games)for(const t of g.teams)byTeam.set(String(t.id),g);
    const candidates=[];
+   const possibleByes=[];
    for(const m of snapshotMatches)for(const side of ['homeLineup','awayLineup'])for(const entry of m[side]||[]){
     // Only a previously recorded snapshot is eligible, not a reconstructed lineup.
     if(entry.scoringMode&&entry.scoringMode!=='later')continue;
@@ -1952,14 +1956,21 @@ async function reconcileHistoricalMatchups(){
       // A team absent from a complete, final weekly NFL schedule has a bye.
       // Never infer a bye from an unknown team ID, an incomplete schedule,
       // or a replacement whose special scoring still needs verification.
-      if(team&&entry.scoringMode==null&&/^[0-9]+$/.test(team)&&
-         Number(team)>0&&Number(team)<=34)
-        candidates.push({matchId:m.id,side,id:String(entry.id),team,pos:entry.pos,
-          name:entry.name,bye:true});
+      if(team&&entry.scoringMode==null&&Object.values(liveNFL.TEAM_IDS).includes(team))
+        possibleByes.push({matchId:m.id,side,id:String(entry.id),team,pos:entry.pos,name:entry.name});
       continue;
     }
     candidates.push({matchId:m.id,side,id:String(entry.id),athleteId:id,team,game,pos:entry.pos,name:entry.name});
    }
+   // Check each absent team's independent 17-game schedule once. A missing
+   // scoreboard event, unrecognized team or unresolved athlete affiliation
+   // must never be turned into a verified zero.
+   const byeProof=new Map();
+   for(const team of new Set(possibleByes.map(x=>x.team))){
+    try{byeProof.set(team,await liveNFL.verifyTeamBye(season,week,team));}
+    catch(e){console.warn('Historical bye verification:',week,team,e.message);byeProof.set(team,false);}
+   }
+   for(const c of possibleByes)if(byeProof.get(c.team))candidates.push({...c,bye:true});
    // Fetch each required game once. A missing play-by-play feed must not prevent
    // checking independently persisted ESPN Fantasy D/ST categories.
    const box=new Map();
@@ -1991,6 +2002,7 @@ async function reconcileHistoricalMatchups(){
      entry.points=u.points;
      entry.liveScoreStatus=u.bye?'BYE':'UPDATED';
      if(u.bye)entry.byeVerified=true;
+     else entry.byeVerified=false;
      entry.reconciledAt=new Date().toISOString();
     }
     // Historical results are certified only after every NFL game is final,
