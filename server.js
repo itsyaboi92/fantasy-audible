@@ -1069,6 +1069,63 @@ async function api(req,res,route){
       lastNFLScoringSync:s.nflSync?.at||null,team:manager.team,players:records,
       interpretation:'A current O/Q designation does not establish that a live status transition was observed. Eligibility is evaluated against current bench and kickoff state, not reconstructed historical availability.'});
   }
+  // Commissioner-only, read-only diagnostic. Uses saved state only: no database
+  // writes, external requests, or assumptions about defenseStore's API.
+  if(req.method==='GET'&&route==='/api/diagnostics/week9-scoring'){
+    if(!user.commissioner)return send(res,403,{error:'Commissioner only'});
+    const s=current.state,week=9;
+    const records=Object.values(s.weeklyLedger?.[week]?.matchups||{});
+    const byId=new Map((s.players||[]).map(p=>[String(p.id),p]));
+    const history=(s.injurySwapHistory||[]).filter(x=>Number(x.week)===week);
+    const matchups=records.map(m=>{
+      const sides={};
+      for(const side of ['homeLineup','awayLineup']){
+        sides[side]=(Array.isArray(m[side])?m[side]:[]).map(p=>{
+          const currentPlayer=byId.get(String(p.id));
+          const substitutions=history.filter(x=>
+            String(x.replacementId)===String(p.id)||String(x.removedId)===String(p.id))
+            .map(x=>({role:String(x.replacementId)===String(p.id)?'replacement':'removed',
+              mode:x.mode||null,slot:x.slot||null,forfeitedPoints:x.forfeitedPoints??null,
+              at:x.at||null}));
+          const validScore=typeof p.points==='number'&&Number.isFinite(p.points);
+          const verified=validScore&&p.liveScoreStatus==='UPDATED'&&!p.scoringMode;
+          return {name:p.name||null,id:String(p.id||''),position:p.pos||null,
+            slot:p.slot||null,espnId:p.espnId||currentPlayer?.espnId||null,
+            nflTeamId:p.nflTeamId||currentPlayer?.nflTeamId||null,
+            points:p.points??null,liveScoreStatus:p.liveScoreStatus||null,
+            scoringMode:p.scoringMode||null,verified,
+            currentPlayer:{exists:!!currentPlayer,
+              points:currentPlayer?.points??null,
+              liveScoreStatus:currentPlayer?.liveScoreStatus||null,
+              scoringMode:currentPlayer?.scoringMode||null,
+              credited:currentPlayer?.credited??null,
+              scoreAtSwap:currentPlayer?.scoreAtSwap??null},
+            substitutionHistory:substitutions,
+            // Stored D/ST evidence, when present; no unverified ESPN claims.
+            defenseEvidence:p.pos==='D/ST'?{
+              storedStats:p.defenseStats||p.dstStats||null,
+              storedVerification:p.defenseVerification||null,
+              currentStats:currentPlayer?.defenseStats||currentPlayer?.dstStats||null
+            }:undefined};
+        });
+      }
+      return {id:m.id||null,status:m.status||null,
+        homeScore:m.homeScore??null,awayScore:m.awayScore??null,
+        warning:m.warning||null,homeLineup:sides.homeLineup,
+        awayLineup:sides.awayLineup,
+        blockers:[...sides.homeLineup,...sides.awayLineup]
+          .filter(p=>!p.verified).map(p=>({name:p.name,position:p.position,
+            liveScoreStatus:p.liveScoreStatus,scoringMode:p.scoringMode,
+            points:p.points}))};
+    });
+    return send(res,200,{diagnostic:'week9-scoring-readonly-v2',readOnly:true,
+      generatedAt:new Date().toISOString(),week,
+      season:s.scheduleSeason||null,
+      nflSync:s.nflSync?{at:s.nflSync.at||null,
+        failures:s.nflSync.failures||[],
+        games:(s.nflSync.games||[]).map(g=>({id:g.id,status:g.status}))}:null,
+      matchups,substitutionHistoryCount:history.length});
+  }
   if(req.method==='GET'&&route==='/api/diagnostics/kyren-week9'){
     if(!user.commissioner)return send(res,403,{error:'Commissioner only'});
     const state=current.state,week=9;
