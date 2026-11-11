@@ -68,8 +68,13 @@ async function disablePush(){try{const registration=await navigator.serviceWorke
   toast('Push notifications disabled');}catch(e){toast(e.message);}}
 function toast(message){const el=$('toast');if(!el)return;el.textContent=message;el.style.display='block';
   setTimeout(()=>el.style.display='none',3500);}
+function nflAffiliationLabel(teamId){
+  if(teamId===0||teamId==='0')return 'Free Agent (NFL)';
+  if(teamId===null||teamId===undefined||teamId==='')return 'NFL team unavailable';
+  return 'NFL team '+String(teamId);
+}
 function playerRow(x){return `<div class="row"><div><b>${esc(x.name)}</b><div class="muted small">
-  ${esc(x.team)} · ${esc(x.pos)} · ${esc(x.slot)} · ${esc(x.status)}</div></div><b>${fmt(score(x))}</b></div>`;}
+  ${esc(nflAffiliationLabel(x.nflTeamId??x.team))} · ${esc(x.pos)} · ${esc(x.slot)} · ${esc(x.status)}</div></div><b>${fmt(score(x))}</b></div>`;}
 async function apiPost(route,body){const response=await fetch(route,{method:'POST',headers:{
   'Content-Type':'application/json',Authorization:'Bearer '+token},body:JSON.stringify(body)});
   const result=await response.json();if(!response.ok)throw Error(result.error||'Request failed');return result;}
@@ -479,7 +484,7 @@ function playerTable(){if(!espn)return card('ESPN player data',`<p>${esc(espnErr
       `<p class="muted small">Free agents: Add immediately · Locked: game in progress · Waivers: claim after final. Waiver priority: ${esc((transactionData?.priority||[]).join(' → ')||'Not initialized')}</p>`):''}
     ${playerProfileCard()}${breakdownCard()}<div id="draftPlayerRows">${players.map(x=>{const legal=canDraftPosition(x.position);
       return `<div class="row"><div><b>${x.rank==null?'—':'#'+x.rank} <button type="button" style="border:0;background:transparent;padding:0;text-decoration:underline;font:inherit;color:inherit;cursor:pointer" onclick='openPlayerProfile(${jsAttr(String(x.id))})'>${esc(x.name)}</button></b>
-        <div class="muted small">${esc(x.position)} · ESPN ADP ${x.averageDraftPosition==null?'—':fmt(x.averageDraftPosition)}</div>
+        <div class="muted small">${esc(x.position)} · ${esc(nflAffiliationLabel(x.nflTeamId))} · ESPN ADP ${x.averageDraftPosition==null?'—':fmt(x.averageDraftPosition)}</div>
         ${x.position==='D/ST'?'':injuryLabel(x.injuryStatus)}</div><div style="text-align:right"><b>${x.projectedPoints==null?'—':fmt(x.projectedPoints)}</b>
         <div class="muted small">Season projected PPR</div>
         <div class="muted small">Last game: ${weeklyCell(x).last==null?'—':fmt(weeklyCell(x).last)+'*'} ${weeklyDirectory[String(x.id)]?.gameStatus==='final'?'(Wk '+esc(weeklyDirectory[String(x.id)].week)+(weeklyDirectory[String(x.id)].opponent?' vs '+esc(weeklyDirectory[String(x.id)].opponent):'')+')':''}</div>
