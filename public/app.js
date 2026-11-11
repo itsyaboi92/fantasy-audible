@@ -880,6 +880,18 @@ function matchupSwipeStart(e){matchupTouchX=e.touches?.[0]?.clientX??null;}
 function matchupSwipeEnd(e){if(matchupTouchX===null)return;const diff=(e.changedTouches?.[0]?.clientX??matchupTouchX)-matchupTouchX;matchupTouchX=null;if(Math.abs(diff)>55)selectMatchup(matchupIndex+(diff<0?1:-1));}
 function matchupStarters(id){const starters=state.players.filter(x=>x.owner===id&&!['BENCH','IR'].includes(x.slot));
   const used=new Set();return STARTER_ORDER.map(slot=>{const player=starters.find(x=>!used.has(x.id)&&(x.slot===slot||(slot==='FLEX'&&['FLEX','RB','WR','TE'].includes(x.slot))));if(player)used.add(player.id);return player||null;});}
+function matchupActualPoints(p,week){
+  if(!p)return 0;
+  // A frozen historical entry is already scoped to its ledger week.
+  if(p._frozenWeek===week){
+    const game=nflPlayerGame(p).game;
+    return game?.status==='upcoming'?0:Number(p.points)||0;
+  }
+  if(Number(p.scoreWeek)!==Number(week))return 0;
+  const game=nflPlayerGame(p).game;
+  if(!game||game.status==='upcoming')return 0;
+  return Number(p.scoringMode==='handcuff'?(p.credited??0):p.points)||0;
+}
 function matchupPlayerCell(x){
   if(!x)return '<span class="muted">Open slot</span>';
   const playerId=String(x.id||'');
@@ -914,7 +926,7 @@ function matchupPlayerCell(x){
     <div class="muted small">${esc(gameLabel)}</div>
     <div class="muted small">${kickoff?esc(kickoff):(loaded?'No kickoff':'Loading kickoff…')} · ${esc(gameStatus)}</div>
     <div class="muted small">OPRK: ${Number.isInteger(oprk)&&oprk>=1&&oprk<=32?oprk+(oprk%10===1&&oprk!==11?'st':oprk%10===2&&oprk!==12?'nd':oprk%10===3&&oprk!==13?'rd':'th'):'—'} · Proj: ${Number.isFinite(projected)&&projected>=0?fmt(projected)+' est.':'—'}</div>
-    <strong>${fmt(Number(x.points??score(x))||0)} <span class="muted small">pts</span></strong>`;
+    <strong>${fmt(matchupActualPoints(x,selectedMatchupWeek()))} <span class="muted small">pts</span></strong>`;
 }
 // v31: Game-specific player boxscore overlay, independent of season history.
 let fa31StatsTimer=null,fa31Selected=null,fa31Request=0;
@@ -1008,8 +1020,8 @@ function faForecastPlayer(p,week){
   const feedCurrent=Number(state?.nflDirectorySync?.currentWeek||state?.week)===Number(week);
   // Do not carry stale NFL directory scores into upcoming or future games.
   const actual=(liveGame||finalGame)&&feedCurrent&&Number.isFinite(feedPoints)
-    ?feedPoints:(liveGame||finalGame?Math.max(0,Number(p.points)||0):0);
-  const credited=Number.isFinite(Number(p.credited))&&p.scoringMode
+    ?feedPoints:(liveGame||finalGame?Math.max(0,matchupActualPoints(p,week)):0);
+  const credited=Number.isFinite(Number(p.credited))&&p.scoringMode&&Number(p.scoreWeek)===week
     ?Math.max(0,Number(p.credited)):actual;
   if(finalGame||progress===1)return {actual:credited,projected:credited,variance:0,known:true,live:false};
   if(explicitlyOut||onBye)return {actual:credited,projected:credited,variance:0,known:true,live:liveGame};
@@ -1087,15 +1099,16 @@ function matchupView(){
   // Future weeks have no recorded lineup yet. Preview today's roster without
   // carrying current-week fantasy points into the future matchup.
   const futurePreview=players=>players.map(p=>({...p,points:0,credited:0,scoreAtSwap:0,scoringMode:null}));
-  const leftPlayers=recorded?.homeLineup?lineupBySlot(recorded.homeLineup):
+  const leftPlayers=recorded?.homeLineup?lineupBySlot(recorded.homeLineup.map(p=>({...p,_frozenWeek:week}))):
     (week>current?futurePreview(matchupStarters(game.home)):(isCurrent?matchupStarters(game.home):[]));
-  const rightPlayers=recorded?.awayLineup?lineupBySlot(recorded.awayLineup):
+  const rightPlayers=recorded?.awayLineup?lineupBySlot(recorded.awayLineup.map(p=>({...p,_frozenWeek:week}))):
     (week>current?futurePreview(matchupStarters(game.away)):(isCurrent?matchupStarters(game.away):[]));
   const cells=STARTER_ORDER.map((slot,i)=>`<div class="fa-match-row"><div class="fa-player">${leftPlayers[i]?(week>current?`<b>${esc(leftPlayers[i].name)}</b><div class="muted small">Projected starter · 0.0 actual</div>`:matchupPlayerCell(leftPlayers[i])):'<span class="muted">Open slot</span>'}</div><div class="fa-position">${slot}</div><div class="fa-player fa-right">${rightPlayers[i]?(week>current?`<b>${esc(rightPlayers[i].name)}</b><div class="muted small">Projected starter · 0.0 actual</div>`:matchupPlayerCell(rightPlayers[i])):'<span class="muted">Open slot</span>'}</div></div>`).join('');
   const status=recorded?.status==='final'?'Final':week>current?'Upcoming':week<current?'Past week · provisional':(Object.values(nflMatchupCache[(Number(state.nflDirectorySync?.season||new Date().getFullYear()))+':'+week]?.data?.teams||{}).some(g=>g.status==='playing')?'Live / provisional':'Upcoming / awaiting kickoff');
-  const total=(id,side)=>recorded?fmt(Number(recorded[side+'Score'])||0):
+  const total=(id,side)=>recorded?.status==='final'?fmt(Number(recorded[side+'Score'])||0):
+    recorded?fmt((side==='home'?leftPlayers:rightPlayers).reduce((sum,p)=>sum+matchupActualPoints(p,week),0)):
     week>current?fmt(0):
-    isCurrent?fmt(matchupStarters(id).reduce((sum,p)=>sum+(Number(p?.points)||0),0)):fmt(0);
+    isCurrent?fmt(matchupStarters(id).reduce((sum,p)=>sum+matchupActualPoints(p,week),0)):fmt(0);
   // Do not use current-week scores or a different week's projections for a
   // future matchup. A future forecast requires that week's own verified data.
   const forecast=week>current
@@ -1412,7 +1425,8 @@ function render(){if(!state||!manager)return;const mine=state.players.filter(x=>
       <button onclick="act('/api/demo',{action:'advance'})">Advance</button>`)}
     ${card('Simulate points',`<select id="pointPlayer">${state.players.map(x=>
       `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('')}</select>
-      <button onclick="act('/api/demo',{action:'points',player:$('pointPlayer').value,amount:3.5})">Add 3.5 points</button>`)}`;
+      <button onclick="act('/api/demo',{action:'points',player:$('pointPlayer').value,amount:3.5})">Add 3.5 points</button>
+      <button onclick="resetSimulatedPoints()">Reset simulated points (upcoming game only)</button>`)}`;
   $('app').innerHTML=`<div class="row"><span class="muted small">${esc(state.viewer.name)} · ${esc(myTeam.team)}</span>
     <div class="actions"><button onclick="renameTeam()">Rename Team</button><button onclick="logout()">Sign out</button></div></div>${content}`;
   updateDraftClock();
@@ -1466,6 +1480,11 @@ function leagueTeamRosterView(){
     <h3>Starters (${starters.length})</h3>${rows(starters)||'<p class="muted">No starters assigned yet.</p>'}
     <h3>Bench (${bench.length})</h3>${rows(bench)||'<p class="muted">No bench players yet.</p>'}
     <h3>Injured Reserve (${ir.length})</h3>${rows(ir)||'<p class="muted">No players on IR.</p>'}</section>`;
+}
+async function resetSimulatedPoints(){
+  const player=$('pointPlayer')?.value;
+  if(!player||!confirm('Clear simulated points for this player in the current NFL week? Finalized matchups and live games will not be changed.'))return;
+  await act('/api/demo',{action:'reset-points',player});
 }
 function changeTab(next){closeMatchupGameStats();if(next==='Matchup'&&tab!=='Matchup'){matchupWeek=null;matchupAutoWeek=null;matchupIndex=0;}tab=next;render();if(tab==='Draft')syncServerClock();
   if(tab==='Draft'||tab==='Players')loadESPN();
