@@ -1,6 +1,6 @@
 let state=null,manager=null,tab=new URLSearchParams(location.search).get('tab')==='Notifications'?'Notifications':'Home',token=localStorage.getItem('audibleToken');
 let chatMessages=[],chatMuted=false,chatMutedManagers=[],chatLastId=0,chatSeenId=Number(localStorage.getItem('audibleChatSeen')||0),chatLoading=false,chatError='',chatDraft='',chatPendingGif=null,giphyOpen=false,giphyResults=[],giphyQuery='',giphyError='',giphyBusy=false,giphyRequest=0;
-let matchupWeek=null,matchupIndex=0,matchupTouchX=null;
+let matchupWeek=null,matchupIndex=0,matchupTouchX=null,matchupAutoWeek=null;
 let viewedLeagueTeamId=null;
 let espn=null,espnError='',draftSearch='',draftPosition='ALL',loadingESPN=false;
 let weeklyDirectory={},weeklyUpdatedAt=null,weeklyLoading=false,weeklyLastFetch=0;
@@ -863,7 +863,17 @@ function nflPlayerGame(x){
   const id=/^\d+$/.test(team)?team:NFL_TEAM_IDS[team];
   return {game:board?.teams?.[id]||null,loaded:!!board,verified};
 }
-function selectedMatchupWeek(){return Math.min(18,Math.max(1,matchupWeek??Number(state.scheduleStartWeek||state.nflDirectorySync?.currentWeek||state.week||1)));}
+function currentMatchupWeek(){
+  const current=Number(state?.nflDirectorySync?.currentWeek||state?.week||1);
+  const leagueStart=Number(state?.scheduleStartWeek||1);
+  return Math.min(18,Math.max(1,Number.isFinite(current)?current:1,Number.isFinite(leagueStart)?leagueStart:1));
+}
+function selectedMatchupWeek(){return matchupWeek??currentMatchupWeek();}
+function syncAutomaticMatchupWeek(){
+  if(matchupWeek!==null)return; // Explicit historical navigation remains selected until leaving Matchup.
+  const current=currentMatchupWeek();
+  if(matchupAutoWeek!==current){matchupIndex=0;closeMatchupGameStats();}
+}
 function setMatchupWeek(week){closeMatchupGameStats();matchupWeek=Math.min(18,Math.max(1,Number(week)||1));matchupIndex=0;render();fetchNFLMatchups(matchupWeek);}
 function selectMatchup(index){const games=state.matchupSchedule?.[selectedMatchupWeek()]||[];if(!games.length)return;matchupIndex=(index+games.length)%games.length;render();}
 function matchupSwipeStart(e){matchupTouchX=e.touches?.[0]?.clientX??null;}
@@ -1061,13 +1071,14 @@ function faMatchForecastView(leftPlayers,rightPlayers,week,recorded,ledgerHome,l
   </div>`;
 }
 function matchupView(){
+  syncAutomaticMatchupWeek();
   const week=selectedMatchupWeek(),games=state.matchupSchedule?.[week]||[];
-  if(!games.length){const count=state.managers.filter(x=>x.claimed).length;
+  if(!games.length){if(matchupWeek===null)matchupAutoWeek=week;const count=state.managers.filter(x=>x.claimed).length;
     const reason=count<2?'At least two registered teams are required.':state.draft?.status!=='completed'?'Matchups will be generated automatically when the draft finishes.':state.matchupScheduleNotice||(!state.scheduleStartWeek?'Draft completed. Automatic schedule activation pending; checking ESPN NFL kickoff calendar.':week<state.scheduleStartWeek?'Your league begins in NFL Week '+state.scheduleStartWeek+'.':week>=(state.postseason?.regularSeasonEnd||((state.managers||[]).filter(m=>m.claimed).length<=8?14:13))?'Awaiting verified final scoring and official postseason bracket activation or previous-round advancement.':'No matchup scheduled for this week.');
     return `<h1>Week ${week} Matchups</h1><div class="fa-week" style="display:flex;justify-content:center;align-items:center;gap:12px;margin:18px auto 22px;width:100%;"><button onclick="setMatchupWeek(${week-1})" ${week===1?'disabled':''}>‹</button><label>NFL Week <select onchange="setMatchupWeek(this.value)">${Array.from({length:18},(_,i)=>`<option value="${i+1}" ${week===i+1?'selected':''}>${i+1}</option>`).join('')}</select></label><button onclick="setMatchupWeek(${week+1})" ${week===18?'disabled':''}>›</button></div>${card('League matchups',esc(reason))}`;
   }
   if(matchupIndex>=games.length)matchupIndex=0;
-  if(matchupWeek===null){matchupWeek=week;const mine=games.findIndex(g=>g.home===manager||g.away===manager);if(mine>=0)matchupIndex=mine;}
+  if(matchupWeek===null&&matchupAutoWeek!==week){matchupAutoWeek=week;const mine=games.findIndex(g=>g.home===manager||g.away===manager);matchupIndex=mine>=0?mine:0;}
   const game=games[matchupIndex],left=m(game.home),right=m(game.away);
   const byeTeams=state.managers.filter(x=>x.claimed&&!games.some(g=>g.home===x.id||g.away===x.id));
   const current=Number(state.nflDirectorySync?.currentWeek||state.week||1),isCurrent=week===current;
@@ -1456,7 +1467,7 @@ function leagueTeamRosterView(){
     <h3>Bench (${bench.length})</h3>${rows(bench)||'<p class="muted">No bench players yet.</p>'}
     <h3>Injured Reserve (${ir.length})</h3>${rows(ir)||'<p class="muted">No players on IR.</p>'}</section>`;
 }
-function changeTab(next){closeMatchupGameStats();if(next==='Matchup'&&tab!=='Matchup'){matchupWeek=null;matchupIndex=0;}tab=next;render();if(tab==='Draft')syncServerClock();
+function changeTab(next){closeMatchupGameStats();if(next==='Matchup'&&tab!=='Matchup'){matchupWeek=null;matchupAutoWeek=null;matchupIndex=0;}tab=next;render();if(tab==='Draft')syncServerClock();
   if(tab==='Draft'||tab==='Players')loadESPN();
   if(tab==='My Team'){loadWeeklyDirectory();fetchNFLMatchups(Math.min(18,Math.max(1,Number(state?.nflDirectorySync?.currentWeek||state?.week||1))));}
   if(tab==='Players'){loadWeeklyDirectory();fetchNFLMatchups(Math.min(18,Math.max(1,Number(state?.nflDirectorySync?.currentWeek||state?.week||selectedMatchupWeek()))));}
