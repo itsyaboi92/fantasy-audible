@@ -1980,8 +1980,10 @@ async function reconcileHistoricalMatchups(){
    for(const c of possibleByes)if(byeProof.get(c.team))candidates.push({...c,bye:true});
    // Fetch each required game once. A missing play-by-play feed must not prevent
    // checking independently persisted ESPN Fantasy D/ST categories.
+   // D/ST-only games MUST be fetched too: defenseStore.ingest needs the final
+   // box score to persist defensive stats before get() can verify the D/ST.
    const box=new Map();
-   for(const game of [...new Map(candidates.filter(c=>!c.bye&&!c.inactive&&c.pos!=='D/ST').map(c=>[c.game.id,c.game])).values()]){
+   for(const game of [...new Map(candidates.filter(c=>!c.bye&&!c.inactive&&c.game).map(c=>[c.game.id,c.game])).values()]){
     try{const summary=await liveNFL.fetchGame(game.id);box.set(String(game.id),summary);await defenseStore.ingest(pool,season,game,summary);}
     catch(e){console.warn('Historical reconciliation game:',game.id,e.message);}
    }
