@@ -1,0 +1,15 @@
+const assert=require('node:assert/strict');
+const fs=require('node:fs');const vm=require('node:vm');
+const source=fs.readFileSync(__dirname+'/public/app.js','utf8');
+const functions=['currentMatchupWeek','selectedMatchupWeek','syncAutomaticMatchupWeek'];
+const parts=functions.map(name=>{const start=source.indexOf('function '+name+'(');assert(start>=0,name);let pos=source.indexOf('{',start),depth=0;for(;pos<source.length;pos++){if(source[pos]==='{')depth++;if(source[pos]==='}'&&!--depth)return source.slice(start,pos+1);}throw Error(name);});
+const ctx={state:{scheduleStartWeek:9,nflDirectorySync:{currentWeek:10}},matchupWeek:null,matchupAutoWeek:null,matchupIndex:2,closeMatchupGameStats(){this.closed=(this.closed||0)+1}};
+vm.createContext(ctx);vm.runInContext(parts.join('\n'),ctx);
+assert.equal(ctx.selectedMatchupWeek(),10,'current NFL week beats league start');
+ctx.syncAutomaticMatchupWeek();assert.equal(ctx.matchupIndex,0,'new current week resets index');
+ctx.matchupAutoWeek=10;ctx.matchupIndex=2;ctx.syncAutomaticMatchupWeek();assert.equal(ctx.matchupIndex,2,'same week preserves chosen matchup');
+ctx.state.nflDirectorySync.currentWeek=11;assert.equal(ctx.selectedMatchupWeek(),11,'automatically advances');ctx.syncAutomaticMatchupWeek();assert.equal(ctx.matchupIndex,0);
+ctx.matchupWeek=9;ctx.state.nflDirectorySync.currentWeek=12;assert.equal(ctx.selectedMatchupWeek(),9,'manual history selection preserved');ctx.matchupIndex=2;ctx.syncAutomaticMatchupWeek();assert.equal(ctx.matchupIndex,2);
+ctx.matchupWeek=null;assert.equal(ctx.selectedMatchupWeek(),12,'returning to auto mode selects current');
+ctx.state.nflDirectorySync.currentWeek=8;assert.equal(ctx.selectedMatchupWeek(),9,'never defaults before league starts');
+console.log('PASS: current week, rollover, manual history, league start, matchup selection');
