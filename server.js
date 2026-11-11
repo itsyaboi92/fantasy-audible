@@ -1089,13 +1089,15 @@ async function api(req,res,route){
               mode:x.mode||null,slot:x.slot||null,forfeitedPoints:x.forfeitedPoints??null,
               at:x.at||null}));
           const validScore=typeof p.points==='number'&&Number.isFinite(p.points);
-          const verified=validScore&&p.liveScoreStatus==='UPDATED'&&
+          const verified=validScore&&(
+            p.liveScoreStatus==='BYE'&&p.byeVerified===true&&p.points===0||
+            p.liveScoreStatus==='UPDATED')&&
             (!p.scoringMode||p.scoringMode==='later'&&substitutions.some(x=>x.role==='replacement'&&x.mode==='later'));
           return {name:p.name||null,id:String(p.id||''),position:p.pos||null,
             slot:p.slot||null,espnId:p.espnId||currentPlayer?.espnId||null,
             nflTeamId:p.nflTeamId||currentPlayer?.nflTeamId||null,
             points:p.points??null,liveScoreStatus:p.liveScoreStatus||null,
-            scoringMode:p.scoringMode||null,verified,
+            scoringMode:p.scoringMode||null,byeVerified:p.byeVerified===true,verified,
             currentPlayer:{exists:!!currentPlayer,
               points:currentPlayer?.points??null,
               liveScoreStatus:currentPlayer?.liveScoreStatus||null,
@@ -1945,19 +1947,30 @@ async function reconcileHistoricalMatchups(){
     const id=String(entry.espnId||athlete?.espnId||'');
     if(!id&&entry.pos!=='D/ST')continue;
     const team=String(entry.nflTeamId||liveNFL.teamId(athlete)||'');
-    const game=byTeam.get(team);if(!game)continue;
+    const game=byTeam.get(team);
+    if(!game){
+      // A team absent from a complete, final weekly NFL schedule has a bye.
+      // Never infer a bye from an unknown team ID, an incomplete schedule,
+      // or a replacement whose special scoring still needs verification.
+      if(team&&entry.scoringMode==null&&/^[0-9]+$/.test(team)&&
+         Number(team)>0&&Number(team)<=34)
+        candidates.push({matchId:m.id,side,id:String(entry.id),team,pos:entry.pos,
+          name:entry.name,bye:true});
+      continue;
+    }
     candidates.push({matchId:m.id,side,id:String(entry.id),athleteId:id,team,game,pos:entry.pos,name:entry.name});
    }
    // Fetch each required game once. A missing play-by-play feed must not prevent
    // checking independently persisted ESPN Fantasy D/ST categories.
    const box=new Map();
-   for(const game of [...new Map(candidates.filter(c=>c.pos!=='D/ST').map(c=>[c.game.id,c.game])).values()]){
+   for(const game of [...new Map(candidates.filter(c=>!c.bye&&c.pos!=='D/ST').map(c=>[c.game.id,c.game])).values()]){
     try{const summary=await liveNFL.fetchGame(game.id);box.set(String(game.id),summary);await defenseStore.ingest(pool,season,game,summary);}
     catch(e){console.warn('Historical reconciliation game:',game.id,e.message);}
    }
    try{await fantasyDST.ingestWeek(pool,defenseStore,season,week,games);}catch(e){console.warn('Historical D/ST feed:',week,e.message);}
    const updates=[];
    for(const c of candidates){
+    if(c.bye){updates.push({...c,points:0,bye:true});continue;}
     const summary=box.get(String(c.game.id));
     if(c.pos!=='D/ST'&&!summary)continue;
     let result;
@@ -1975,7 +1988,10 @@ async function reconcileHistoricalMatchups(){
      if(!entry||entry.scoringMode&&entry.scoringMode!=='later')continue;
      // Candidate selection already checked a persisted later-kickoff swap.
      // Never reconstruct or mutate a historical lineup from today's roster.
-     entry.points=u.points;entry.liveScoreStatus='UPDATED';entry.reconciledAt=new Date().toISOString();
+     entry.points=u.points;
+     entry.liveScoreStatus=u.bye?'BYE':'UPDATED';
+     if(u.bye)entry.byeVerified=true;
+     entry.reconciledAt=new Date().toISOString();
     }
     // Historical results are certified only after every NFL game is final,
     // every required lineup score is verified, and the stored lineups are intact.
@@ -1994,7 +2010,7 @@ async function reconcileHistoricalMatchups(){
        (p.scoringMode&&!(p.scoringMode==='later'&&s.injurySwapHistory?.some(x=>
          Number(x.week)===week&&x.mode==='later'&&String(x.replacementId)===String(p.id)&&
          String(x.manager)===String(match[home.includes(p)?'home':'away'])))) ||
-       p.liveScoreStatus!=='UPDATED' ||
+       !(p.liveScoreStatus==='UPDATED'||p.liveScoreStatus==='BYE'&&p.byeVerified===true&&p.points===0) ||
        !Number.isFinite(p.points));
      if(!weekGamesFinal){
       match.warning='Verification blocked: NFL games are not all final.';

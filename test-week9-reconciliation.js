@@ -6,9 +6,10 @@ const a=source.indexOf('let historyReconcileBusy=false;');
 const b=source.indexOf('const playerHistoryCache=new Map();',a);
 assert(a>0&&b>a);
 const fn=source.slice(a,b);
-async function run({mode='later',swap=true,ownerChanged=false,complete=true}={}){
- const player={id:'espn-1',name:'Replacement',pos:'RB',espnId:'1',nflTeamId:14,owner:ownerChanged?'other':'home',scoringMode:mode,points:7};
- const entry={id:player.id,name:player.name,pos:'RB',espnId:'1',nflTeamId:14,scoringMode:mode,liveScoreStatus:'INJURY_SUBSTITUTION_REQUIRES_EVENT_SCORING',points:7};
+async function run({mode='later',swap=true,ownerChanged=false,complete=true,bye=false}={}){
+ const player={id:'espn-1',name:'Replacement',pos:'RB',espnId:'1',nflTeamId:bye?23:14,owner:ownerChanged?'other':'home',scoringMode:mode,points:7};
+ const entry={id:player.id,name:player.name,pos:'RB',espnId:'1',nflTeamId:bye?23:14,scoringMode:bye?null:mode,liveScoreStatus:'INJURY_SUBSTITUTION_REQUIRES_EVENT_SCORING',points:7};
+ if(bye)player.scoringMode=null;
  const state={scheduleSeason:2026,players:[player],injurySwapHistory:swap?[{week:9,mode:'later',manager:'home',replacementId:'espn-1'}]:[],
  frozenMatchupSchedule:{9:[{}]},weeklyLedger:{9:{matchups:{m:{id:'m',home:'home',away:'away',status:'provisional',homeLineup:[entry],awayLineup:[{id:'x',name:'X',points:2,liveScoreStatus:'UPDATED'}]}}}}};
  let scoreCalls=0;
@@ -37,6 +38,10 @@ async function run({mode='later',swap=true,ownerChanged=false,complete=true}={})
  r=await run({swap:false});
  assert.equal(r.scoreCalls,0);
  assert.equal(r.state.weeklyLedger[9].matchups.m.status,'provisional');
+ r=await run({bye:true});
+ assert.equal(r.state.weeklyLedger[9].matchups.m.homeLineup[0].liveScoreStatus,'BYE');
+ assert.equal(r.state.weeklyLedger[9].matchups.m.homeLineup[0].points,0);
+ assert.equal(r.state.weeklyLedger[9].matchups.m.status,'final');
  r=await run({complete:false});
  assert.equal(r.state.weeklyLedger[9].matchups.m.status,'provisional');
  console.log('PASS: later kickoff replacement, changed owner, handcuff block, missing swap block, incomplete score block');

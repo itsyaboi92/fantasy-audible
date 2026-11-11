@@ -21,3 +21,11 @@ Source: user-provided fantasy-audible-main 7.zip.
 - `npm test`, 5 existing fixture suites, and `test-week9-reconciliation.js` pass.
 - No live PostgreSQL or ESPN integration test performed.
 - Do not expect all Week 9 blockers to clear. The v3 diagnostic identifies missing/contested D/ST rows.
+
+## Bye-week reconciliation extension
+- Historical reconciliation treats a known NFL team absent from a fully final weekly schedule as a bye, assigning 0 and `liveScoreStatus: BYE` with `byeVerified: true`.
+- Diagnostic marks these historical entries verified.
+- An unknown NFL team ID (such as the current Harrison Mevis snapshot) is NOT automatically marked bye.
+- Existing injury-substitution rules remain unchanged; the bye branch does not apply to replacement modes.
+- Regression test covers a bye entry and confirms a zero-point final score.
+- Limitation: This does not yet provide a canonical complete NFL team-week calendar independent of ESPN's returned game list. If ESPN omits an actual game, bye classification could be wrong; verify schedule completeness before production finalization.
