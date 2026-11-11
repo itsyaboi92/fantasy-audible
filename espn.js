@@ -315,7 +315,10 @@ function normalizePlayer(entry) {
     id: String(player.id),
     name: player.fullName,
     position,
+    // ESPN uses proTeamId=0 for NFL free agents. Do not confuse this
+    // with null (missing feed data), or with fantasy-league availability.
     nflTeamId: player.proTeamId ?? null,
+    nflRosterStatus: Number(player.proTeamId)===0?'FREE_AGENT':player.proTeamId==null?'UNKNOWN':'TEAM',
     rank: getRank(player, entry),
     projectedPoints: projection.points,
     projectionMethod: projection.method,

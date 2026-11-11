@@ -1,3 +1,4 @@
+const historicalPlayerStatus=require('./historical-player-status');
 const fantasyDST=require('./fantasy-dst-actual');
 const defenseStore=require('./defense-store');
 const http = require('http');
@@ -1094,13 +1095,15 @@ async function api(req,res,route){
           const validScore=typeof p.points==='number'&&Number.isFinite(p.points);
           const verified=validScore&&(
             p.liveScoreStatus==='BYE'&&p.byeVerified===true&&p.points===0||
+            p.liveScoreStatus==='INACTIVE'&&p.inactiveVerified===true&&p.points===0||
             p.liveScoreStatus==='UPDATED')&&
             (!p.scoringMode||p.scoringMode==='later'&&substitutions.some(x=>x.role==='replacement'&&x.mode==='later'));
           return {name:p.name||null,id:String(p.id||''),position:p.pos||null,
             slot:p.slot||null,espnId:p.espnId||currentPlayer?.espnId||null,
             nflTeamId:p.nflTeamId||currentPlayer?.nflTeamId||null,
             points:p.points??null,liveScoreStatus:p.liveScoreStatus||null,
-            scoringMode:p.scoringMode||null,byeVerified:p.byeVerified===true,verified,
+            scoringMode:p.scoringMode||null,byeVerified:p.byeVerified===true,inactiveVerified:p.inactiveVerified===true,
+            inactiveEvidence:p.inactiveEvidence||null,verified,
             currentPlayer:{exists:!!currentPlayer,
               points:currentPlayer?.points??null,
               liveScoreStatus:currentPlayer?.liveScoreStatus||null,
@@ -1950,7 +1953,11 @@ async function reconcileHistoricalMatchups(){
     // and scoring mode must not invalidate a previously recorded starter.
     const id=String(entry.espnId||athlete?.espnId||'');
     if(!id&&entry.pos!=='D/ST')continue;
-    const team=String(entry.nflTeamId||liveNFL.teamId(athlete)||'');
+    const inactive=entry.scoringMode==null&&historicalPlayerStatus.verifiedInactive(id,season,week);
+    const team=String(entry.nflTeamId||liveNFL.teamId(athlete)||inactive?.teamId||'');
+    // An evidence-backed released player receives zero; do not copy the
+    // replacement kicker's stats or mistake absence for a team bye.
+    if(inactive){candidates.push({matchId:m.id,side,id:String(entry.id),team,pos:entry.pos,name:entry.name,inactive,athleteId:id});continue;}
     const game=byTeam.get(team);
     if(!game){
       // A team absent from a complete, final weekly NFL schedule has a bye.
@@ -1974,7 +1981,7 @@ async function reconcileHistoricalMatchups(){
    // Fetch each required game once. A missing play-by-play feed must not prevent
    // checking independently persisted ESPN Fantasy D/ST categories.
    const box=new Map();
-   for(const game of [...new Map(candidates.filter(c=>!c.bye&&c.pos!=='D/ST').map(c=>[c.game.id,c.game])).values()]){
+   for(const game of [...new Map(candidates.filter(c=>!c.bye&&!c.inactive&&c.pos!=='D/ST').map(c=>[c.game.id,c.game])).values()]){
     try{const summary=await liveNFL.fetchGame(game.id);box.set(String(game.id),summary);await defenseStore.ingest(pool,season,game,summary);}
     catch(e){console.warn('Historical reconciliation game:',game.id,e.message);}
    }
@@ -1982,6 +1989,7 @@ async function reconcileHistoricalMatchups(){
    const updates=[];
    for(const c of candidates){
     if(c.bye){updates.push({...c,points:0,bye:true});continue;}
+    if(c.inactive){updates.push({...c,points:0,inactive:true});continue;}
     const summary=box.get(String(c.game.id));
     if(c.pos!=='D/ST'&&!summary)continue;
     let result;
@@ -2000,7 +2008,8 @@ async function reconcileHistoricalMatchups(){
      // Candidate selection already checked a persisted later-kickoff swap.
      // Never reconstruct or mutate a historical lineup from today's roster.
      entry.points=u.points;
-     entry.liveScoreStatus=u.bye?'BYE':'UPDATED';
+     entry.liveScoreStatus=u.bye?'BYE':u.inactive?'INACTIVE':'UPDATED';
+     if(u.inactive){entry.inactiveVerified=true;entry.inactiveEvidence=u.inactive.source;entry.nflTeamId=u.team;}
      if(u.bye)entry.byeVerified=true;
      else entry.byeVerified=false;
      entry.reconciledAt=new Date().toISOString();
@@ -2022,7 +2031,8 @@ async function reconcileHistoricalMatchups(){
        (p.scoringMode&&!(p.scoringMode==='later'&&s.injurySwapHistory?.some(x=>
          Number(x.week)===week&&x.mode==='later'&&String(x.replacementId)===String(p.id)&&
          String(x.manager)===String(match[home.includes(p)?'home':'away'])))) ||
-       !(p.liveScoreStatus==='UPDATED'||p.liveScoreStatus==='BYE'&&p.byeVerified===true&&p.points===0) ||
+       !(p.liveScoreStatus==='UPDATED'||p.liveScoreStatus==='BYE'&&p.byeVerified===true&&p.points===0||
+       p.liveScoreStatus==='INACTIVE'&&p.inactiveVerified===true&&p.points===0) ||
        !Number.isFinite(p.points));
      if(!weekGamesFinal){
       match.warning='Verification blocked: NFL games are not all final.';
