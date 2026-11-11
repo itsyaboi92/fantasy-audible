@@ -1,0 +1,15 @@
+const assert=require('node:assert/strict'),fs=require('fs'),vm=require('vm');
+const server=fs.readFileSync('server.js','utf8'),ui=fs.readFileSync('public/app.js','utf8');
+const core=server.slice(server.indexOf('function currentWeekScore('),server.indexOf('function ledgerTotal('));
+const context=vm.createContext({Number});vm.runInContext(core,context);
+assert.equal(context.currentWeekScore({points:35.5,scoreWeek:9,nflGame:{status:'final'}},10),0);
+assert.equal(context.currentWeekScore({points:35.5,scoreWeek:10,nflGame:{status:'upcoming'}},10),0);
+assert.equal(context.currentWeekScore({points:9.1,scoreWeek:10,nflGame:{status:'playing'}},10),9.1);
+assert.equal(context.currentWeekScore({points:5,credited:2,scoringMode:'handcuff',scoreWeek:10,nflGame:{status:'playing'}},10),2);
+const ledger=context.ledgerLineup({players:[{id:'p',owner:'a',slot:'QB',points:35.5,scoreWeek:9}]},'a',10);
+assert.equal(ledger[0].points,0);
+assert(ui.includes('game?.status===\'upcoming\'?0:Number(p.points)||0'));
+assert(ui.includes('recorded?.status===\'final\'?fmt('));
+assert(server.includes("body.action==='reset-points'"));
+assert(server.includes("match.status==='final')continue"));
+console.log('Week 10 score isolation tests passed');

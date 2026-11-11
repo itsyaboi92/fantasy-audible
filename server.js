@@ -421,8 +421,14 @@ async function activateLeagueSchedule(){
   }finally{scheduleActivationBusy=false;}
 }
 // Persisted week-specific ledger. Historical weeks are never inferred from today's roster.
-function ledgerScore(p){return Number(p.scoringMode==='handcuff'?(p.credited??0):p.points)||0;}
-function ledgerLineup(s,id){return s.players.filter(p=>p.owner===id&&!['BENCH','IR'].includes(p.slot)).map(p=>({id:p.id,name:p.name,team:p.team,pos:p.pos,slot:p.slot,status:p.status,points:ledgerScore(p),espnId:p.espnId||null,nflTeamId:p.nflTeamId||null,scoringMode:p.scoringMode||null,liveScoreStatus:p.liveScoreStatus||null}));}
+// Shared roster points are transient. Never use them for a different NFL week.
+function currentWeekScore(p,week){
+  if(Number(p.scoreWeek)!==Number(week))return 0;
+  if(p.nflGame?.status==='upcoming')return 0;
+  return Number(p.scoringMode==='handcuff'?(p.credited??0):p.points)||0;
+}
+function ledgerScore(p,week){return currentWeekScore(p,week);}
+function ledgerLineup(s,id,week){return s.players.filter(p=>p.owner===id&&!['BENCH','IR'].includes(p.slot)).map(p=>({id:p.id,name:p.name,team:p.team,pos:p.pos,slot:p.slot,status:p.status,points:ledgerScore(p,week),espnId:p.espnId||null,nflTeamId:p.nflTeamId||null,scoringMode:p.scoringMode||null,liveScoreStatus:p.liveScoreStatus||null}));}
 function ledgerTotal(lineup){return Math.round(lineup.reduce((n,p)=>n+p.points,0)*100)/100;}
 function updateWeeklyLedger(s,accounts,week,games,failures){
   if(!Number.isInteger(week)||week<1||week>18)return;
@@ -436,7 +442,7 @@ function updateWeeklyLedger(s,accounts,week,games,failures){
     // A completed week's frozen lineup must never be rebuilt from today's
     // roster. Historical reconciliation updates the saved entries directly.
     if(prior&&allFinal)continue;
-    const homeLineup=ledgerLineup(s,match.home),awayLineup=ledgerLineup(s,match.away);
+    const homeLineup=ledgerLineup(s,match.home,week),awayLineup=ledgerLineup(s,match.away,week);
     const allPlayers=[...homeLineup,...awayLineup];
     const verified=allPlayers.every(p=>p.liveScoreStatus==='UPDATED'&&
     (!p.scoringMode||p.scoringMode==='later')&&Number.isFinite(p.points));
@@ -1813,7 +1819,38 @@ async function api(req,res,route){
       }else if(body.action==='points'){
         const player=s.players.find(p=>p.id===body.player),amount=Number(body.amount);
         if(!player||!Number.isFinite(amount)||Math.abs(amount)>100)return failure(400,'Invalid player or points');
-        player.points+=amount;if(player.scoringMode==='handcuff')player.credited=player.points-player.scoreAtSwap;
+        // Simulations are current-week only, with an auditable reversible delta.
+        const week=Number(s.nflDirectorySync?.currentWeek||s.week);
+        if(player.nflGame?.status==='final')return failure(409,'Cannot simulate points on a completed NFL game');
+        if(Number(player.scoreWeek)!==week){player.points=0;player.credited=0;player.scoreWeek=week;}
+        player.points=(Number(player.points)||0)+amount;
+        if(player.scoringMode==='handcuff')player.credited=player.points-player.scoreAtSwap;
+        s.demoPointAdjustments ||= {};
+        const key=week+':'+player.id;
+        const prior=s.demoPointAdjustments[key]||{amount:0,after:0};
+        s.demoPointAdjustments[key]={amount:prior.amount+amount,after:player.points};
+        audit(s,'DEMO_POINTS_ADDED',actor.manager,player.name+' +'+amount+' in NFL Week '+week);
+      }else if(body.action==='reset-points'){
+        const player=s.players.find(p=>p.id===body.player);
+        if(!player)return failure(404,'Player not found');
+        const week=Number(s.nflDirectorySync?.currentWeek||s.week);
+        if(player.nflGame?.status==='playing'||player.nflGame?.status==='final')
+          return failure(409,'Cannot reset a live or completed game score');
+        const key=week+':'+player.id;
+        const record=s.demoPointAdjustments?.[key];
+        if(record){
+          if(Number(player.points)!==Number(record.after))return failure(409,'Score changed since simulation; refusing to erase real scoring');
+          player.points=Number((Number(player.points)-Number(record.amount)).toFixed(4));
+          delete s.demoPointAdjustments[key];
+        }else{
+          // Legacy simulations had no audit trail. Only clear an upcoming-game
+          // transient score; NEVER modify a frozen weekly matchup or real NFL score.
+          if(player.nflGame?.status!=='upcoming')return failure(409,'Cannot safely identify legacy simulated points for this player');
+          player.points=0;
+        }
+        player.credited=0;player.scoreWeek=week;
+        player.liveScoreStatus='UPCOMING';
+        audit(s,'DEMO_POINTS_RESET',actor.manager,player.name+' upcoming-game simulated points cleared in NFL Week '+week);
       }else return failure(400,'Unknown action');return {ok:true};}
     return failure(404,'Not found');});
   return send(res,result.status||200,result);
@@ -1888,13 +1925,26 @@ async function syncNFLScoring(){
       // Never overwrite it with the fantasy league's draft/matchup week.
       const ids=new Map();for(const game of games)for(const t of game.teams)ids.set(t.id,game);
       let changed=0;
+      // Week rollover is an atomic scoring reset, not a roster or historical-ledger reset.
+      // Preserve frozen Week 9 matchups and every injury-substitution history entry.
+      if(Number(s.week)!==week){
+        for(const p of s.players){
+          p.points=0;p.credited=0;p.scoreAtSwap=0;p.scoreWeek=week;
+          p.liveScoreStatus='UPCOMING';p.liveScoreUpdatedAt=null;
+        }
+        s.demoPointAdjustments={};
+      }
       for(const player of s.players){
         if(!player.espnId&&player.pos!=='D/ST')continue; // Demo data must never be overwritten.
         const game=ids.get(liveNFL.teamId(player));
         if(!game)continue; // Bye week.
         player.nflGame={id:game.id,kickoff:game.kickoff,status:game.status};
         player.status=game.status;
-        if(game.status==='upcoming')continue;
+        // A game that has not kicked off has no earned fantasy points.
+        if(game.status==='upcoming'){
+          player.points=0;player.credited=0;player.scoreWeek=week;
+          player.liveScoreStatus='UPCOMING';continue;
+        }
         const box=summaries.get(game.id);if(!box)continue;
         const calculated=player.pos==='D/ST'?(defenseScores.get(`${game.id}:${liveNFL.teamId(player)}`)||null):authoritativeGameScore(box.summary,player,settingsOf(s).scoring,game);
         if(!calculated)continue;
@@ -1908,7 +1958,7 @@ async function syncNFLScoring(){
         if(player.scoringMode==='later'&&!calculated.complete){
           player.liveScoreStatus='INJURY_SUBSTITUTION_REQUIRES_EVENT_SCORING';continue;
         }
-        player.points=calculated.points;
+        player.points=calculated.points;player.scoreWeek=week;
         player.liveScoreStatus=calculated.complete?'UPDATED':'PARTIAL';
         player.liveScoreUpdatedAt=new Date().toISOString();changed++;
       }
