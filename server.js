@@ -434,7 +434,8 @@ function updateWeeklyLedger(s,accounts,week,games,failures){
     const prior=entry.matchups[match.id];if(prior?.status==='final')continue;
     const homeLineup=ledgerLineup(s,match.home),awayLineup=ledgerLineup(s,match.away);
     const allPlayers=[...homeLineup,...awayLineup];
-    const verified=allPlayers.every(p=>p.liveScoreStatus==='UPDATED'||p.status==='upcoming'&&p.points===0);
+    const verified=allPlayers.every(p=>p.liveScoreStatus==='UPDATED'&&
+    (!p.scoringMode||p.scoringMode==='later')&&Number.isFinite(p.points));
     const status=allFinal&&verified?'final':'provisional';
     const homeScore=ledgerTotal(homeLineup),awayScore=ledgerTotal(awayLineup);
     entry.matchups[match.id]={id:match.id,home:match.home,away:match.away,
@@ -1088,7 +1089,8 @@ async function api(req,res,route){
               mode:x.mode||null,slot:x.slot||null,forfeitedPoints:x.forfeitedPoints??null,
               at:x.at||null}));
           const validScore=typeof p.points==='number'&&Number.isFinite(p.points);
-          const verified=validScore&&p.liveScoreStatus==='UPDATED'&&!p.scoringMode;
+          const verified=validScore&&p.liveScoreStatus==='UPDATED'&&
+            (!p.scoringMode||p.scoringMode==='later'&&substitutions.some(x=>x.role==='replacement'&&x.mode==='later'));
           return {name:p.name||null,id:String(p.id||''),position:p.pos||null,
             slot:p.slot||null,espnId:p.espnId||currentPlayer?.espnId||null,
             nflTeamId:p.nflTeamId||currentPlayer?.nflTeamId||null,
@@ -1118,7 +1120,36 @@ async function api(req,res,route){
             liveScoreStatus:p.liveScoreStatus,scoringMode:p.scoringMode,
             points:p.points}))};
     });
-    return send(res,200,{diagnostic:'week9-scoring-readonly-v2',readOnly:true,
+    // D/ST evidence lives in PostgreSQL, not on player records. Read the
+    // persisted category rows and conflicts so a partial result is actionable.
+    const defenseDatabase=[];
+    const season=Number(s.scheduleSeason||process.env.NFL_SEASON||new Date().getUTCFullYear());
+    const dstEntries=records.flatMap(m=>[...(m.homeLineup||[]),...(m.awayLineup||[])])
+      .filter(p=>p.pos==='D/ST');
+    let weekGames=[],defenseEvidenceError=null;
+    try{
+      weekGames=await liveNFL.loadWeek(season,week);
+      for(const p of dstEntries){
+        const teamId=String(p.nflTeamId||liveNFL.teamId(p)||'');
+        const game=weekGames.find(g=>g.teams.some(t=>String(t.id)===teamId));
+        if(!game){defenseDatabase.push({name:p.name,teamId,game:null,reason:'NFL team/game not found'});continue;}
+        const rows=await pool.query(`SELECT stat,value,source,verified,game_final
+          FROM fantasy_audible_defense_stats
+          WHERE season=$1 AND game_id=$2 AND team_id=$3 ORDER BY stat`,
+          [season,String(game.id),teamId]);
+        const conflicts=await pool.query(`SELECT stat,stored_value,incoming_value
+          FROM fantasy_audible_defense_conflicts
+          WHERE season=$1 AND game_id=$2 AND team_id=$3 ORDER BY stat`,
+          [season,String(game.id),teamId]);
+        const score=await defenseStore.get(pool,season,game,teamId,settingsOf(s).scoring);
+        defenseDatabase.push({name:p.name,teamId,game:{id:game.id,status:game.status},
+          score:score?{points:score.points,complete:score.complete,
+            unsupported:score.unsupported,verification:score.verification}:null,
+          rows:rows.rows,conflicts:conflicts.rows});
+      }
+    }catch(e){defenseEvidenceError=String(e.message||e).slice(0,240);}
+    return send(res,200,{diagnostic:'week9-scoring-readonly-v3',readOnly:true,
+      defenseDatabase,defenseEvidenceError,
       generatedAt:new Date().toISOString(),week,
       season:s.scheduleSeason||null,
       nflSync:s.nflSync?{at:s.nflSync.at||null,
@@ -1863,7 +1894,12 @@ async function syncNFLScoring(){
         if(player.pos!=='D/ST'&&!eventLedger.ledger(box.summary).length){player.liveScoreStatus='PLAY_FEED_UNAVAILABLE';continue;}
         // Credit verified field-goal makes at the minimum configured rate; mark unknown distances partial.
         // Do not overwrite an in-progress injury handcuff's credited points.
-        if(player.scoringMode){player.liveScoreStatus='INJURY_SUBSTITUTION_REQUIRES_EVENT_SCORING';continue;}
+        if(player.scoringMode==='handcuff'){
+          player.liveScoreStatus='INJURY_SUBSTITUTION_REQUIRES_EVENT_SCORING';continue;
+        }
+        if(player.scoringMode==='later'&&!calculated.complete){
+          player.liveScoreStatus='INJURY_SUBSTITUTION_REQUIRES_EVENT_SCORING';continue;
+        }
         player.points=calculated.points;
         player.liveScoreStatus=calculated.complete?'UPDATED':'PARTIAL';
         player.liveScoreUpdatedAt=new Date().toISOString();changed++;
@@ -1899,11 +1935,14 @@ async function reconcileHistoricalMatchups(){
    const candidates=[];
    for(const m of snapshotMatches)for(const side of ['homeLineup','awayLineup'])for(const entry of m[side]||[]){
     // Only a previously recorded snapshot is eligible, not a reconstructed lineup.
-    if(entry.scoringMode||entry.liveScoreStatus==='INJURY_SUBSTITUTION_REQUIRES_EVENT_SCORING')continue;
+    if(entry.scoringMode&&entry.scoringMode!=='later')continue;
+    if(entry.scoringMode==='later'&&!state.injurySwapHistory?.some(x=>
+      Number(x.week)===week&&String(x.replacementId)===String(entry.id)&&x.mode==='later'&&
+      String(x.manager)===String(m[side==='homeLineup'?'home':'away'])))continue;
     const athlete=state.players.find(p=>String(p.id)===String(entry.id));
-    if(!athlete||String(athlete.owner)!==String(m[side==='homeLineup'?'home':'away']))continue;
-    if(athlete.scoringMode)continue;
-    const id=String(entry.espnId||athlete.espnId||'');
+    // The frozen lineup is the historical authority. Today's roster ownership
+    // and scoring mode must not invalidate a previously recorded starter.
+    const id=String(entry.espnId||athlete?.espnId||'');
     if(!id&&entry.pos!=='D/ST')continue;
     const team=String(entry.nflTeamId||liveNFL.teamId(athlete)||'');
     const game=byTeam.get(team);if(!game)continue;
@@ -1933,9 +1972,9 @@ async function reconcileHistoricalMatchups(){
     for(const u of updates){
      const match=matches[u.matchId];if(!match)continue;
      const entry=(match[u.side]||[]).find(x=>String(x.id)===u.id);
-     if(!entry||entry.scoringMode||entry.liveScoreStatus==='INJURY_SUBSTITUTION_REQUIRES_EVENT_SCORING')continue;
-     const current=s.players.find(p=>String(p.id)===u.id);
-     if(!current||current.scoringMode||String(current.owner)!==String(match[u.side==='homeLineup'?'home':'away']))continue;
+     if(!entry||entry.scoringMode&&entry.scoringMode!=='later')continue;
+     // Candidate selection already checked a persisted later-kickoff swap.
+     // Never reconstruct or mutate a historical lineup from today's roster.
      entry.points=u.points;entry.liveScoreStatus='UPDATED';entry.reconciledAt=new Date().toISOString();
     }
     // Historical results are certified only after every NFL game is final,
@@ -1952,7 +1991,9 @@ async function reconcileHistoricalMatchups(){
      }
      const lineup=[...home,...away];
      const unresolved=lineup.filter(p=>
-       p.scoringMode ||
+       (p.scoringMode&&!(p.scoringMode==='later'&&s.injurySwapHistory?.some(x=>
+         Number(x.week)===week&&x.mode==='later'&&String(x.replacementId)===String(p.id)&&
+         String(x.manager)===String(match[home.includes(p)?'home':'away'])))) ||
        p.liveScoreStatus!=='UPDATED' ||
        !Number.isFinite(p.points));
      if(!weekGamesFinal){

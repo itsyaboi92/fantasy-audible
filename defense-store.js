@@ -87,6 +87,7 @@ async function get(pool,season,game,teamId,rules){
  const scored=scoreDefense({stats,pointsAllowed,yardsAllowed,opponentFound:pointsAllowed!==null},rules);
  const critical=[...FIELDS,'pointsAllowed','yardsAllowed'];
  const verification=Object.fromEntries(critical.map(field=>{const d=details[({sacks:'sack',interceptions:'interception'})[field]||field];return [field,{present:!!d,verified:!!d?.verified,source:d?.source||null,final:!!d?.final}];}));
- return {...scored,statDetails:details,verification,counts:stats,pointsAllowed,yardsAllowed,complete:game.status==='final'&&!scored.unsupported.length,source:'persisted-defense-stats'};
+ return {...scored,statDetails:details,verification,counts:stats,pointsAllowed,yardsAllowed,complete:game.status==='final'&&!scored.unsupported.length&&
+  critical.every(field=>verification[field].present&&verification[field].verified&&verification[field].final),source:'persisted-defense-stats'};
 }
 module.exports={init,ingest,get,observations,ingestFantasyForcedFumble};
