@@ -1,0 +1,15 @@
+'use strict';
+const assert=require('node:assert/strict');
+const {updateWeeklyLedger,leagueStandings}=require('./league-ledger');
+const state={managers:[{id:'a'},{id:'b'}],players:[{id:'a1',owner:'a',slot:'QB',points:22,scoreWeek:10,nflGame:{status:'final'},liveScoreStatus:'UPDATED'},{id:'b1',owner:'b',slot:'QB',points:14,scoreWeek:10,nflGame:{status:'final'},liveScoreStatus:'UPDATED'}],frozenMatchupSchedule:{10:[{id:'m',home:'a',away:'b'}]}};
+const accounts=[{manager:'a'},{manager:'b'}];
+updateWeeklyLedger(state,accounts,10,[{status:'final'}],[]);
+const m=state.weeklyLedger[10].matchups.m;
+assert.equal(m.status,'final');assert.equal(m.homeScore,22);assert.equal(m.awayScore,14);
+assert.equal(m.winner,'a');
+const standings=leagueStandings(state,accounts);
+assert.equal(standings.find(x=>x.manager==='a').wins,1);
+state.players[0].points=99;
+updateWeeklyLedger(state,accounts,10,[{status:'final'}],[]);
+assert.equal(state.weeklyLedger[10].matchups.m.homeScore,22,'final results must remain immutable');
+console.log('PASS extracted weekly ledger, standings, and immutable final scores');

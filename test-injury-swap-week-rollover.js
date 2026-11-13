@@ -1,13 +1,8 @@
 'use strict';
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
-const vm=require('node:vm');
+const context=require('./injury-substitutions');
 const src=fs.readFileSync(__dirname+'/server.js','utf8');
-const start=src.indexOf('function injurySwapWeek(s)');
-const end=src.indexOf('function eligibility(s,starter,bench)',start);
-assert(start>0&&end>start);
-const context=vm.createContext({});
-vm.runInContext(src.slice(start,end),context);
 const state={week:10,players:[{id:'old',scoringMode:'later',scoreAtSwap:0,credited:11},{id:'new',scoringMode:'handcuff',scoreAtSwap:3,credited:2}],injurySwapHistory:[{week:9,replacementId:'old',removedId:'removed'},{week:10,replacementId:'new',removedId:'another'}],injuries:[{id:'i9',player:'old',active:true,week:9},{id:'i10',player:'new',active:true,week:10}]};
 assert.equal(context.activeSwapMode(state,state.players[0]),false);
 assert.equal(context.activeSwapMode(state,state.players[1]),true);

@@ -1,7 +1,6 @@
 const assert=require('node:assert/strict'),fs=require('fs'),vm=require('vm');
 const server=fs.readFileSync('server.js','utf8'),ui=fs.readFileSync('public/app.js','utf8');
-const core=server.slice(server.indexOf('function currentWeekScore('),server.indexOf('function ledgerTotal('));
-const context=vm.createContext({Number});vm.runInContext(core,context);
+const context=require('./league-ledger');
 assert.equal(context.currentWeekScore({points:35.5,scoreWeek:9,nflGame:{status:'final'}},10),0);
 assert.equal(context.currentWeekScore({points:35.5,scoreWeek:10,nflGame:{status:'upcoming'}},10),0);
 assert.equal(context.currentWeekScore({points:9.1,scoreWeek:10,nflGame:{status:'playing'}},10),9.1);

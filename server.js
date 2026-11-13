@@ -10,6 +10,9 @@ const { initializeESPN, getESPNPlayers } = require('./espn');
 const liveNFL = require('./live-nfl');
 const eventLedger = require('./event-ledger');
 const postseason = require('./postseason');
+const tradeCentral = require('./trade-central');
+const {createResourceScheduler}=require('./resource-scheduler');
+const resourceJobs=createResourceScheduler();
 const matchupAnalytics = require('./matchup-analytics');
 const webpush = require('web-push');
 const PUSH_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
@@ -422,51 +425,7 @@ async function activateLeagueSchedule(){
 }
 // Persisted week-specific ledger. Historical weeks are never inferred from today's roster.
 // Shared roster points are transient. Never use them for a different NFL week.
-function currentWeekScore(p,week){
-  if(Number(p.scoreWeek)!==Number(week))return 0;
-  if(p.nflGame?.status==='upcoming')return 0;
-  return Number(p.scoringMode==='handcuff'?(p.credited??0):p.points)||0;
-}
-function ledgerScore(p,week){return currentWeekScore(p,week);}
-function ledgerLineup(s,id,week){return s.players.filter(p=>p.owner===id&&!['BENCH','IR'].includes(p.slot)).map(p=>({id:p.id,name:p.name,team:p.team,pos:p.pos,slot:p.slot,status:p.status,points:ledgerScore(p,week),espnId:p.espnId||null,nflTeamId:p.nflTeamId||null,scoringMode:p.scoringMode||null,liveScoreStatus:p.liveScoreStatus||null}));}
-function ledgerTotal(lineup){return Math.round(lineup.reduce((n,p)=>n+p.points,0)*100)/100;}
-function updateWeeklyLedger(s,accounts,week,games,failures){
-  if(!Number.isInteger(week)||week<1||week>18)return;
-  s.weeklyLedger ||= {};
-  const schedule=s.frozenMatchupSchedule||{};
-  const matches=schedule[week]||[];
-  const entry=s.weeklyLedger[week] ||= {week,createdAt:new Date().toISOString(),matchups:{}};
-  const allFinal=games.length>0&&games.every(g=>g.status==='final')&&failures.length===0;
-  for(const match of matches){
-    const prior=entry.matchups[match.id];if(prior?.status==='final')continue;
-    // A completed week's frozen lineup must never be rebuilt from today's
-    // roster. Historical reconciliation updates the saved entries directly.
-    if(prior&&allFinal)continue;
-    const homeLineup=ledgerLineup(s,match.home,week),awayLineup=ledgerLineup(s,match.away,week);
-    const allPlayers=[...homeLineup,...awayLineup];
-    const verified=allPlayers.every(p=>p.liveScoreStatus==='UPDATED'&&
-    (!p.scoringMode||p.scoringMode==='later')&&Number.isFinite(p.points));
-    const status=allFinal&&verified?'final':'provisional';
-    const homeScore=ledgerTotal(homeLineup),awayScore=ledgerTotal(awayLineup);
-    entry.matchups[match.id]={id:match.id,home:match.home,away:match.away,
-      homeScore,awayScore,homeLineup,awayLineup,status,
-      winner:status==='final'?(homeScore===awayScore?null:homeScore>awayScore?match.home:match.away):null,
-      updatedAt:new Date().toISOString(),warning:status==='final'?null:'Scoring is provisional; missing or unsupported NFL scoring may affect results.'};
-  }
-}
-function leagueStandings(s,accounts){
-  const result={};for(const m of s.managers)result[m.id]={manager:m.id,wins:0,losses:0,ties:0,pointsFor:0,pointsAgainst:0};
-  for(const [weekNumber,week] of Object.entries(s.weeklyLedger||{}))for(const match of Object.values(week.matchups||{})){
-    if(Number(weekNumber)>postseason.endWeek(s.managers.filter(m=>accounts.some(a=>a.manager===m.id)).length))continue;
-    if(match.status!=='final'||!result[match.home]||!result[match.away])continue;
-    const a=result[match.home],b=result[match.away];a.pointsFor+=match.homeScore;a.pointsAgainst+=match.awayScore;
-    b.pointsFor+=match.awayScore;b.pointsAgainst+=match.homeScore;
-    if(match.homeScore===match.awayScore){a.ties++;b.ties++;}
-    else if(match.homeScore>match.awayScore){a.wins++;b.losses++;}else{b.wins++;a.losses++;}
-  }
-  return Object.values(result).map(x=>({...x,pointsFor:Math.round(x.pointsFor*100)/100,pointsAgainst:Math.round(x.pointsAgainst*100)/100}))
-    .sort((a,b)=>(b.wins+b.ties/2)/(b.wins+b.losses+b.ties||1)-(a.wins+a.ties/2)/(a.wins+a.losses+a.ties||1)||b.pointsFor-a.pointsFor);
-}
+const {currentWeekScore,ledgerScore,ledgerLineup,ledgerTotal,updateWeeklyLedger,leagueStandings}=require('./league-ledger');
 // V24: Persisted, league-scoped editorial editions. No invented game results.
 function editorialWeek(s){return Math.max(1,Math.min(18,Number(s.week)||1));}
 function editorialTeam(s,id){return s.managers.find(m=>m.id===id)?.team||'Unknown team';}
@@ -599,7 +558,7 @@ async function publishLockerBot(){
     }catch(e){await client.query('ROLLBACK');throw e;}finally{client.release();}
   }catch(e){console.error('Locker Room bot:',e.message);}finally{botBusy=false;}
 }
-function safeState(s,accounts,user){return {...s,editorial:(s.editorial||[]).slice(0,48),matchupSchedule:s.frozenMatchupSchedule||{},standings:leagueStandings(s,accounts),settings:settingsOf(s),managers:s.managers.map(m=>({...m,
+function safeState(s,accounts,user){return {...s,trades:tradeCentral.publicTrades(s,user.manager),editorial:(s.editorial||[]).slice(0,48),matchupSchedule:s.frozenMatchupSchedule||{},standings:leagueStandings(s,accounts),settings:settingsOf(s),managers:s.managers.map(m=>({...m,
   claimed:accounts.some(a=>a.manager===m.id),
   ...(user.commissioner?{registeredEmail:accounts.find(a=>a.manager===m.id)?.email||null}: {})})),draftPreferences:{[user.manager]:preferencesOf(s,user.manager)},
   viewer:{manager:user.manager,commissioner:user.commissioner,name:user.name}};}
@@ -789,80 +748,10 @@ function recordPick(s,player,automatic=false){const d=ensureDraft(s),turn=curren
     for(const manager of new Set(d.order.map(p=>p.manager)))autoFillStarters(s,manager);
     audit(s,'DRAFT_COMPLETE',null,'Draft completed');setTimeout(activateLeagueSchedule,0);}else nextDeadline(d);
   return {ok:true,pick};}
-// A committed injury swap permanently retires the removed player for that NFL week.
-// Persisted in the league state so restarts cannot undo the decision.
-function injurySwapWeek(s){return Number(s.week)||1;}
-function injurySwapRetired(s,player){return Boolean(player&&s.injurySwapHistory?.some(x=>
-  x.week===injurySwapWeek(s)&&x.removedId===player.id));}
-function injurySwapCurrentSlot(s,player){return Boolean(player&&s.injurySwapHistory?.some(x=>
-  x.week===injurySwapWeek(s)&&x.replacementId===player.id));}
-// Live swap metadata belongs only to the week containing its committed event.
-// Historical weeklyLedger/injurySwapHistory entries remain immutable.
-function activeSwapMode(s,player){return Boolean(player&&injurySwapCurrentSlot(s,player));}
-function activeSwapOffset(s,player){return activeSwapMode(s,player)&&player.scoreAtSwap!==undefined;}
-function pendingInjury(s,player){return Boolean(player&&s.injuries?.some(i=>
-  i.active&&i.player===player.id&&Number(i.week||s.week)===injurySwapWeek(s)));}
-function expireOldInjuryState(s){
-  const week=injurySwapWeek(s);
-  for(const p of s.players||[]){
-    if(!activeSwapMode(s,p)){
-      delete p.scoringMode;delete p.scoreAtSwap;delete p.credited;
-    }
-  }
-  for(const injury of s.injuries||[]){
-    if(!injury.active)continue;
-    // Legacy pending injuries have no week tag. Only preserve one when it
-    // has an explicit current-week designation; otherwise expire on rollover.
-    if(Number(injury.week)!==week)injury.active=false;
-  }
-}
-
-function eligibility(s,starter,bench){if(!starter||!bench||starter.owner!==bench.owner||
-  starter.slot==='BENCH'||bench.slot!=='BENCH'||
-  !(starter.slot==='FLEX'?['RB','WR','TE'].includes(bench.pos):starter.pos===bench.pos)||
-  injurySwapRetired(s,starter)||injurySwapRetired(s,bench))return null;
-  // Real NFL schedule supersedes demo phase counters for drafted ESPN players.
-  if(starter.espnId&&bench.espnId){
-    const games=s.nflSync?.games||[];
-    const starterGame=games.find(g=>g.teams?.some(t=>String(t.id)===String(starter.nflTeamId)));
-    const benchGame=games.find(g=>g.teams?.some(t=>String(t.id)===String(bench.nflTeamId)));
-    if(!starterGame||!benchGame)return null; // Fail closed without authoritative games.
-    if(starterGame.id===benchGame.id)return bench.nflTeamId===starter.nflTeamId&&
-      starterGame.status==='live'?'handcuff':null;
-    return benchGame.status==='upcoming'&&Date.parse(benchGame.kickoff)>Date.now()?'later':null;
-  }
-  if(starter.team===bench.team&&bench.kickoff<=s.phase)return 'handcuff';
-  if(bench.kickoff>s.phase)return 'later';return null;}
-// Lineup moves are validated against the stored roster and game state.
-// A lineup edit uses a freshly verified NFL-week schedule, not the optional
-// scoring snapshot (which may not exist until the draft is complete).
-function lineupLockReason(s,player,verifiedSchedule){
-  if(!player)return 'Missing player';
-  if(player.espnId||player.nflGame){
-    if(!verifiedSchedule||!Array.isArray(verifiedSchedule.games))return 'NFL schedule unavailable';
-    const id=liveNFL.teamId(player);
-    if(!id)return 'NFL team could not be identified';
-    const game=verifiedSchedule.games.find(g=>g.teams?.some(t=>String(t.id)===String(id)));
-    if(!game)return verifiedSchedule.games.length<10?'NFL schedule incomplete':null; // bye
-    const kickoff=Date.parse(game.kickoff);
-    if(!Number.isFinite(kickoff))return 'Kickoff timestamp unavailable';
-    // The verified UTC kickoff is authoritative. ESPN status is not a substitute:
-    // stale status labels must not lock players before kickoff.
-    if(Date.now()>=kickoff)return `NFL kickoff passed (${new Date(kickoff).toISOString()}, season ${verifiedSchedule.season}, week ${verifiedSchedule.week})`;
-    return null;
-  }
-  if(['playing','injured','finished','final','completed'].includes(String(player.status).toLowerCase()))return 'Legacy player status: '+player.status;
-  if(player.kickoffAt){const at=Date.parse(player.kickoffAt);if(Number.isFinite(at)&&Date.now()>=at)return 'Stored kickoff passed: '+player.kickoffAt;}
-  if(typeof player.kickoff==='number'&&player.kickoff!==99&&player.kickoff<=s.phase)return 'Legacy demo phase lock';
-  return null;
-}
-function lineupLocked(s,player,verifiedSchedule){return lineupLockReason(s,player,verifiedSchedule)!==null;}
-
-function slotEligible(player,slot){return slot==='FLEX'?['RB','WR','TE'].includes(player.pos):player.pos===slot;}
+const {injurySwapWeek,injurySwapRetired,injurySwapCurrentSlot,activeSwapMode,activeSwapOffset,pendingInjury,expireOldInjuryState,eligibility}=require('./injury-substitutions');
+const {lineupLockReason,lineupLocked,slotEligible,eligibleIR}=require('./roster-rules');
 function lineupCapacity(s,slot){return slot==='BENCH'?settingsOf(s).roster.bench:
   slot==='IR'?settingsOf(s).roster.ir:settingsOf(s).roster.starters[slot];}
-function eligibleIR(player){return ['OUT','IR','INJURED_RESERVE','PUP','NFI'].includes(
-  String(player.injuryStatus||'').toUpperCase());}
 function assignLineup(s,actor,body,verifiedSchedule){
   const player=s.players.find(p=>p.id===body.playerId&&p.owner===actor.manager);
   const target=String(body.slot||'');
@@ -1026,6 +915,20 @@ async function processAutomaticTurn(){const data=await snapshot(),d=ensureDraft(
     if(!player){x.status='paused';x.remainingSeconds=x.secondsPerPick;x.deadline=null;
       audit(s,'DRAFT_PAUSED',null,'No eligible players for current pick');return {ok:true};}
     return recordPick(s,player,true);});}
+async function tradeVerifiedGames(){
+  const calendar=await currentNFLCalendar();
+  const games=await liveNFL.loadWeek(calendar.season,calendar.week);
+  if(!Array.isArray(games)||games.length<10)throw Error('Verified NFL schedule unavailable for trades');
+  return games;
+}
+async function processTradeDeadlines(){
+  const {state}=await snapshot();
+  if(!(state.trades||[]).some(t=>t.status==='voting'&&Date.parse(t.deadline)<=Date.now()))return;
+  try{
+    const games=await tradeVerifiedGames();
+    await change(s=>tradeCentral.process(s,{games}));
+  }catch(e){console.warn('Trade processing deferred:',e.message);}
+}
 async function api(req,res,route){
   const url=new URL(req.url,'http://localhost');
   if(req.method==='GET'&&route==='/api/teams'){const {state,accounts}=await snapshot();
@@ -1062,6 +965,32 @@ async function api(req,res,route){
     return send(res,result.status||200,result);}
   const current=await snapshot(),user=findUser(req,current.accounts);
   if(!user)return send(res,401,{error:'Please sign in'});
+  // Trade Central: all actions use the same league state transaction and authoritative trade engine.
+  if(route==='/api/trades'&&req.method==='GET'){
+    await processTradeDeadlines();
+    const latest=await snapshot();
+    return send(res,200,{trades:tradeCentral.publicTrades(latest.state,user.manager)});
+  }
+  if(route==='/api/trades'&&req.method==='POST'){
+    const body=await bodyOf(req);
+    const games=await tradeVerifiedGames();
+    const result=await change((s,accounts)=>tradeCentral.propose(s,accounts,user.manager,body,{games}));
+    return send(res,result.status||200,result);
+  }
+  if(route.startsWith('/api/trades/')&&req.method==='POST'){
+    const parts=route.split('/');
+    if(parts.length!==5)return send(res,404,{error:'Unknown trade action'});
+    const [,apiName,tradesName,id,action]=parts;
+    if(!['accept','decline','withdraw','counter','vote'].includes(action))return send(res,404,{error:'Unknown trade action'});
+    const body=await bodyOf(req),games=['accept','counter'].includes(action)?await tradeVerifiedGames():null;
+    const result=await change((s,accounts)=>{
+      if(action==='accept')return tradeCentral.accept(s,accounts,user.manager,id,{games});
+      if(action==='counter')return tradeCentral.counter(s,accounts,user.manager,id,body,{games});
+      if(action==='vote')return tradeCentral.vote(s,user.manager,id,body.veto===true);
+      return tradeCentral.reject(s,user.manager,id);
+    });
+    return send(res,result.status||200,result);
+  }
   // Commissioner-only, read-only Week 9 reconciliation diagnostic.
   // No tokens, email addresses, passwords or other managers' rosters are returned.
   // Commissioner-only read-only injury event audit. Never mutates league state.
@@ -1378,7 +1307,7 @@ async function api(req,res,route){
         const positions=new Map(directory.players.map(p=>[String(p.id),p.position]));
         historical=await matchupAnalytics.analytics(season,week,settingsOf(current.state).scoring,positions);
         for(const [id,entry] of Object.entries(players)){
-          const h=historical.players[id];if(h){entry.projectionSample=h.projectionSample;entry.historicalWeeklyScores=(historical.playerGames?.[id]||[]).map(g=>g.points).filter(Number.isFinite);}
+          const h=historical.players[id];if(h){entry.projectionSample=h.projectionSample;entry.historicalWeeklyScores=(historical.playerGames?.[id]||[]).map(g=>g.points).filter(Number.isFinite);const completed=(historical.playerGames?.[id]||[]).filter(g=>Number.isFinite(g.points)&&Number(g.week)<week).sort((a,b)=>b.week-a.week);if(completed.length){entry.lastCompletedPoints=completed[0].points;entry.lastCompletedWeek=completed[0].week;}}
         }
         const games=await liveNFL.loadWeek(season,week);
         const opponents={};for(const g of games)for(const side of g.teams){
@@ -2351,22 +2280,26 @@ setTimeout(publishLockerBot,35000);
 setTimeout(publishEditorial,25000);
 setInterval(remindPendingInjuries,60000);
 setInterval(pollLiveInjuries,30000);
-setInterval(faSyncRosterStatuses,5*60000);
-setTimeout(faSyncRosterStatuses,12000);
+setInterval(()=>resourceJobs.run('faSyncRosterStatuses',faSyncRosterStatuses),5*60000);
+setTimeout(()=>resourceJobs.run('faSyncRosterStatuses',faSyncRosterStatuses),12000);
 setTimeout(pollLiveInjuries,18000);
-setInterval(syncPlayerDirectory,15*60*1000);
-setTimeout(syncPlayerDirectory,12000);
+setInterval(()=>resourceJobs.run('syncPlayerDirectory',syncPlayerDirectory),15*60*1000);
+setTimeout(()=>resourceJobs.run('syncPlayerDirectory',syncPlayerDirectory),12000);
 setInterval(activateLeagueSchedule,60000);
 setTimeout(activateLeagueSchedule,3000);
-setInterval(syncNFLScoring,60000);
-setInterval(reconcileHistoricalMatchups,30*60*1000);
-setTimeout(reconcileHistoricalMatchups,90*1000);
+setInterval(()=>resourceJobs.run('syncNFLScoring',syncNFLScoring),60000);
+setInterval(()=>resourceJobs.run('reconcileHistoricalMatchups',reconcileHistoricalMatchups),30*60*1000);
+setTimeout(()=>resourceJobs.run('reconcileHistoricalMatchups',reconcileHistoricalMatchups),90*1000);
 setInterval(updatePostseason,60000);
 setTimeout(updatePostseason,20000);
-setTimeout(syncNFLScoring,6000);
+setTimeout(()=>resourceJobs.run('syncNFLScoring',syncNFLScoring),6000);
 let checkingWaivers=false;setInterval(async()=>{if(checkingWaivers)return;checkingWaivers=true;
   try{await processWaivers();}catch(e){console.error('Waiver processing:',e.message);}finally{checkingWaivers=false;}},30000);
 let checkingTimer=false;setInterval(async()=>{if(checkingTimer)return;checkingTimer=true;
   try{await processAutomaticTurn();}catch(e){console.error('Draft timer error:',e);}finally{checkingTimer=false;}},1000);
+setInterval(()=>processTradeDeadlines().catch(e=>console.warn('Trade deadline:',e.message)),60000).unref();
+// Lightweight, periodic process-level telemetry; does not retain heap snapshots.
+const memoryReport=setInterval(()=>console.info('[memory-health]',JSON.stringify(resourceJobs.status())),60000);
+memoryReport.unref();
 init().then(()=>server.listen(PORT,()=>console.log('Fantasy Audible running on '+PORT)))
   .catch(e=>{console.error('Database startup failed:',e);process.exit(1);});
