@@ -2,6 +2,7 @@ let state=null,manager=null,tab=new URLSearchParams(location.search).get('tab')=
 let chatMessages=[],chatMuted=false,chatMutedManagers=[],chatLastId=0,chatSeenId=Number(localStorage.getItem('audibleChatSeen')||0),chatLoading=false,chatError='',chatDraft='',chatPendingGif=null,giphyOpen=false,giphyResults=[],giphyQuery='',giphyError='',giphyBusy=false,giphyRequest=0;
 let matchupWeek=null,matchupIndex=0,matchupTouchX=null,matchupAutoWeek=null;
 let viewedLeagueTeamId=null;
+let tradeData=[],tradePartner='',tradeGiving=[],tradeReceiving=[],tradeLoading=false,tradeError='';
 let espn=null,espnError='',draftSearch='',draftPosition='ALL',loadingESPN=false;
 let weeklyDirectory={},weeklyUpdatedAt=null,weeklyLoading=false,weeklyLastFetch=0;
 let playerSort='rank';
@@ -189,20 +190,20 @@ async function loadWeeklyDirectory(force=false){
     weeklyUpdatedAt=data.updatedAt||null;
     weeklyLastFetch=Date.now();
   }catch(e){weeklyLastFetch=Date.now();console.warn('Weekly player directory:',e.message);}
-  finally{weeklyLoading=false;if(tab==='Players'||tab==='My Team'||tab==='Matchup')render();}
+  finally{weeklyLoading=false;if(tab==='Players'||tab==='My Team'||tab==='Matchup'||tab==='League')render();}
 }
 function playerNextProjection(x){
   const season=Number(state?.nflDirectorySync?.season||new Date().getFullYear());
   const week=Math.min(18,Math.max(1,Number(state?.nflDirectorySync?.currentWeek||state?.week||selectedMatchupWeek())));
   const key=season+':'+week;
-  const metadata=nflPlayerMetaCache[key]?.data?.players?.[String(x.id)];
+  const metadata=nflPlayerMetaCache[key]?.data?.players?.[String(x.espnId||String(x.id).replace(/^espn-/,''))];
   const game=nflMatchupCache[key]?.data?.teams?.[String(metadata?.teamId||x.nflTeamId||'')];
   if(!game||game.status==='final')return null;
   const value=metadata?.weeklyProjectedPoints;
   return value==null||!Number.isFinite(Number(value))?null:Number(value);
 }
 function weeklyCell(x){
-  const entry=weeklyDirectory[String(x.id)];
+  const entry=weeklyDirectory[String(x.espnId||String(x.id).replace(/^espn-/,''))];
   if(!entry)return {last:null,live:null};
   if(entry.gameStatus==='final')return {last:entry.points,live:null};
   if(entry.gameStatus==='playing')return {last:null,live:entry.points};
@@ -852,7 +853,7 @@ async function fetchNFLMatchups(week){
       }
     }catch(e){console.warn('NFL player metadata:',e.message);}
   }catch(e){console.warn('NFL matchup metadata:',e.message);nflMatchupCache[key]={at:Date.now(),data:{teams:{}}};}
-  finally{nflMatchupPending.delete(key);if((tab==='Matchup'||tab==='Players'||tab==='My Team'||tab==='Home')&&(tab==='My Team'||tab==='Home'||selectedMatchupWeek()===week))render();}
+  finally{nflMatchupPending.delete(key);if((tab==='Matchup'||tab==='Players'||tab==='My Team'||tab==='Home'||tab==='League')&&(tab==='My Team'||tab==='Home'||tab==='League'||selectedMatchupWeek()===week))render();}
 }
 function nflPlayerGame(x){
   const week=selectedMatchupWeek(),season=Number(state?.nflDirectorySync?.season||new Date().getFullYear());
@@ -1396,6 +1397,7 @@ function render(){if(!state||!manager)return;const mine=state.players.filter(x=>
   if(tab==='Postseason')content=postseasonView();
   if(tab==='League')content=`<h1>League</h1>${card('Teams',state.managers.filter(x=>x.claimed).map(x=>
     `<div class="row"><button type="button" style="display:inline-flex;align-items:center;text-align:left;gap:7px;background:transparent;border:0;padding:6px 0;color:inherit;text-decoration:underline;text-underline-offset:3px" onclick='viewLeagueTeam(${jsAttr(x.id)})' aria-label="View ${esc(x.team)} roster">${teamPhoto(x.id,36)} <b>${esc(x.team)}</b></button><span><small>${esc((()=>{const d=postseasonData(),i=d.rows.findIndex(r=>r.id===x.id);return i<0?"In the hunt":d.status[i]})())}</small> · ${fmt(total(x.id))} pts</span></div>`).join(''))}${leagueTeamRosterView()}
+    ${tradeCentralUI()}
     ${card('League roster rules',state.settings?`<p>Starters: ${Object.entries(state.settings.roster.starters).map(([k,v])=>`${k} ${v}`).join(' · ')}</p>
       <p>Bench: ${state.settings.roster.bench} · IR: ${state.settings.roster.ir}</p>`:'<p>Not yet configured.</p>')}`;
   if((tab==='Players'||tab==='My Waivers')&&Date.now()-lastTransactionFetch>90000)loadTransactions();
@@ -1486,13 +1488,114 @@ async function resetSimulatedPoints(){
   if(!player||!confirm('Clear simulated points for this player in the current NFL week? Finalized matchups and live games will not be changed.'))return;
   await act('/api/demo',{action:'reset-points',player});
 }
+async function loadTrades(){
+  if(!token||tradeLoading)return;tradeLoading=true;
+  try{const r=await fetch('/api/trades',{headers:{Authorization:'Bearer '+token}});const d=await r.json();
+    if(!r.ok)throw Error(d.error||'Trades unavailable');tradeData=d.trades||[];tradeError='';}
+  catch(e){tradeError=e.message;}finally{tradeLoading=false;if(tab==='League')render();}
+}
+function tradeToggle(side,id){
+  const list=side==='give'?tradeGiving:tradeReceiving;
+  const next=list.includes(String(id))?list.filter(x=>x!==String(id)):[...list,String(id)];
+  if(side==='give')tradeGiving=next;else tradeReceiving=next;render();
+}
+function tradeSelectTeam(id){tradePartner=id;tradeReceiving=[];render();}
+async function tradeAction(id,action,payload={}){
+  try{await apiPost('/api/trades/'+encodeURIComponent(id)+'/'+action,payload);await loadTrades();toast('Trade updated');}
+  catch(e){toast(e.message);}
+}
+async function tradeSubmit(){
+  if(!tradePartner||!tradeGiving.length||!tradeReceiving.length){toast('Select a trade partner and players from both teams');return;}
+  try{await apiPost('/api/trades',{to:tradePartner,give:tradeGiving,receive:tradeReceiving});
+    tradeGiving=[];tradeReceiving=[];await loadTrades();toast('Trade offer sent');}
+  catch(e){toast(e.message);}
+}
+function tradeLastScore(x){
+  const id=String(x.espnId||String(x.id).replace(/^espn-/,''));
+  const weekly=weeklyDirectory[id];
+  const currentWeek=Number(state?.nflDirectorySync?.currentWeek||state?.week||1);
+  if(weekly?.gameStatus==='final'&&Number(weekly.week)===currentWeek&&Number.isFinite(Number(weekly.points)))return Number(weekly.points);
+  const season=Number(state?.nflDirectorySync?.season||new Date().getFullYear());
+  const meta=nflPlayerMetaCache[season+':'+currentWeek]?.data?.players?.[id];
+  return meta?.lastCompletedPoints!=null&&Number.isFinite(Number(meta.lastCompletedPoints))?Number(meta.lastCompletedPoints):null;
+}
+function tradePlayerRow(x,side){
+  const checked=(side==='give'?tradeGiving:tradeReceiving).includes(String(x.id));
+  const projection=playerNextProjection(x);
+  const last=tradeLastScore(x);
+  return `<div class="row"><label style="display:flex;align-items:center;gap:8px;flex:1"><input type="checkbox" ${checked?'checked':''} onchange='tradeToggle(${jsAttr(side)},${jsAttr(String(x.id))})'>
+    <span><b>${esc(x.name)}</b><br><small>${esc(x.pos)} · ${esc(x.slot)} · Proj ${projection==null?'—':fmt(projection)} · Last ${last==null?'—':fmt(last)}</small></span></label>
+    <button type="button" onclick='openPlayerProfile(${jsAttr(String(x.espnId||x.id))})'>History</button></div>`;
+}
+function tradeAnalysis(){
+  if(!tradePartner||!tradeGiving.length||!tradeReceiving.length)return '<p class="muted small">Select players from both teams to see the projected trade impact.</p>';
+  const owned=state.players.filter(x=>x.owner===manager),theirs=state.players.filter(x=>x.owner===tradePartner);
+  const giving=owned.filter(x=>tradeGiving.includes(String(x.id))),receiving=theirs.filter(x=>tradeReceiving.includes(String(x.id)));
+  const score=x=>playerNextProjection(x);
+  const optimal=xs=>{
+    const slots=state.settings?.roster?.starters||{QB:1,RB:2,WR:2,TE:1,FLEX:1,'D/ST':1,K:1};
+    const available=xs.filter(x=>score(x)!=null).sort((a,b)=>score(b)-score(a));
+    let total=0,used=new Set(),count=0;
+    for(const [slot,n] of Object.entries(slots).filter(([k])=>k!=='FLEX'))for(let i=0;i<n;i++){
+      const p=available.find(x=>!used.has(x.id)&&x.pos===slot);if(p){used.add(p.id);total+=score(p);count++;}}
+    for(let i=0;i<(slots.FLEX||0);i++){const p=available.find(x=>!used.has(x.id)&&['RB','WR','TE'].includes(x.pos));if(p){used.add(p.id);total+=score(p);count++;}}
+    return {total,count};
+  };
+  const beforeMine=optimal(owned),afterMine=optimal(owned.filter(x=>!giving.includes(x)).concat(receiving));
+  const beforeOther=optimal(theirs),afterOther=optimal(theirs.filter(x=>!receiving.includes(x)).concat(giving));
+  const delta=(a,b)=>{const d=b.total-a.total;return (d>=0?'+':'')+fmt(d)+' projected points';};
+  const value=xs=>xs.reduce((sum,x)=>sum+(score(x)||0),0);
+  return `<div style="padding:12px;border:1px solid #657184;border-radius:10px"><h3>Trade strength · projected lineup impact</h3>
+    <p><b>Your team:</b> ${delta(beforeMine,afterMine)}<br><b>${esc(m(tradePartner)?.team||'Partner')}:</b> ${delta(beforeOther,afterOther)}</p>
+    <p class="small">Projected player totals exchanged: ${fmt(value(giving))} vs ${fmt(value(receiving))}. Missing projections are excluded, not treated as confirmed zeros.</p>
+    <p class="muted small">Lineup estimates use available weekly projections and starter-slot requirements. They are advisory, not verified rest-of-season trade values; depth, injuries and schedule can change the outcome.</p></div>`;
+}
+function tradeCentralUI(){
+  const teams=(state.managers||[]).filter(x=>x.claimed&&x.id!==manager);
+  if(!tradePartner||!teams.some(t=>t.id===tradePartner))tradePartner=teams[0]?.id||'';
+  const mine=state.players.filter(x=>x.owner===manager),other=state.players.filter(x=>x.owner===tradePartner);
+  const starters=xs=>xs.filter(x=>!['BENCH','IR'].includes(x.slot));
+  const bench=xs=>xs.filter(x=>x.slot==='BENCH');
+  const ir=xs=>xs.filter(x=>x.slot==='IR');
+  const rosterRows=(xs,side)=>`<h4>Starters (${starters(xs).length})</h4>${starters(xs).map(x=>tradePlayerRow(x,side)).join('')||'<p class="muted small">None</p>'}<h4>Bench (${bench(xs).length})</h4>${bench(xs).map(x=>tradePlayerRow(x,side)).join('')||'<p class="muted small">None</p>'}${ir(xs).length?`<h4>IR (${ir(xs).length})</h4>${ir(xs).map(x=>tradePlayerRow(x,side)).join('')}`:''}`;
+  const selector=`<select onchange="tradeSelectTeam(this.value)">${teams.map(x=>`<option value="${esc(x.id)}" ${x.id===tradePartner?'selected':''}>${esc(x.team)}</option>`).join('')}</select>`;
+  const offers=tradeData.map(t=>{
+    const name=id=>esc(m(id)?.team||id);
+    const names=ids=>(ids||[]).map(id=>esc(p(id)?.name||id)).join(', ');
+    const count=Object.values(t.votes||{}).filter(v=>v==='cast'||v==='veto').length;
+    const veto=t.vetoCount||0;
+    const eligible=t.eligibleVoters?.includes(manager);
+    const actions=t.status==='pending'&&t.to===manager?`<button onclick='tradeAction(${jsAttr(t.id)},"accept")'>Accept</button><button onclick='tradeAction(${jsAttr(t.id)},"decline")'>Decline</button><button onclick='tradeCounter(${jsAttr(t.id)})'>Counter</button>`:
+      t.status==='pending'&&t.from===manager?`<button onclick='tradeAction(${jsAttr(t.id)},"withdraw")'>Withdraw</button>`:
+      t.status==='voting'&&eligible&&!Object.hasOwn(t.votes||{},manager)?`<button onclick='tradeAction(${jsAttr(t.id)},"vote",{veto:false})'>Approve</button><button onclick='tradeAction(${jsAttr(t.id)},"vote",{veto:true})'>Veto</button>`:'';
+    return `<div style="border-bottom:1px solid #657184;padding:12px 0"><b>${name(t.from)} ↔ ${name(t.to)}</b> · ${esc(t.status)}
+      <p class="small">${name(t.from)} sends ${names(t.give)}<br>${name(t.to)} sends ${names(t.receive)}</p>
+      ${t.status==='voting'?`<p class="small">Vetoes: ${veto}/${t.vetoThreshold} required · Voting ends ${esc(new Date(t.deadline).toLocaleString())} · ${count}/${t.eligibleVoters.length} votes cast</p>`:''}
+      ${t.failure?`<p class="small">${esc(t.failure)}</p>`:''}<div class="actions">${actions}</div></div>`;
+  }).join('');
+  return card('Trade Central',`<p class="muted small">Select starters or bench players. Projected points are weekly estimates; player history opens the existing detailed profile. Trade evaluation is advisory, not a guaranteed valuation.</p>
+    ${tradeError?`<p>${esc(tradeError)}</p>`:''}
+    <h3>Your roster · ${esc(m(manager)?.team||'')}</h3>${rosterRows(mine,'give')}
+    <h3>Trade partner ${selector}</h3>${rosterRows(other,'receive')}
+    <p><b>Selected:</b> ${tradeGiving.length} outgoing · ${tradeReceiving.length} incoming</p>${tradeAnalysis()}
+    <button onclick="tradeSubmit()" ${!tradePartner?'disabled':''}>Propose Trade</button>
+    <h3>Offers and league voting</h3><p class="muted small">Accepted offers enter a 24-hour vote. A majority of eligible non-trading teams must veto. Eligible teams are frozen at acceptance.</p>
+    <button onclick="loadTrades()">Refresh trades</button>${offers||'<p>No trade offers yet.</p>'}`);
+}
+async function tradeCounter(id){
+  const t=tradeData.find(x=>x.id===id);if(!t)return;
+  if(!confirm('Counter with your current selections? Your offer will replace the incoming offer.'))return;
+  try{await apiPost('/api/trades/'+encodeURIComponent(id)+'/counter',{give:tradeGiving,receive:tradeReceiving});
+    tradeGiving=[];tradeReceiving=[];await loadTrades();toast('Counteroffer sent');}
+  catch(e){toast(e.message);}
+}
 function changeTab(next){closeMatchupGameStats();if(next==='Matchup'&&tab!=='Matchup'){matchupWeek=null;matchupAutoWeek=null;matchupIndex=0;}tab=next;render();if(tab==='Draft')syncServerClock();
   if(tab==='Draft'||tab==='Players')loadESPN();
   if(tab==='My Team'){loadWeeklyDirectory();fetchNFLMatchups(Math.min(18,Math.max(1,Number(state?.nflDirectorySync?.currentWeek||state?.week||1))));}
   if(tab==='Players'){loadWeeklyDirectory();fetchNFLMatchups(Math.min(18,Math.max(1,Number(state?.nflDirectorySync?.currentWeek||state?.week||selectedMatchupWeek()))));}
   if(tab==='Matchup'){loadWeeklyDirectory();fetchNFLMatchups(selectedMatchupWeek());}
   if(tab==='Players'||tab==='My Waivers')loadTransactions();
-  if(tab==='Locker Room')loadChat();}
+  if(tab==='Locker Room')loadChat();if(tab==='League'){loadTrades();loadWeeklyDirectory();fetchNFLMatchups(Math.min(18,Math.max(1,Number(state?.nflDirectorySync?.currentWeek||state?.week||1))));}}
 function logout(){localStorage.removeItem('audibleToken');location.reload();}
 function authForm(){$('tabs').innerHTML='';$('connection').textContent='● Sign in';
   $('app').innerHTML=`<section class="card" style="max-width:500px;margin:auto"><h1>Fantasy Audible</h1>
